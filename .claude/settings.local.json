@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 scripts/copilot.py *)",
+      "Bash(python3 -m py_compile scripts/copilot.py)",
+      "Bash(unzip *)",
+      "Bash(python3 -c *)",
+      "WebFetch(domain:x.com)",
+      "WebSearch"
+    ]
+  }
+}

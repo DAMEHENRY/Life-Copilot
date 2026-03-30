@@ -1,0 +1,377 @@
+# Life Copilot — 使用手册
+
+> 版本：v4.0（2026-03-30）
+> 运行环境：Claude Code + Obsidian + macOS
+> 核心脚本：`scripts/copilot.py`
+
+---
+
+## 目录
+
+1. [系统概览](#1-系统概览)
+2. [目录结构](#2-目录结构)
+3. [三种对话模式](#3-三种对话模式)
+4. [脚本命令全览](#4-脚本命令全览)
+5. [记忆系统](#5-记忆系统)
+6. [日程管理系统](#6-日程管理系统)
+7. [Quant 任务产物协议](#7-quant-任务产物协议)
+8. [写回守则](#8-写回守则)
+9. [文件格式约定](#9-文件格式约定)
+10. [日常维护](#10-日常维护)
+11. [常见问题](#11-常见问题)
+
+---
+
+## 1. 系统概览
+
+Life Copilot 是一个本地 AI 个人操作系统，运行在 Obsidian 工作目录上，通过 Claude Code 提供智能分析与写回能力。
+
+**核心设计原则（v4.0）：**
+
+- **直读源文件**：Claude Code 直接读取日记、记忆、路线图等原始文件，无需预生成上下文包
+- **Append-only 数据**：洞察日志（insights.jsonl）、日程历史只增不改
+- **两层路由**：CLAUDE.md（路由 + 文件地图）→ mode prompt（完整行为规则）
+- **本地优先**：所有数据在 iCloud 同步的 Obsidian 目录，无外部数据库依赖
+
+**v4.0 相比 v3.0 的主要变化：**
+
+| 项目 | v3.0 | v4.0 |
+|------|------|------|
+| 脚本行数 | 2,376 行 | 884 行 |
+| CLAUDE.md 行数 | 228 行 | ~80 行 |
+| 每次交互上下文 | ~80KB（预生成上下文包） | ~15-25KB（直读源文件） |
+| 索引系统 | 词法 + 语义双索引（10.8MB） | 无（Grep 替代） |
+| 子命令数 | 16 | 11 |
+| 间接层数 | 4 层 | 1 层 |
+
+---
+
+## 2. 目录结构
+
+```
+Life/                                     ← Obsidian 工作目录根
+├── CLAUDE.md                             ← AI 行为规则（文件地图 + 模式路由 + 护栏）
+├── README.md                             ← 本文件
+│
+├── scripts/
+│   └── copilot.py                        ← 核心脚本（884 行，只含写回 + quant 生命周期）
+│
+├── journal/                              ← 日记模块
+│   ├── YYYY/MM/YYYY-MM-DD.md            ← 每日日记
+│   ├── memory.md                         ← 长期记忆（结构化分区，Claude 直读）
+│   └── insights.jsonl                    ← 洞察日志（append-only）
+│
+├── quant/                                ← 职业/Quant 模块
+│   ├── state.md                          ← 当前状态快照（脚本自动同步）
+│   ├── roadmap.md                        ← 路线图（含指向日程的指针）
+│   ├── schedules/                        ← 日程归档（append-only）
+│   │   └── YYYY/MM/sched-YYYY-MM-DD.md ← 每日日程文件
+│   ├── arsenal/                          ← XP 任务产物
+│   │   ├── xp-XX-mission-guide.md
+│   │   ├── xp-XX-session-notes.md
+│   │   └── xp-XX-summary.md
+│   └── resumes/                          ← 简历文件
+│
+├── prompts/                              ← 模式行为规则（Obsidian 可见）
+│   ├── diary-mode.md
+│   ├── quant-mode.md
+│   └── chat-mode.md
+│
+├── resources/                            ← 学习资料（PDF、课程等）
+├── inbox/                                ← 零摩擦捕获缓冲区
+├── templates/                            ← 日记模板
+└── archives/                             ← 历史存档（论文、竞赛等）
+```
+
+---
+
+## 3. 三种对话模式
+
+系统根据输入内容自动判断模式。
+
+---
+
+### 3.1 Diary Mode（日记模式）
+
+**触发方式：** 输入 `#YYYY-MM-DD`（例如 `#2026-03-30`）
+
+**AI 执行流程（无预处理命令）：**
+
+Claude 直接读取：
+1. `journal/YYYY/MM/YYYY-MM-DD.md` — 当日日记
+2. `journal/memory.md` — 长期记忆（Active Hypotheses 区块优先）
+3. 目标日期前后 2-3 天的日记 — 时间上下文
+4. `prompts/diary-mode.md` — 模式行为规则
+
+**写回日记（需要时）：**
+
+```bash
+# 先把 AI 分析写到临时文件（路径自定）
+# 再执行写回（只允许追加到 ## What Life Copilot Said 之后）
+python3 scripts/copilot.py writeback-journal \
+  --date 2026-03-30 \
+  --input-file <临时文件路径>
+```
+
+---
+
+### 3.2 Quant Mode（量化模式）
+
+**触发方式：** 输入 `#quant`，或消息中出现 `XP-` / `roadmap` / `Active Schedule`
+
+**AI 执行流程：**
+
+```bash
+# Step 1: 同步 quant-state（从日记提取最新执行反馈）
+python3 scripts/copilot.py sync-quant-state --date 2026-03-30 --allow-missing-journal
+
+# Step 2: 更新明日日程（有日期保护，若已是今日/明日则跳过）
+python3 scripts/copilot.py update-schedule --date 2026-03-30
+```
+
+然后 Claude 直接读取：
+- `quant/state.md` — 当前状态
+- `quant/roadmap.md` — 路线图（只关注未完成 XP + 里程碑）
+- 具体 XP 的 `quant/arsenal/` 文件（若讨论具体任务）
+- `prompts/quant-mode.md` — 模式行为规则
+
+---
+
+### 3.3 Chat Mode（通用对话模式）
+
+**触发方式：** 不属于 Diary/Quant 的普通对话
+
+Claude 直接读取：
+- `journal/memory.md` — 长期记忆
+- 按需 Grep 搜索 `journal/` 目录获取历史证据
+- `prompts/chat-mode.md` — 模式行为规则
+
+---
+
+## 4. 脚本命令全览
+
+所有命令格式：`python3 scripts/copilot.py <subcommand> [options]`
+
+### Quant 状态管理
+
+| 命令 | 用途 |
+|------|------|
+| `sync-quant-state --date YYYY-MM-DD [--allow-missing-journal]` | 从日记同步最新 XP 进度到 state.md；自动为有 session-notes 的 focus XP 生成 summary |
+| `update-schedule --date YYYY-MM-DD` | 生成明日日程文件并更新 roadmap 指针（有日期保护） |
+| `sync-roadmap-stats` | 重算 XP 完成率并更新 roadmap 头部 Total Readiness |
+
+---
+
+### Quant 任务产物
+
+| 命令 | 用途 | 输出文件 |
+|------|------|----------|
+| `quant-mission --xp XP-XX [--date YYYY-MM-DD] [--force]` | 生成 XP 任务 Mission Guide 脚手架 | `quant/arsenal/xp-xx-mission-guide.md` |
+| `quant-note --xp XP-XX --type <类型> --content "<内容>"` | 追加执行笔记 | `quant/arsenal/xp-xx-session-notes.md` |
+| `quant-summary --xp XP-XX [--date YYYY-MM-DD] [--force]` | 生成 XP 完结总结 | `quant/arsenal/xp-xx-summary.md` |
+
+`--type` 可选值：`question` / `decision` / `issue` / `result` / `insight`
+
+---
+
+### 记忆写回
+
+| 命令 | 用途 |
+|------|------|
+| `writeback-journal --date YYYY-MM-DD --input-file <path>` | 把 AI 分析写回日记（只追加到 `## What Life Copilot Said` 之后） |
+| `writeback-thought --date YYYY-MM-DD --title "<标题>" --input-file <path>` | 把对话内容写入日记 Thoughts & Reflections，并同步更新 Daily Log |
+| `writeback-memory --date YYYY-MM-DD --kind "<类型>" --content "<内容>"` | 写入长期记忆 memory.md |
+| `append-insight --date YYYY-MM-DD --kind "<类型>" --content "<内容>"` | **推荐**：同时写入 insights.jsonl + memory.md |
+
+---
+
+### 记忆维护
+
+| 命令 | 用途 | 何时执行 |
+|------|------|---------|
+| `compact-memory` | 把 30 天以前的 Active Hypotheses 移入 Legacy Stream | 每月一次 |
+
+---
+
+## 5. 记忆系统
+
+### 5.1 长期记忆结构（journal/memory.md）
+
+文件分为四个区块：
+
+| 区块 | 用途 | 更新频率 |
+|------|------|----------|
+| `Stable Profile` | 人格基线、偏好、语言模式 | 低频（月级） |
+| `Active Hypotheses (Last 30 Days)` | 最近 30 天的高相关动态模式 | 每次有洞察时追加 |
+| `Canonical Memories` | 多次验证后沉淀的高置信记忆 | 手动提升 |
+| `Legacy Stream (Pre-v2)` | 历史存量原始记录 | `compact-memory` 自动归档 |
+
+新洞察**推荐**用 `append-insight` 命令写入，同时更新两个地方：
+1. `journal/insights.jsonl`（append-only，结构化存储）
+2. `journal/memory.md` 的 Active Hypotheses 区块
+
+### 5.2 insights.jsonl 格式
+
+每行一个 JSON 对象，第一行为 schema 定义：
+
+```jsonl
+{"_schema": "insight", "_version": "1.0", "_description": "Append-only log of cognitive insights."}
+{"id": "insight_2026-03-28_118", "date": "2026-03-28", "type": "insight", "name": "Apple Watch 生物预警效力验证", "content": "...", "refs": ["2026-03-28"], "status": "active"}
+```
+
+字段说明：
+- `type`：洞察类型（`insight` / `cognition` / `pattern` / `behavior` 等）
+- `name`：英文名称（从内容中括号自动提取，如 `(Self-Duality Poem)`）
+- `refs`：关联的日记日期（从 `[[YYYY-MM-DD]]` 自动提取）
+- `status`：`active`（默认）/ `archived`
+
+---
+
+## 6. 日程管理系统
+
+### 6.1 文件结构
+
+```
+quant/schedules/
+  2026/
+    03/
+      sched-2026-03-30.md    ← 命名格式：sched-YYYY-MM-DD.md
+    04/
+      sched-2026-04-01.md
+```
+
+**命名前缀 `sched-` 的原因：** 避免与日记文件（`YYYY-MM-DD.md`）在 Obsidian 中产生 wikilink 命名冲突。
+
+### 6.2 roadmap 指针
+
+`quant/roadmap.md` 中的 Active Schedule 区块只存指针：
+
+```markdown
+## ⚡️ Active Schedule
+*Current: [[sched-2026-03-30]]* → `quant/schedules/2026/03/sched-2026-03-30.md`
+
+> 日程文件统一管理于 `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md`，此处只保留指针。
+```
+
+### 6.3 日期保护机制
+
+`update-schedule` 检查当前日程日期，若目标日期差 ≤ 1 天则**跳过覆写**（保护手动调整的计划）。若需强制重新生成，先删除对应 `sched-*.md` 文件再运行命令。
+
+---
+
+## 7. Quant 任务产物协议
+
+每个 XP 任务的完整生命周期：
+
+### Step 1: 开工前 — 生成 Mission Guide
+
+```bash
+python3 scripts/copilot.py quant-mission --xp XP-64 --date 2026-03-30
+```
+
+AI 读取生成的 `xp-64-mission-guide.md`，填充 `<!-- AI_FILL: ... -->` 区块，生成教学文档。
+
+Mission Guide 必须包含（`prompts/quant-mode.md` Learning Collaboration Protocol）：
+- **Conceptual Why** — 这个知识点为什么重要，在 Quant 工作流中的位置
+- **Core Formula** — 核心公式，附直觉解释（不允许裸公式）
+- **Starter Scaffold** — 代码脚手架或推导骨架，含 `# TODO` 注释
+- **Checkpoint Questions** — 关键节点的自检问题
+- **Pitfall Alerts** — 这个 XP 特有的常见陷阱
+
+大段代码或数学推导必须存为**独立副产品文件**（如 `xp-64-derivation-guide.md`），在 Mission Guide 中链接。
+
+### Step 2: 执行中 — 追加笔记
+
+```bash
+python3 scripts/copilot.py quant-note \
+  --xp XP-64 \
+  --type question \
+  --content "行列式为 0 时为什么矩阵不可逆？"
+```
+
+### Step 3: 收工 — 生成 Summary
+
+```bash
+python3 scripts/copilot.py quant-summary --xp XP-64 --date 2026-03-30
+```
+
+或由 `sync-quant-state` 在写日记时自动触发（推荐）。
+
+### 产物文件位置
+
+```
+quant/arsenal/
+  xp-64-mission-guide.md      ← 教学文档（含 AI 填充内容）
+  xp-64-session-notes.md      ← 执行笔记（append-only）
+  xp-64-summary.md            ← 完结总结（自动生成）
+  xp-64-derivation-guide.md   ← 副产品（可选）
+```
+
+---
+
+## 8. 写回守则
+
+| 规则 | 说明 |
+|------|------|
+| 临时文件路径自定 | 写回前先把内容存为临时文件，路径可在工作区内任意选择 |
+| 禁用 heredoc | 禁止 `--input-file - <<EOF ... EOF` 格式 |
+| 日记边界 | 只能在 `## What Life Copilot Said` 标题之后追加 |
+| JSONL 只追加 | `insights.jsonl` 等 JSONL 文件只能 append，禁止行级编辑或删除 |
+| 归档代替删除 | 需要"删除"一条 insight 时，将其 `status` 改为 `"archived"` |
+
+---
+
+## 9. 文件格式约定
+
+| 格式 | 用途 | 特性 |
+|------|------|------|
+| **JSONL** | append-only 日志（insights.jsonl） | 每行自包含，流式友好，天然防覆写 |
+| **Markdown** | 叙事内容（日记、记忆、指南） | Obsidian 兼容，可 diff，wikilink 支持 |
+
+**JSONL schema 行约定：** 每个 JSONL 文件第一行为 schema 定义：
+```json
+{"_schema": "insight", "_version": "1.0", "_description": "..."}
+```
+
+---
+
+## 10. 日常维护
+
+### 每日
+`sync-quant-state` 和 `update-schedule` 在进入 Quant Mode 时自动执行，无需额外操作。
+
+### 每月（手动）
+
+```bash
+# 压缩长期记忆：把 30 天前的 Active Hypotheses 移入 Legacy Stream
+python3 scripts/copilot.py compact-memory
+```
+
+---
+
+## 11. 常见问题
+
+**Q: 为什么 `update-schedule` 没有生成新日程？**
+A: 日期保护触发。当前日程已是今日或明日，系统跳过覆写。直接编辑对应的 `sched-*.md` 文件即可手动调整。
+
+**Q: v4.0 为什么不再有 prepare-* 命令？**
+A: Claude Code 可以直接读文件，预生成 80KB 上下文包反而引入了大量噪声。现在直读 3-5 个源文件（~15-25KB），信噪比更高，速度更快。
+
+**Q: 为什么 Obsidian 里的 `[[2026-03-30]]` 指向日记而不是日程？**
+A: 日程文件命名为 `sched-2026-03-30.md`，有 `sched-` 前缀，避免冲突。引用日程用 `[[sched-2026-03-30]]`。
+
+**Q: 如何手动写入一条洞察？**
+```bash
+python3 scripts/copilot.py append-insight \
+  --date 2026-03-30 \
+  --kind insight \
+  --content "你的洞察内容，支持 [[2026-03-30]] 这样的 wikilink 引用"
+```
+
+**Q: 如何查看某天的日程？**
+直接打开 `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md`，或在 Obsidian 中搜索 `sched-`。
+
+
+---
+
+*最后更新：[[2026-03-30]]*
