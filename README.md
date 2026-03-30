@@ -1,7 +1,7 @@
 # Life Copilot — 使用手册
 
-> 版本：v4.0（2026-03-30）
-> 运行环境：Claude Code + Obsidian + macOS
+> 版本：v4.1（2026-03-30）
+> 运行环境：Claude Code (或任意代理 AI) + Obsidian + macOS
 > 核心脚本：`scripts/copilot.py`
 
 ---
@@ -19,6 +19,7 @@
 9. [文件格式约定](#9-文件格式约定)
 10. [日常维护](#10-日常维护)
 11. [常见问题](#11-常见问题)
+12. [GitHub 部署与隐私保护](#12-github-部署与隐私保护)
 
 ---
 
@@ -52,13 +53,15 @@ Life Copilot 是一个本地 AI 个人操作系统，运行在 Obsidian 工作�
 Life/                                     ← Obsidian 工作目录根
 ├── CLAUDE.md                             ← AI 行为规则（文件地图 + 模式路由 + 护栏）
 ├── README.md                             ← 本文件
+├── .gitignore                            ← 🌟 隐私防洪堤（拦截日记、目标与配置不入库）
 │
 ├── scripts/
-│   └── copilot.py                        ← 核心脚本（884 行，只含写回 + quant 生命周期）
+│   └── copilot.py                        ← 核心脚本（只含写回 + quant 生命周期）
 │
-├── journal/                              ← 日记模块
+├── journal/                              ← 日记模块 (绝对私密区)
 │   ├── YYYY/MM/YYYY-MM-DD.md            ← 每日日记
-│   ├── memory.md                         ← 长期记忆（结构化分区，Claude 直读）
+│   ├── memory.md                         ← 长期热记忆（结构化分区，Claude 直读）
+│   ├── memory-archive.md                 ← 🌟 记忆冷归档（过期假设自动沉淀至此）
 │   └── insights.jsonl                    ← 洞察日志（append-only）
 │
 ├── quant/                                ← 职业/Quant 模块
@@ -204,7 +207,7 @@ Claude 直接读取：
 | `Stable Profile` | 人格基线、偏好、语言模式 | 低频（月级） |
 | `Active Hypotheses (Last 30 Days)` | 最近 30 天的高相关动态模式 | 每次有洞察时追加 |
 | `Canonical Memories` | 多次验证后沉淀的高置信记忆 | 手动提升 |
-| `Legacy Stream (Pre-v2)` | 历史存量原始记录 | `compact-memory` 自动归档 |
+| `journal/memory-archive.md` | 🌟 冷数据区（过期的假设和历史流均归档于此） | `compact-memory` 自动归档 |
 
 新洞察**推荐**用 `append-insight` 命令写入，同时更新两个地方：
 1. `journal/insights.jsonl`（append-only，结构化存储）
@@ -343,7 +346,7 @@ quant/arsenal/
 ### 每月（手动）
 
 ```bash
-# 压缩长期记忆：把 30 天前的 Active Hypotheses 移入 Legacy Stream
+# 压缩长期记忆：把 30 天前的 Active Hypotheses 从热内存剥离并存入 memory-archive.md 冷归档
 python3 scripts/copilot.py compact-memory
 ```
 
@@ -371,6 +374,19 @@ python3 scripts/copilot.py append-insight \
 **Q: 如何查看某天的日程？**
 直接打开 `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md`，或在 Obsidian 中搜索 `sched-`。
 
+---
+
+## 12. GitHub 部署与隐私保护
+
+Life Copilot v4.1 原生支持**“开源系统引擎，私有核心数据”**的代码库部署架构。
+
+根目录下的 `.gitignore` 作为一个硬性“防洪堤”，彻底拦截了以下敏感数据进入版本库：
+- 日记区 (`journal/`)：含所有记忆池与每日复盘
+- Quant 个人内容区 (`quant/` 下的各项目录、学习资料、简历和明确的目标大纲)
+- 附件及缓冲区 (`resources/`, `inbox/`, `archives/`, `.obsidian/`)
+
+**无负担的极客部署：**
+在终端直接无脑执行 `git add .` -> `git push` 即可。Git 只会提取并推送如 `scripts/`、`prompts/` 等驱动框架，完美开源工作流，同时绝对保护你的生活隐私。
 
 ---
 
