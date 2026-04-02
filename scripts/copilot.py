@@ -723,11 +723,6 @@ def cmd_append_insight(args: argparse.Namespace) -> None:
     }
     with open(INSIGHTS_FILE, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    # Also write to memory.md
-    if MEMORY_FILE.exists():
-        mem = ensure_memory_sections(read_text(MEMORY_FILE))
-        entry = f"[{args.date}] {args.kind}: {args.content.strip()}"
-        write_text(MEMORY_FILE, insert_line_under_section(mem, "Active Hypotheses (Last 30 Days)", entry))
     print(str(INSIGHTS_FILE))
 
 
