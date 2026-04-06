@@ -4,7 +4,7 @@ Life Copilot — lean orchestration utilities.
 
 Only structural write commands that are unsafe for Claude to do freehand:
 writeback-journal, writeback-thought, writeback-memory, append-insight,
-compact-memory, quant-mission, quant-note, quant-summary, sync-quant-state,
+compact-memory, quant-mission, sync-quant-state,
 sync-roadmap-stats, update-schedule.
 """
 
@@ -39,10 +39,7 @@ DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 JOURNAL_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 XP_OPEN_RE = re.compile(r"^- \[ \] \*\*(XP-[^*]+)\*\*: (.+)$")
 XP_DONE_RE = re.compile(r"^- \[x\] \*\*(XP-[^*]+)\*\*: (.+)$", re.IGNORECASE)
-SESSION_NOTE_RE = re.compile(
-    r"^- \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\]\[(question|decision|issue|result|insight)\]\s+(.+)$",
-    re.IGNORECASE,
-)
+XP_TAG_RE = re.compile(r"#(course|lab)\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -116,20 +113,25 @@ def find_xp_task(xp_id: str) -> str:
     return ""
 
 
+def find_xp_tag(xp_id: str) -> str:
+    """Return 'course' or 'lab' based on #tag in roadmap. Default: 'lab'."""
+    if not ROADMAP_FILE.exists():
+        return "lab"
+    needle = normalize_xp_id(xp_id)
+    for line in read_text(ROADMAP_FILE).splitlines():
+        m = XP_OPEN_RE.match(line.strip()) or XP_DONE_RE.match(line.strip())
+        if m and normalize_xp_id(m.group(1)) == needle:
+            tag_m = XP_TAG_RE.search(line)
+            return tag_m.group(1).lower() if tag_m else "lab"
+    return "lab"
+
+
 def quant_mission_file(xp_id: str) -> Path:
     return QUANT_ARSENAL_DIR / f"{xp_slug(xp_id)}-mission-guide.md"
 
 
-def quant_summary_file(xp_id: str) -> Path:
-    return QUANT_ARSENAL_DIR / f"{xp_slug(xp_id)}-summary.md"
 
 
-def quant_notes_file(xp_id: str) -> Path:
-    return QUANT_ARSENAL_DIR / f"{xp_slug(xp_id)}-session-notes.md"
-
-
-def _today_time_label() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
 def format_day_label(d: date) -> str:
@@ -310,31 +312,6 @@ def cmd_sync_quant_state(args: argparse.Namespace) -> None:
     save_quant_state(payload)
     print(str(QUANT_STATE_FILE))
 
-    # Auto-generate summaries for focus XPs with session-notes but no run block today
-    if journal_path.exists():
-        marker = f"## Run {today.isoformat()}"
-        for xp_id in focus_items:
-            nf = quant_notes_file(xp_id)
-            if not nf.exists():
-                continue
-            sf = quant_summary_file(xp_id)
-            if sf.exists() and marker in read_text(sf):
-                continue
-            notes = parse_session_notes(read_text(nf))
-            mf = quant_mission_file(xp_id)
-            mt = read_text(mf) if mf.exists() else ""
-            run_block = render_summary_run_block(xp_id, today, notes)
-            if sf.exists():
-                updated = read_text(sf).rstrip() + "\n\n---\n\n" + run_block + "\n"
-            else:
-                header = [f"# {xp_id} Summary", "", "## Mission Reference"]
-                header.append(f"- `{mf.relative_to(ROOT)}`" if mf.exists() else "- (mission guide missing)")
-                header.append("")
-                if mt:
-                    header += ["## Mission Snapshot (Head)", "\n".join(mt.splitlines()[:40]), ""]
-                updated = "\n".join(header).rstrip() + "\n\n" + run_block + "\n"
-            write_text(sf, updated)
-            print(f"[auto-summary] {sf.relative_to(ROOT)}")
 
 
 def cmd_update_schedule(args: argparse.Namespace) -> None:
@@ -487,54 +464,18 @@ def render_quant_mission(xp_id: str, xp_task: str, d: date) -> str:
         "    Follow the Learning Collaboration Protocol in prompts/quant-mode.md.",
         "    Classify as THEORY / CODE / HYBRID and generate accordingly.",
         "    Replace this block with your generated content. -->", "",
-        "## Session Notes Anchor",
-        f"- use `{quant_notes_file(xp_id).relative_to(ROOT)}` to record question/decision/issue/result.", "",
     ])
 
-
-def parse_session_notes(text: str) -> List[Tuple[str, str, str]]:
-    out = []
-    for line in text.splitlines():
-        m = SESSION_NOTE_RE.match(line.strip())
-        if m:
-            out.append((m.group(1), m.group(2).lower(), m.group(3).strip()))
-    return out
-
-
-def render_summary_run_block(xp_id: str, d: date, notes: List[Tuple[str, str, str]]) -> str:
-    d_str = d.isoformat()
-    daily_notes = [n for n in notes if n[0].startswith(d_str)]
-    grouped: Dict[str, List[str]] = {"question": [], "decision": [], "issue": [], "result": [], "insight": []}
-    for _, kind, body in daily_notes:
-        grouped.setdefault(kind, []).append(body)
-
-    def top(items: List[str], n: int = 5) -> List[str]:
-        seen: set = set()
-        return [x for x in items if x not in seen and not seen.add(x)][:n]  # type: ignore
-
-    q, dc, i, r, s = (top(grouped.get(k, []), 6) for k in ["question", "decision", "issue", "result", "insight"])
-
-    def bullets(items: List[str]) -> str:
-        return "\n".join(f"- {x}" for x in items) if items else "- (none)"
-
-    next_candidates = r or dc or i
-    return "\n".join([
-        f"## Run {d.isoformat()}", "",
-        "### 📌 Overview", f"- XP: {xp_id}", f"- Notes captured: {len(daily_notes)}", "",
-        "### ❓ Key Questions", bullets(q), "",
-        "### ✅ Decisions", bullets(dc), "",
-        "### 🧱 Issues & Fixes", bullets(i), "",
-        "### 🧪 Results", bullets(r), "",
-        "### 🧠 Reusable Insights", bullets(s), "",
-        "### 🚀 Next Action",
-        f"- Next: {next_candidates[0]}" if next_candidates else "- Next: define one 60-120 min closed-loop task for next session.", "",
-    ])
 
 
 def cmd_quant_mission(args: argparse.Namespace) -> None:
     QUANT_ARSENAL_DIR.mkdir(parents=True, exist_ok=True)
     d = parse_date_or_today(args.date)
     xp_id = normalize_xp_id(args.xp)
+    tag = find_xp_tag(xp_id)
+    if tag == "course" and not args.force:
+        print(f"[skip] {xp_id} is tagged #course — mission guide not needed. Use --force to override.")
+        return
     out = quant_mission_file(xp_id)
     if out.exists() and not args.force:
         print(str(out))
@@ -542,42 +483,6 @@ def cmd_quant_mission(args: argparse.Namespace) -> None:
     write_text(out, render_quant_mission(xp_id, find_xp_task(xp_id), d).rstrip() + "\n")
     print(str(out))
 
-
-def cmd_quant_note(args: argparse.Namespace) -> None:
-    QUANT_ARSENAL_DIR.mkdir(parents=True, exist_ok=True)
-    xp_id = normalize_xp_id(args.xp)
-    content = args.content.strip()
-    if not content:
-        raise ValueError("content is required")
-    nf = quant_notes_file(xp_id)
-    if not nf.exists():
-        write_text(nf, f"# {xp_id} Session Notes\n\n- created: {datetime.now().isoformat(timespec='seconds')}\n- format: - [YYYY-MM-DD HH:MM][type] content\n\n")
-    with nf.open("a", encoding="utf-8") as f:
-        f.write(f"- [{_today_time_label()}][{args.type.lower()}] {content}\n")
-    print(str(nf))
-
-
-def cmd_quant_summary(args: argparse.Namespace) -> None:
-    QUANT_ARSENAL_DIR.mkdir(parents=True, exist_ok=True)
-    d = parse_date_or_today(args.date)
-    xp_id = normalize_xp_id(args.xp)
-    sf = quant_summary_file(xp_id)
-    mf = quant_mission_file(xp_id)
-    mt = read_text(mf) if mf.exists() else ""
-    nt = read_text(quant_notes_file(xp_id)) if quant_notes_file(xp_id).exists() else ""
-    run_block = render_summary_run_block(xp_id, d, parse_session_notes(nt))
-
-    if sf.exists() and not args.force:
-        updated = read_text(sf).rstrip() + "\n\n---\n\n" + run_block + "\n"
-    else:
-        header = [f"# {xp_id} Summary", "", "## Mission Reference"]
-        header.append(f"- `{mf.relative_to(ROOT)}`" if mf.exists() else "- (mission guide missing)")
-        header.append("")
-        if mt:
-            header += ["## Mission Snapshot (Head)", "\n".join(mt.splitlines()[:40]), ""]
-        updated = "\n".join(header).rstrip() + "\n\n" + run_block + "\n"
-    write_text(sf, updated)
-    print(str(sf))
 
 
 # --- Writeback commands ---
@@ -880,18 +785,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--date", required=False)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_quant_mission)
-
-    s = sub.add_parser("quant-note")
-    s.add_argument("--xp", required=True)
-    s.add_argument("--type", required=True, choices=["question", "decision", "issue", "result", "insight"])
-    s.add_argument("--content", required=True)
-    s.set_defaults(func=cmd_quant_note)
-
-    s = sub.add_parser("quant-summary")
-    s.add_argument("--xp", required=True)
-    s.add_argument("--date", required=False)
-    s.add_argument("--force", action="store_true")
-    s.set_defaults(func=cmd_quant_summary)
 
     s = sub.add_parser("writeback-thought")
     s.add_argument("--date", required=True)

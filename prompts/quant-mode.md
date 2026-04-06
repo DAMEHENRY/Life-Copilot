@@ -14,20 +14,14 @@ Entering Quant Mode requires executing:
 
 Then read: `quant/state.md`, `quant/roadmap.md` (focus on unchecked XP items + milestones).
 
-Mission / Summary workflow (recommended):
-1. Before starting work, generate a mission guide (two steps):
-   a. Run: `python3 scripts/copilot.py quant-mission --xp XP-XX --date <today>`
-   b. Read the generated file and fill in `<!-- AI_FILL: ... -->` sections according to the **Learning Collaboration Protocol** below.
-2. During execution, record key discussion points **immediately after each substantive exchange** (do not batch at end):
-   - After the user asks a question and AI explains → `quant-note --type question`
-   - After a conceptual confusion is resolved → `quant-note --type insight`
-   - After a design/approach decision is made → `quant-note --type decision`
-   - After an error or fix is identified → `quant-note --type issue`
-   - After a derivation or experiment produces output → `quant-note --type result`
-   `python3 scripts/copilot.py quant-note --xp XP-XX --type <type> --content "<content>"`
-3. Summary is auto-generated in two cases (no manual step needed):
-   - When the user confirms XP completion → AI runs `quant-summary` immediately
-   - When the user writes their daily journal → `sync-quant-state` auto-generates summary for all current_focus XPs with session-notes
+Mission workflow (tag-conditional):
+
+XPs in `quant/roadmap.md` carry an Obsidian inline tag: `#lab` (self-directed experiment/implementation) or `#course` (following a course/textbook). Default if untagged: `#lab`.
+
+- **`#lab` XP** — generate a mission guide before starting:
+   1. Run: `python3 scripts/copilot.py quant-mission --xp XP-XX --date <today>`
+   2. Read the generated file and fill in `<!-- AI_FILL: ... -->` sections according to the **Learning Collaboration Protocol** below.
+- **`#course` XP** — skip mission guide. Go directly into Learning Q&A mode. Focus on answering questions, clarifying concepts, and producing artifacts (derivation guides, code scaffolds) in `quant/arsenal/` as needed during conversation.
 
 ## Learning Collaboration Protocol (CRITICAL)
 
@@ -52,6 +46,7 @@ Task classification guidance:
 - `quant/roadmap.md`
 - If discussing a specific XP, read the corresponding files in `quant/arsenal/`
 - Reference recent journal entries when needed (use Grep to search `journal/`)
+- **Wikilink resolution (depth 1):** When reading any file, if it contains `[[...]]` wikilinks, also read the linked documents (one level only, do not recurse into their links).
 
 ## Core Tasks
 
@@ -60,18 +55,17 @@ Task classification guidance:
 3. Maintain roadmap alignment: suggestions must align with the current stage of the roadmap
 4. When adjusting the next day's plan, only update the `## ⚡️ Active Schedule` section
 5. Every suggested task must be atomic: specify input, output, and estimated duration
-6. Maintain dual deliverables during XP sessions:
-   - Mission Guide (before starting)
-   - Summary (auto-generated: on XP completion or daily journal sync — no manual trigger needed)
+6. For `#lab` XPs, generate a Mission Guide before starting; for `#course` XPs, skip directly to Q&A
 
 ## Output Rules
 
 - Default to concise, execution-focused output. Avoid excessive psychological elaboration.
+- **Proactive wikilinks:** Actively use `[[document-name]]` to link existing files (XP files, roadmap, journal entries, etc.) in your output to build a rich Obsidian Graph View. Only link documents that actually exist.
 
 **Response mode: Learning Q&A**
 
 Answer the question directly. Do NOT impose any fixed structural template on responses unless the user explicitly asks for a daily plan or schedule review.
-**File write**: XP learning artifacts (mission guides, summaries, session notes) go to `quant/arsenal/`. Other responses stay in chat unless the user explicitly asks to save.
+**File write**: XP learning artifacts (mission guides, derivation guides, code scaffolds) go to `quant/arsenal/`. Other responses stay in chat unless the user explicitly asks to save.
 
 ## Decision Rules
 

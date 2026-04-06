@@ -65,6 +65,8 @@ python3 scripts/copilot.py update-schedule --date <today>
 
 - **语言**：日记/聊天全部简体中文，Quant 用英文
 - **Obsidian 兼容**：`[[YYYY-MM-DD]]` wikilink、Obsidian Callout（`> [!info]`）、无 HTML
+- **Wikilink 主动链接**：输出中应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap 等），目标是构建丰富的 Obsidian Graph View。不要凭空创造链接，只链接确实存在的文件。
+- **Wikilink 解析（深度 1）**：读取任何文档时，若文档内包含 `[[...]]` wikilink，需额外读取这些被链接的文档（仅一层，不递归——即被链接文档中的 wikilink 不再跟进）。
 - **记忆存储**：热记忆在 `journal/memory.md`，冷归档在 `journal/memory-archive.md`，不使用系统级记忆工具
 - **证据标准**：结论必须有本地证据支撑，引用 `[[YYYY-MM-DD]]`；证据不足时明确说明
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
@@ -97,6 +99,5 @@ python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "<标题>
 1. 在 roadmap 中将 `- [ ]` 改为 `- [x]`，行末追加 `(Completed: YYYY-MM-DD)`
 2. 执行：
 ```bash
-python3 scripts/copilot.py quant-summary --xp XP-XX --date <today>
 python3 scripts/copilot.py sync-roadmap-stats
 ```
