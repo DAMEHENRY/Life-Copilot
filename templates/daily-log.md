@@ -23,4 +23,10 @@
 - [ ] Sports: 
 - [ ] Reading:
 - [ ] Podcast:
+
+## ✍️ Writing State
+- Time: (fill in when writing — ⏰ above is file creation time)
+- Place: 
+- Mood: 
+
 ## What Life Copilot Said
