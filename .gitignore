@@ -31,6 +31,7 @@ __pycache__/
 env/
 venv/
 .env
+.pycache/
 
 # 5. 如果你未来增加了任何以 “draft” (草稿) 或 “temp” 命名的测试文件夹也可屏蔽
 temp/
@@ -40,3 +41,9 @@ drafts/
 archives/
 inbox/
 resources/
+
+# 7. AI agent local config and scratch files
+AGENTS.md
+GEMINI.md
+.geminiignore
+quant/notes/
