@@ -2,20 +2,20 @@
 
 ## 文件地图
 
-| 概念 | 路径 |
-|------|------|
-| 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| 长期记忆（热） | `journal/memory.md` |
-| 长期记忆（冷） | `journal/memory-archive.md` |
-| 洞察日志 | `journal/insights.jsonl`（append-only） |
-| Quant 路线 | `quant/roadmap.md` |
-| Quant 状态 | `quant/state.md` |
-| XP 产物 | `quant/arsenal/xp-XX-{type}.md` |
-| 日程 | `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md` |
-| 日记模式设定 | `prompts/diary-mode.md` |
-| Quant 模式设定 | `prompts/quant-mode.md` |
-| Chat 模式设定 | `prompts/chat-mode.md` |
-| 脚本 | `scripts/copilot.py` |
+| 概念         | 路径                                            |
+| ---------- | --------------------------------------------- |
+| 日记         | `journal/YYYY/MM/YYYY-MM-DD.md`               |
+| 长期记忆（热）    | `journal/memory.md`                           |
+| 长期记忆（冷）    | `journal/memory-archive.md`                   |
+| 洞察日志       | `journal/insights.jsonl`（append-only）         |
+| Quant 路线   | `quant/roadmap.md`                            |
+| Quant 状态   | `quant/state.md`                              |
+| XP 产物      | `quant/arsenal/xp-XX-{type}.md`               |
+| 日程         | `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md` |
+| 日记模式设定     | `prompts/diary-mode.md`                       |
+| Quant 模式设定 | `prompts/quant-mode.md`                       |
+| Chat 模式设定  | `prompts/chat-mode.md`                        |
+| 脚本         | `scripts/copilot.py`                          |
 
 禁止假设"已记住所有历史"；必须先读取本地文件再分析。
 

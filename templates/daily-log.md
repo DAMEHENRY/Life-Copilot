@@ -7,7 +7,7 @@
 ## 💭 Thoughts & Reflections
 
 ## 📸 Daily Moment
-> Capture a sensory moment with "contrast" or "extreme detail".
+> 
 
 ## 📊 Quant Protocol Feedback
 *Copy this section to guide the next day's schedule.*
@@ -17,7 +17,7 @@
     - [ ] Evening Block: `___%`
 - **Roadblocks**: 
 - **Energy Level (AM/PM/Eve)**: `High/Low` | `High/Low` | `High/Low`
-- **Request for Tomorrow**: [e.g. Focus on Python, More Rest, etc.]
+- **Request for Tomorrow**: 
 
 ## 🏃‍♂️ Habits (Optional)
 - [ ] Sports: 
@@ -25,7 +25,7 @@
 - [ ] Podcast:
 
 ## ✍️ Writing State
-- Time: (fill in when writing — ⏰ above is file creation time)
+- Time: 
 - Place: 
 - Mood: 
 
