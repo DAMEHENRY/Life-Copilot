@@ -487,6 +487,21 @@ def cmd_quant_mission(args: argparse.Namespace) -> None:
 # --- Writeback commands ---
 
 def append_thought_to_journal(journal_text: str, title: str, content: str) -> str:
+    # Guardrail: this command is for writing user-side diary thoughts,
+    # not for writing Copilot analysis into the journal body.
+    analysis_markers = [
+        "## What Life Copilot Said",
+        "## 🌡️ 情绪与能量状态",
+        "## 🧠 深度洞察",
+        "## 🧭 Copilot 建议",
+        "## ❓ 深度追问",
+        "## 💾 记忆更新",
+        "## 📊 进展追踪",
+        "## 🔇 沉默议题提醒",
+    ]
+    if any(marker in content for marker in analysis_markers):
+        raise ValueError("Input looks like Copilot analysis. Use writeback-journal instead of writeback-thought.")
+
     lines = journal_text.splitlines(keepends=True)
 
     def section_bounds(fragment: str):
