@@ -32,6 +32,8 @@ ROADMAP_FILE = ROOT / "quant" / "roadmap.md"
 QUANT_STATE_FILE = ROOT / "quant" / "state.md"
 QUANT_ARSENAL_DIR = ROOT / "quant" / "arsenal"
 SCHEDULES_DIR = ROOT / "quant" / "schedules"
+TEMPLATES_DIR = ROOT / "templates"
+SCHED_LIBRARY_DAY_TEMPLATE = TEMPLATES_DIR / "sched-library-day.md"
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -375,60 +377,57 @@ def build_active_schedule_block(base_date: date) -> str:
     hints = [h for h in state.get("schedule_hints", []) if isinstance(h, str)]
 
     fb = extract_quant_feedback(read_text(journal_path_for_date(base_date))) if journal_path_for_date(base_date).exists() else {}
-    energy = fb.get("energy", "").lower()
-    protocol = "**[QUANT LEAP]** Controlled progression."
-    if any(k in energy for k in ["low", "sick", "recover", "tired"]):
-        protocol = "**[RECOVERY RAMP]** Half-load restart. Prioritize rest."
-    elif any(k in energy for k in ["high", "great", "strong"]):
-        protocol = "**[FULL POWER]** High-intensity deep work."
-    for h in hints:
-        if isinstance(h, str) and h.startswith("protocol="):
-            protocol = f"**[{h.split('=', 1)[1].upper()}]**"
-            break
-
-    hint_parts = []
-    
     tr = fb.get("tomorrow_request") or next((h.split("=", 1)[1] for h in hints if h.startswith("tomorrow_request=")), "")
-    if tr:
-        hint_parts.append(f"Yesterday's request: {tr}")
-        
     rb = fb.get("roadblocks") or next((h.split("=", 1)[1] for h in hints if h.startswith("roadblocks=")), "")
-    if rb:
-        hint_parts.append(f"Roadblocks: {rb}")
-        
-    cn = next((h.split("=", 1)[1] for h in hints if h.startswith("chat_note=")), "")
-    if cn:
-        hint_parts.append(f"Chat Note: {cn}")
+    weekday = target.strftime("%A")
+    date_label = target.strftime("%b %-d, %Y") if os.name != "nt" else target.strftime("%b %#d, %Y")
+    xp_targets = focus
+    xp_morning = top[0]
+    xp_afternoon = top[1] if len(top) > 1 else top[0]
+    personal_action_1 = tr if tr else "Keep Agency Time flexible for recovery or side exploration."
+    personal_action_2 = "Do not turn Agency Time into a scored execution block."
+    execution_intent = (
+        "If afternoon energy drops, protect Deep Work A and B first, then let Agency Time absorb sports or recovery."
+    )
 
-    remaining = [
-        h for h in hints 
-        if not (h.startswith("protocol=") or h.startswith("tomorrow_request=") or h.startswith("roadblocks=") or h.startswith("chat_note="))
-    ]
-    if remaining:
-        hint_parts.append(remaining[0])
+    if SCHED_LIBRARY_DAY_TEMPLATE.exists():
+        template = read_text(SCHED_LIBRARY_DAY_TEMPLATE)
+        replacements = {
+            "{{weekday}}": weekday,
+            "{{date}}": date_label,
+            "{{xp-targets}}": xp_targets,
+            "{{yesterday-request}}": tr if tr else "(none)",
+            "{{yesterday-roadblocks}}": rb if rb else "(none)",
+            "{{xp-morning}}": xp_morning,
+            "{{xp-afternoon}}": xp_afternoon,
+            "{{personal-action-1}}": personal_action_1,
+            "{{personal-action-2}}": personal_action_2,
+            "{{execution-intent}}": execution_intent,
+        }
+        for key, value in replacements.items():
+            template = template.replace(key, value)
+        return template
 
     b = [
         f"## ⚡️ Active Schedule: {format_day_label(target)}",
         f"*Focus: {focus}*", "",
-        f"> **Current Protocol**: {protocol}",
+        "> **Current Protocol**: **[FULL POWER]** High-intensity deep work.",
         f"> **Target**: {', '.join(t.split(':')[0] for t in top[:3])}.",
-        f"> **Context Hint**: {'; '.join(hint_parts) if hint_parts else '(none)'}.", "",
-        "| Time              | Block Name             | Target Task |",
-        "| :---------------- | :--------------------- | :---------- |",
-        f"| **08:30 - 12:00** | **⚔️ Deep Work A**     | {top[0]}. |",
-        "| **12:00 - 13:00** | **🍲 Lunch**           | Fixed Time Anchor. |",
-        "| **13:00 - 14:00** | **💤 Power Nap**       | Non-negotiable Recovery. |",
-        f"| **14:00 - 15:30** | **⚔️ Deep Work B**     | {top[1] if len(top) > 1 else top[0]}. |",
-        "| **15:30 - 17:00** | **🏃 Movement**        | Outdoor loop / basketball for metabolic clearance. |",
-        "| **17:00 - 18:00** | **🍲 Dinner**          | Fixed Time Anchor. |",
-        f"| **18:00 - 20:00** | **⚔️ Deep Work C**     | {top[2] if len(top) > 2 else top[0]}. |",
-        f"| **20:00 - 22:00** | **🧱 Build / Resume**  | {top[3] if len(top) > 3 else 'Resume and notes consolidation'}. |",
-        "| **22:00 - 22:30** | **📚 Input**           | 30min passive reading. |",
-        "| **22:30 - 23:00** | **📔 Reflection**      | Daily summary and quant feedback. |",
-        "| **23:00 - 23:30** | **🛌 Wind Down**       | No Screens. |",
-        "| **23:30**         | **💤 Sleep**           | System Shutdown. |", "",
+        f"> **Context Hint**: Yesterday's request: {tr if tr else '(none)'}; Roadblocks: {rb if rb else '(none)'}.", "",
+        "| Time | Block Name | Target Task |",
+        "| :--- | :--------- | :---------- |",
+        "| **07:30 - 08:30** | **🌅 Morning Routine** | Wake, hygiene, ride to library. |",
+        f"| **08:30 - 12:00** | **⚔️ Deep Work A** | {xp_morning}. |",
+        "| **12:00 - 13:00** | **🍲 Lunch** | Fixed Time Anchor. |",
+        "| **13:00 - 14:00** | **💤 Power Nap** | Non-negotiable Recovery. |",
+        f"| **14:00 - 17:00** | **⚔️ Deep Work B** | {xp_afternoon}. |",
+        "| **17:00 - 18:00** | **🍲 Dinner** | Fixed Time Anchor. |",
+        "| **18:00 - 22:00** | **🕹️ Agency Time** | Free-choice block: sports / reading / social / casual exploration. No execution score applied. |",
+        "| **22:00 - 22:30** | **📔 Reflection** | Daily log + quant feedback. |",
+        "| **22:30 - 23:00** | **🛌 Wind Down** | No screens. |",
+        "| **23:00** | **💤 Sleep** | System Shutdown. |",
     ]
-    return "\n".join(b)
+    return "\n".join(b) + "\n"
 
 
 def _update_roadmap_pointer(roadmap_content: str, target: date) -> str:
