@@ -12,6 +12,10 @@ Entering Quant Mode requires executing:
 1. `python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal`
 2. `python3 scripts/copilot.py update-schedule --date <today>`
 
+Schedule command semantics:
+- `update-schedule --date <today>` means: treat `<today>` as the base date and generate the next day's schedule.
+- If you need to generate or repoint to an explicit schedule date, use `python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD`.
+
 Then read: `quant/state.md`, `quant/roadmap.md` (focus on unchecked XP items + milestones).
 
 Mission workflow (tag-conditional):

@@ -46,6 +46,9 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal
 python3 scripts/copilot.py update-schedule --date <today>
 ```
+说明：
+- `update-schedule --date <today>` 的语义是“把 `<today>` 当基准日，生成明日日程”。
+- 若需要直接生成或指向某个明确日期的日程，使用 `python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD`。
 2. 读 `prompts/quant-mode.md`
 3. 读 `quant/state.md`
 4. 读 `quant/roadmap.md`（只关注未完成 XP + 里程碑）
