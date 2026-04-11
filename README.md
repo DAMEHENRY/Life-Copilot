@@ -128,7 +128,7 @@ python3 scripts/copilot.py writeback-journal \
 # Step 1: 同步 quant-state（从日记提取最新执行反馈）
 python3 scripts/copilot.py sync-quant-state --date 2026-03-30 --allow-missing-journal
 
-# Step 2: 更新明日日程（有日期保护，若已是今日/明日则跳过）
+# Step 2: 更新明日日程（目标文件已存在则跳过覆写）
 python3 scripts/copilot.py update-schedule --date 2026-03-30
 ```
 
@@ -160,7 +160,8 @@ Claude 直接读取：
 | 命令 | 用途 |
 |------|------|
 | `sync-quant-state --date YYYY-MM-DD [--allow-missing-journal]` | 从日记同步最新 XP 进度到 state.md；自动为有 session-notes 的 focus XP 生成 summary |
-| `update-schedule --date YYYY-MM-DD` | 生成明日日程文件并更新 roadmap 指针（有日期保护） |
+| `update-schedule --date YYYY-MM-DD` | 以该日期作为基准日，生成次日日程并更新 roadmap 指针 |
+| `update-schedule --target-date YYYY-MM-DD` | 直接生成或指向指定日期的日程文件 |
 | `sync-roadmap-stats` | 重算 XP 完成率并更新 roadmap 头部 Total Readiness |
 
 ---
@@ -258,7 +259,7 @@ quant/schedules/
 
 ### 6.3 日期保护机制
 
-`update-schedule` 检查当前日程日期，若目标日期差 ≤ 1 天则**跳过覆写**（保护手动调整的计划）。若需强制重新生成，先删除对应 `sched-*.md` 文件再运行命令。
+`update-schedule` 只在**目标日期对应的 `sched-*.md` 文件已经存在**时跳过覆写（保护手动调整的计划）。若文件已存在但 roadmap 指向别处，命令会只更新指针，不重写文件。若需强制重新生成，先删除对应 `sched-*.md` 文件再运行命令。
 
 ---
 
@@ -355,7 +356,7 @@ python3 scripts/copilot.py compact-memory
 ## 11. 常见问题
 
 **Q: 为什么 `update-schedule` 没有生成新日程？**
-A: 日期保护触发。当前日程已是今日或明日，系统跳过覆写。直接编辑对应的 `sched-*.md` 文件即可手动调整。
+A: 目标日期对应的 `sched-*.md` 文件已经存在。脚本默认保护现有计划，不会覆写；如果 roadmap 指针不对，它会只修正指针。要重生内容，先删除目标 `sched-*.md` 文件再运行命令。
 
 **Q: v4.0 为什么不再有 prepare-* 命令？**
 A: Claude Code 可以直接读文件，预生成 80KB 上下文包反而引入了大量噪声。现在直读 3-5 个源文件（~15-25KB），信噪比更高，速度更快。

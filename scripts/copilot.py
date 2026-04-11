@@ -319,20 +319,27 @@ def cmd_sync_quant_state(args: argparse.Namespace) -> None:
 def cmd_update_schedule(args: argparse.Namespace) -> None:
     if not ROADMAP_FILE.exists():
         raise FileNotFoundError(f"Roadmap not found: {ROADMAP_FILE}")
-    base = parse_date_str(args.date)
-    target = base + timedelta(days=1)
-    roadmap_content = read_text(ROADMAP_FILE)
 
-    # Date guard
-    existing_date = _extract_schedule_date(roadmap_content) or _latest_schedule_date()
-    if existing_date and abs((existing_date - target).days) <= 1:
-        print(str(_schedule_file_path(existing_date)))
+    if getattr(args, "target_date", None):
+        target = parse_date_str(args.target_date)
+        base = target - timedelta(days=1)
+    else:
+        base = parse_date_str(args.date)
+        target = base + timedelta(days=1)
+
+    roadmap_content = read_text(ROADMAP_FILE)
+    schedule_path = _schedule_file_path(target)
+
+    # Overwrite guard: only skip when the exact target schedule already exists.
+    # If the file exists but roadmap points elsewhere, just repoint the pointer.
+    if schedule_path.exists():
+        if _extract_schedule_date(roadmap_content) != target:
+            write_text(ROADMAP_FILE, _update_roadmap_pointer(roadmap_content, target))
+        print(str(schedule_path))
         return
 
-    schedule_path = _schedule_file_path(target)
-    if not schedule_path.exists():
-        schedule_path.parent.mkdir(parents=True, exist_ok=True)
-        write_text(schedule_path, build_active_schedule_block(base))
+    schedule_path.parent.mkdir(parents=True, exist_ok=True)
+    write_text(schedule_path, build_active_schedule_block(base))
     write_text(ROADMAP_FILE, _update_roadmap_pointer(roadmap_content, target))
     print(str(schedule_path))
 
@@ -354,17 +361,6 @@ def _extract_schedule_date(content: str) -> Optional[date]:
             return datetime.strptime(f"{m2.group(2)} {m2.group(3)} {m2.group(4)}", "%b %d %Y").date()
         except ValueError:
             pass
-    return None
-
-
-def _latest_schedule_date() -> Optional[date]:
-    if not SCHEDULES_DIR.exists():
-        return None
-    for p in sorted(SCHEDULES_DIR.rglob("sched-????-??-??.md"), reverse=True):
-        try:
-            return date.fromisoformat(p.stem.removeprefix("sched-"))
-        except ValueError:
-            continue
     return None
 
 
@@ -791,7 +787,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_sync_quant_state)
 
     s = sub.add_parser("update-schedule")
-    s.add_argument("--date", required=True)
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--date", help="Base date. Generates the next day's schedule.")
+    g.add_argument("--target-date", help="Explicit schedule date to generate or repoint to.")
     s.set_defaults(func=cmd_update_schedule)
 
     s = sub.add_parser("quant-mission")
