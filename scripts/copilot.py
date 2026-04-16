@@ -192,13 +192,21 @@ def extract_quant_feedback(journal_text: str) -> Dict[str, str]:
         return val
 
     return {
-        "morning_score": find(r"Morning Block:\s*`?([^`\n]+)`?"),
-        "afternoon_score": find(r"Afternoon Block:\s*`?([^`\n]+)`?"),
-        "evening_score": find(r"Evening Block:\s*`?([^`\n]+)`?"),
-        "roadblocks": find(r"\*{0,2}Roadblocks\*{0,2}:\s*([^\n]+)"),
-        "energy": find(r"\*{0,2}Energy Level \(AM/PM/Eve\)\*{0,2}:\s*`?([^`\n]+)`?"),
-        "tomorrow_request": find(r"\*{0,2}Request for Tomorrow\*{0,2}:\s*([^\n]+)"),
+        "morning_score": find(r"Morning Block:[ \t]*`?([^`\n]+)`?"),
+        "afternoon_score": find(r"Afternoon Block:[ \t]*`?([^`\n]+)`?"),
+        "evening_score": find(r"Evening Block:[ \t]*`?([^`\n]+)`?"),
+        "roadblocks": find(r"\*{0,2}Roadblocks\*{0,2}:[ \t]*([^\n]*)"),
+        "energy": find(r"\*{0,2}Energy Level \(AM/PM/Eve\)\*{0,2}:[ \t]*`?([^`\n]+)`?"),
+        "tomorrow_request": find(r"\*{0,2}Request for Tomorrow\*{0,2}:[ \t]*([^\n]*)"),
     }
+
+
+def has_filled_quant_feedback(journal_text: str) -> bool:
+    # The section title alone is not enough. We only treat Quant Protocol Feedback
+    # as "filled" when at least one parsed field contains a real value rather than
+    # template placeholders such as ___%, High/Low, or empty strings.
+    fb = extract_quant_feedback(journal_text)
+    return any(bool(v.strip()) for v in fb.values())
 
 
 # ---------------------------------------------------------------------------
@@ -269,14 +277,25 @@ def cmd_sync_quant_state(args: argparse.Namespace) -> None:
 
     journal_path = journal_path_for_date(today)
     if journal_path.exists():
-        fb = extract_quant_feedback(read_text(journal_path))
-        if fb.get("tomorrow_request"):
-            hints.insert(0, f"tomorrow_request={fb['tomorrow_request']}")
-        if fb.get("roadblocks"):
-            hints.insert(0, f"roadblocks={fb['roadblocks']}")
-        scores = ", ".join(x for x in [fb.get("morning_score"), fb.get("afternoon_score"), fb.get("evening_score")] if x)
-        evidence.insert(0, f"[{today}] journal={journal_path.relative_to(ROOT)} scores={scores or 'n/a'}")
+        journal_text = read_text(journal_path)
+        fb = extract_quant_feedback(journal_text)
+        has_feedback = has_filled_quant_feedback(journal_text)
+        # Date-based sync is gated by filled journal feedback. Manual chat-note
+        # overrides stay available because they are an explicit secondary source.
+        if not has_feedback and not args.chat_note:
+            print(f"[skip] Filled Quant Protocol Feedback not found in {journal_path}; quant state not updated.")
+            return
+        if has_feedback:
+            if fb.get("tomorrow_request"):
+                hints.insert(0, f"tomorrow_request={fb['tomorrow_request']}")
+            if fb.get("roadblocks"):
+                hints.insert(0, f"roadblocks={fb['roadblocks']}")
+            scores = ", ".join(x for x in [fb.get("morning_score"), fb.get("afternoon_score"), fb.get("evening_score")] if x)
+            evidence.insert(0, f"[{today}] journal={journal_path.relative_to(ROOT)} scores={scores or 'n/a'}")
     elif args.allow_missing_journal:
+        if not args.chat_note:
+            print(f"[skip] Journal not found for {today.isoformat()} and no chat note provided; quant state not updated.")
+            return
         evidence.insert(0, f"[{today}] journal=missing (allowed)")
     else:
         raise FileNotFoundError(f"Journal not found: {journal_path}")
@@ -326,21 +345,32 @@ def cmd_update_schedule(args: argparse.Namespace) -> None:
     else:
         base = parse_date_str(args.date)
         target = base + timedelta(days=1)
+        journal_path = journal_path_for_date(base)
+        # Date-based schedule refresh only happens when today's journal contains
+        # filled Quant Protocol Feedback. Use --target-date for an explicit manual
+        # schedule generation / repoint path.
+        if not journal_path.exists():
+            print(f"[skip] Journal not found for {base.isoformat()}; schedule not updated.")
+            return
+        if not has_filled_quant_feedback(read_text(journal_path)):
+            print(f"[skip] Filled Quant Protocol Feedback not found in {journal_path}; schedule not updated.")
+            return
 
     roadmap_content = read_text(ROADMAP_FILE)
     schedule_path = _schedule_file_path(target)
-
-    # Overwrite guard: only skip when the exact target schedule already exists.
-    # If the file exists but roadmap points elsewhere, just repoint the pointer.
-    if schedule_path.exists():
-        if _extract_schedule_date(roadmap_content) != target:
-            write_text(ROADMAP_FILE, _update_roadmap_pointer(roadmap_content, target))
-        print(str(schedule_path))
-        return
-
+    schedule_body = build_active_schedule_block(base)
     schedule_path.parent.mkdir(parents=True, exist_ok=True)
-    write_text(schedule_path, build_active_schedule_block(base))
-    write_text(ROADMAP_FILE, _update_roadmap_pointer(roadmap_content, target))
+
+    # Schedule files are generated artifacts. Rebuild them on every run so a later
+    # journal writeback or quant-state sync can refresh tomorrow's plan instead of
+    # getting stuck behind an existing file from an earlier pass.
+    if not schedule_path.exists() or read_text(schedule_path) != schedule_body:
+        write_text(schedule_path, schedule_body)
+
+    updated_roadmap = _update_roadmap_pointer(roadmap_content, target)
+    if updated_roadmap != roadmap_content:
+        write_text(ROADMAP_FILE, updated_roadmap)
+
     print(str(schedule_path))
 
 
@@ -368,13 +398,26 @@ def build_active_schedule_block(base_date: date) -> str:
     target = base_date + timedelta(days=1)
     state = load_quant_state()
     pending = [p for p in state.get("pending_xp", []) if isinstance(p, str) and p and p != "(none)"]
-    top = pending[:4] if pending else ["XP-15: Array Mediums", "XP-16: DP Basics", "XP-17: HashMap"]
+    fallback = pending[:4] if pending else ["XP-15: Array Mediums", "XP-16: DP Basics", "XP-17: HashMap"]
     focus = state.get("current_focus", "quant execution")
     hints = [h for h in state.get("schedule_hints", []) if isinstance(h, str)]
 
     fb = extract_quant_feedback(read_text(journal_path_for_date(base_date))) if journal_path_for_date(base_date).exists() else {}
     tr = fb.get("tomorrow_request") or next((h.split("=", 1)[1] for h in hints if h.startswith("tomorrow_request=")), "")
     rb = fb.get("roadblocks") or next((h.split("=", 1)[1] for h in hints if h.startswith("roadblocks=")), "")
+    requested_ids = list(dict.fromkeys(re.findall(r"XP-\d+", tr.upper())))
+    requested_targets = []
+    for xp_id in requested_ids:
+        match = next((p for p in pending if p.upper().startswith(f"{xp_id}:")), "")
+        requested_targets.append(match or xp_id)
+
+    if requested_targets:
+        remaining = [p for p in pending if p not in requested_targets]
+        top = (requested_targets + remaining)[:4]
+        focus = ", ".join(requested_ids)
+    else:
+        top = fallback
+
     weekday = target.strftime("%A")
     date_label = target.strftime("%b %-d, %Y") if os.name != "nt" else target.strftime("%b %#d, %Y")
     xp_targets = focus
@@ -781,15 +824,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("sync-quant-state")
-    s.add_argument("--date", required=True)
-    s.add_argument("--chat-note", default="")
-    s.add_argument("--allow-missing-journal", action="store_true")
+    s.add_argument("--date", required=True, help="Journal date to inspect for filled Quant Protocol Feedback.")
+    s.add_argument("--chat-note", default="", help="Explicit manual override note. Allows sync even without filled journal feedback.")
+    s.add_argument(
+        "--allow-missing-journal",
+        action="store_true",
+        help="Permit a missing journal only when --chat-note is also provided; blank journal templates do not count as filled feedback.",
+    )
     s.set_defaults(func=cmd_sync_quant_state)
 
     s = sub.add_parser("update-schedule")
     g = s.add_mutually_exclusive_group(required=True)
-    g.add_argument("--date", help="Base date. Generates the next day's schedule.")
-    g.add_argument("--target-date", help="Explicit schedule date to generate or repoint to.")
+    g.add_argument(
+        "--date",
+        help="Base journal date. Refreshes the next day's schedule only when that journal has filled Quant Protocol Feedback.",
+    )
+    g.add_argument(
+        "--target-date",
+        help="Explicit manual override: generate or repoint the schedule for this date without journal-feedback gating.",
+    )
     s.set_defaults(func=cmd_update_schedule)
 
     s = sub.add_parser("quant-mission")

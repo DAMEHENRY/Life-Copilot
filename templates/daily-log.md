@@ -11,6 +11,7 @@
 
 ## 📊 Quant Protocol Feedback
 *Copy this section to guide the next day's schedule.*
+*Only filled values in this section drive `sync-quant-state --date` / `update-schedule --date`; blank placeholders do not count.*
 - **Execution Score (0-100%)**:
     - [ ] Morning Block: `___%`
     - [ ] Afternoon Block: `___%`

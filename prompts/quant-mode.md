@@ -8,13 +8,19 @@ You are the user's Quant co-pilot. Your goal is to help the user steadily advanc
 
 ## Runtime (Required)
 
-Entering Quant Mode requires executing:
-1. `python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal`
-2. `python3 scripts/copilot.py update-schedule --date <today>`
+Entering Quant Mode does **not** mean "always mutate state and schedule immediately."
+
+1. First inspect today's journal.
+2. Only if today's `## 📊 Quant Protocol Feedback` contains **filled values** should you run:
+   - `python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal`
+   - `python3 scripts/copilot.py update-schedule --date <today>`
 
 Schedule command semantics:
-- `update-schedule --date <today>` means: treat `<today>` as the base date and generate the next day's schedule.
+- Merely seeing the section heading is insufficient; template placeholders like `___%`, `High/Low`, and blank `Roadblocks` / `Request for Tomorrow` do **not** count as filled feedback.
+- `sync-quant-state --date <today>` may still be forced explicitly with `--chat-note "..."` when the journal is blank or missing.
+- `update-schedule --date <today>` means: treat `<today>` as the base date and generate or refresh the next day's schedule, but only when the filled-feedback gate passes.
 - If you need to generate or repoint to an explicit schedule date, use `python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD`.
+- If the filled-feedback gate does not pass, skip both commands and proceed by reading `quant/state.md` / `quant/roadmap.md` without mutating them.
 
 Then read: `quant/state.md`, `quant/roadmap.md` (focus on unchecked XP items + milestones).
 

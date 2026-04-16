@@ -41,13 +41,16 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 
 触发：`#quant` 或出现 `XP-` / `roadmap` / `Active Schedule` / `quant-leap-roadmap`
 
-1. 执行：
+1. 先检查当天日记里的 `## 📊 Quant Protocol Feedback` 是否**有实际填写内容**
+说明：
+- 仅仅存在这个标题或模板空位（如 `___%`、`High/Low`、空的 `Roadblocks` / `Request for Tomorrow`）**不算**有效反馈。
+- 只有在该 section 至少有一个真实值时，才执行下面两条命令：
 ```bash
 python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal
 python3 scripts/copilot.py update-schedule --date <today>
 ```
-说明：
-- `update-schedule --date <today>` 的语义是“把 `<today>` 当基准日，生成明日日程”。
+- 若需要**强制**写入 quant state，可显式传 `--chat-note "<内容>"` 作为手动 override。
+- `update-schedule --date <today>` 的语义是“把 `<today>` 当基准日，生成/刷新明日日程”。
 - 若需要直接生成或指向某个明确日期的日程，使用 `python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD`。
 2. 读 `prompts/quant-mode.md`
 3. 读 `quant/state.md`

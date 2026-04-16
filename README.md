@@ -125,12 +125,24 @@ python3 scripts/copilot.py writeback-journal \
 **AI 执行流程：**
 
 ```bash
-# Step 1: 同步 quant-state（从日记提取最新执行反馈）
+# Step 0: 先检查当天日记里的 ## 📊 Quant Protocol Feedback 是否有“实际填写内容”
+# 仅标题存在、但下面仍是 ___% / High/Low / 空字段，不算有效反馈
+
+# Step 1: 只有在反馈已填写时，才同步 quant-state
 python3 scripts/copilot.py sync-quant-state --date 2026-03-30 --allow-missing-journal
 
-# Step 2: 更新明日日程（目标文件已存在则跳过覆写）
+# Step 2: 只有在反馈已填写时，才更新 / 刷新明日日程
 python3 scripts/copilot.py update-schedule --date 2026-03-30
 ```
+
+若当天日记没有已填写的 Quant Feedback：
+- 不自动更新 `quant/state.md`
+- 不自动生成 / 刷新次日日程
+- 仍可读取 `quant/state.md`、`quant/roadmap.md` 做讨论
+
+手动 override：
+- 强制同步 quant-state：`sync-quant-state --date YYYY-MM-DD --allow-missing-journal --chat-note "..."`
+- 强制生成 / 指向某天日程：`update-schedule --target-date YYYY-MM-DD`
 
 然后 Claude 直接读取：
 - `quant/state.md` — 当前状态
@@ -159,9 +171,9 @@ Claude 直接读取：
 
 | 命令 | 用途 |
 |------|------|
-| `sync-quant-state --date YYYY-MM-DD [--allow-missing-journal]` | 从日记同步最新 XP 进度到 state.md；自动为有 session-notes 的 focus XP 生成 summary |
-| `update-schedule --date YYYY-MM-DD` | 以该日期作为基准日，生成次日日程并更新 roadmap 指针 |
-| `update-schedule --target-date YYYY-MM-DD` | 直接生成或指向指定日期的日程文件 |
+| `sync-quant-state --date YYYY-MM-DD [--allow-missing-journal] [--chat-note "..."]` | 从当日日记的**已填写** Quant Feedback 同步 state.md；若日记空白/缺失但你显式提供 `--chat-note`，可作为手动 override |
+| `update-schedule --date YYYY-MM-DD` | 以该日期作为基准日，在当日日记存在**已填写** Quant Feedback 时生成 / 刷新次日日程并更新 roadmap 指针 |
+| `update-schedule --target-date YYYY-MM-DD` | 手动 override：直接生成或指向指定日期的日程文件，不走日记反馈门槛 |
 | `sync-roadmap-stats` | 重算 XP 完成率并更新 roadmap 头部 Total Readiness |
 
 ---
@@ -257,9 +269,18 @@ quant/schedules/
 > 日程文件统一管理于 `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md`，此处只保留指针。
 ```
 
-### 6.3 日期保护机制
+### 6.3 日程生成门槛与刷新机制
 
-`update-schedule` 只在**目标日期对应的 `sched-*.md` 文件已经存在**时跳过覆写（保护手动调整的计划）。若文件已存在但 roadmap 指向别处，命令会只更新指针，不重写文件。若需强制重新生成，先删除对应 `sched-*.md` 文件再运行命令。
+`update-schedule --date YYYY-MM-DD` 现在有两层规则：
+
+1. 只有当 `YYYY-MM-DD` 对应日记中的 `## 📊 Quant Protocol Feedback` **有实际填写内容**时，命令才会生成 / 刷新次日日程。
+2. 一旦门槛通过，目标 `sched-*.md` 文件在重复运行时会按最新状态**重新生成**，而不是“已存在就跳过”。
+
+若你需要绕过日记反馈门槛，直接手动指定某一天的日程，使用：
+
+```bash
+python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
+```
 
 ---
 
@@ -299,7 +320,7 @@ python3 scripts/copilot.py quant-note \
 python3 scripts/copilot.py quant-summary --xp XP-64 --date 2026-03-30
 ```
 
-或由 `sync-quant-state` 在写日记时自动触发（推荐）。
+Summary 需要显式手动生成；`sync-quant-state` 不会自动代替你运行 `quant-summary`。
 
 ### 产物文件位置
 
@@ -342,7 +363,14 @@ quant/arsenal/
 ## 10. 日常维护
 
 ### 每日
-`sync-quant-state` 和 `update-schedule` 在进入 Quant Mode 时自动执行，无需额外操作。
+进入 Quant Mode 后，应先检查当天日记里的 `## 📊 Quant Protocol Feedback` 是否已填写。只有在反馈 section 至少有一个真实值时，才运行：
+
+```bash
+python3 scripts/copilot.py sync-quant-state --date YYYY-MM-DD --allow-missing-journal
+python3 scripts/copilot.py update-schedule --date YYYY-MM-DD
+```
+
+如果只是模板空位，则跳过这两条命令，不自动改写 `quant/state.md` 或次日日程。
 
 ### 每月（手动）
 
@@ -356,7 +384,27 @@ python3 scripts/copilot.py compact-memory
 ## 11. 常见问题
 
 **Q: 为什么 `update-schedule` 没有生成新日程？**
-A: 目标日期对应的 `sched-*.md` 文件已经存在。脚本默认保护现有计划，不会覆写；如果 roadmap 指针不对，它会只修正指针。要重生内容，先删除目标 `sched-*.md` 文件再运行命令。
+A: 最常见原因是：当日日记虽然保留了 `## 📊 Quant Protocol Feedback` 标题，但下面仍是模板空位。只有**已填写**的反馈才会触发 `update-schedule --date YYYY-MM-DD`。像 `___%`、`High/Low`、空的 `Roadblocks` / `Request for Tomorrow` 都不算有效内容。
+
+**Q: 为什么我明明看到了 Quant Feedback section，还是没有更新 state / schedule？**
+A: 因为“有 section”不等于“有反馈”。脚本现在看的是解析后的真实值，不是标题本身。只有至少一个字段被实际填写，才会更新 `quant/state.md` 或次日日程。
+
+**Q: 我想不依赖当天日记，强制生成某一天的 schedule，怎么做？**
+A: 使用：
+```bash
+python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
+```
+这条命令会绕过基于日记的反馈门槛。
+
+**Q: 我想在当天日记没有填 Quant Feedback 时，手动强制更新 quant-state，怎么做？**
+A: 使用：
+```bash
+python3 scripts/copilot.py sync-quant-state \
+  --date YYYY-MM-DD \
+  --allow-missing-journal \
+  --chat-note "manual override note"
+```
+`--chat-note` 是显式 manual override；没有它时，空白模板不会触发 state 更新。
 
 **Q: v4.0 为什么不再有 prepare-* 命令？**
 A: Claude Code 可以直接读文件，预生成 80KB 上下文包反而引入了大量噪声。现在直读 3-5 个源文件（~15-25KB），信噪比更高，速度更快。

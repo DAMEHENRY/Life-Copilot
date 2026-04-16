@@ -152,7 +152,7 @@
 
 ## Quant Feedback Handoff
 
-若当日日记包含 `## 📊 Quant Protocol Feedback` 或明显量化执行反馈：
+若当日日记包含**已填写的** `## 📊 Quant Protocol Feedback` 或明显量化执行反馈：
 - 在日记分析末尾增加一句提示，建议进入 Quant Mode 完整更新计划。
 - 不在本模式直接重写 `quant/roadmap.md`，仅做衔接提示。
 
