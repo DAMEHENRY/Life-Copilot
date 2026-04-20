@@ -29,8 +29,15 @@
 2. 读 `journal/YYYY/MM/YYYY-MM-DD.md`
 3. 读 `journal/memory.md`（热记忆：Active Hypotheses + Canonical）
 4. 读目标日期前后 2-3 天的日记（提供时间上下文）
-5. 若需要更深历史证据，用 Grep 搜索 `journal/memory-archive.md` 或 `journal/` 目录
-6. 按 diary-mode.md 的规则回复
+5. 从当天内容先抽出 `1-2` 条主线主题
+6. 围绕主线主题默认继续查三层历史：
+   - `journal/insights.jsonl`（索引层：已有命名模式、refs、验证线索）
+   - `journal/memory-archive.md`（冷归档：仍 relevant 的旧模式）
+   - `journal/` 目录（原始样本日记：关键词、变体表达、相关意象）
+7. 若命中文档里包含 `[[...]]` wikilink，继续跟读一层
+8. 回复时必须明确区分：这是旧模式复现、旧假设验证、旧模式修正，还是新模式出现
+9. 回复结尾默认做一次简短 memory audit：`无需写入` / `值得记录为验证` / `值得记录为新模式`
+10. 按 diary-mode.md 的规则回复
 
 需要写回日记时，先写临时文件再执行：
 ```bash
@@ -74,6 +81,7 @@ python3 scripts/copilot.py update-schedule --date <today>
 - **Wikilink 主动链接**：输出中应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap 等），目标是构建丰富的 Obsidian Graph View。不要凭空创造链接，只链接确实存在的文件。
 - **Wikilink 解析（深度 1）**：读取任何文档时，若文档内包含 `[[...]]` wikilink，需额外读取这些被链接的文档（仅一层，不递归——即被链接文档中的 wikilink 不再跟进）。
 - **记忆存储**：热记忆在 `journal/memory.md`，冷归档在 `journal/memory-archive.md`，不使用系统级记忆工具
+- **洞察日志角色**：`journal/insights.jsonl` 是历史检索的索引层，不是最终面向用户的主要引用层；面向用户优先落到 `[[YYYY-MM-DD]]`
 - **证据标准**：结论必须有本地证据支撑，引用 `[[YYYY-MM-DD]]`；证据不足时明确说明
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
 - **输出要求**：必须包含可执行下一步，不写空泛安慰

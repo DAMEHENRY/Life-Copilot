@@ -525,10 +525,18 @@ def cmd_quant_mission(args: argparse.Namespace) -> None:
 
 # --- Writeback commands ---
 
-def append_thought_to_journal(journal_text: str, title: str, content: str) -> str:
-    # Guardrail: this command is for writing user-side diary thoughts,
-    # not for writing Copilot analysis into the journal body.
-    analysis_markers = [
+def looks_like_copilot_analysis(content: str) -> bool:
+    """Best-effort guardrail for routing analysis to writeback-journal.
+
+    Old diary analyses used fixed section headings; diary-mode v2 is essay-first,
+    so we now combine explicit marker checks with a small heuristic to catch
+    obvious Copilot analysis while avoiding over-blocking normal journal thoughts.
+    """
+    text = content.strip()
+    if not text:
+        return False
+
+    explicit_markers = [
         "## What Life Copilot Said",
         "## 🌡️ 情绪与能量状态",
         "## 🧠 深度洞察",
@@ -538,7 +546,49 @@ def append_thought_to_journal(journal_text: str, title: str, content: str) -> st
         "## 📊 进展追踪",
         "## 🔇 沉默议题提醒",
     ]
-    if any(marker in content for marker in analysis_markers):
+    if any(marker in text for marker in explicit_markers):
+        return True
+
+    heuristic_score = 0
+
+    if re.search(r"\[\[\d{4}-\d{2}-\d{2}\]\]", text):
+        heuristic_score += 1
+    if text.count("你") >= 3:
+        heuristic_score += 1
+
+    analysis_cues = [
+        "主线",
+        "盲区",
+        "未言明需求",
+        "证据不足",
+        "Writing State",
+        "历史锚点",
+        "反框架",
+        "红队",
+        "长期记忆",
+        "Quant Mode",
+    ]
+    if any(cue in text for cue in analysis_cues):
+        heuristic_score += 1
+
+    action_cues = [
+        "微行动",
+        "明天最值得做的",
+        "明天 24 小时内",
+        "我会建议",
+        "如果今天要沉淀一条长期记忆",
+        "建议进入 Quant Mode",
+    ]
+    if any(cue in text for cue in action_cues):
+        heuristic_score += 1
+
+    return heuristic_score >= 3
+
+
+def append_thought_to_journal(journal_text: str, title: str, content: str) -> str:
+    # Guardrail: this command is for writing user-side diary thoughts,
+    # not for writing Copilot analysis into the journal body.
+    if looks_like_copilot_analysis(content):
         raise ValueError("Input looks like Copilot analysis. Use writeback-journal instead of writeback-thought.")
 
     lines = journal_text.splitlines(keepends=True)

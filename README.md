@@ -104,7 +104,18 @@ Claude 直接读取：
 1. `journal/YYYY/MM/YYYY-MM-DD.md` — 当日日记
 2. `journal/memory.md` — 长期记忆（Active Hypotheses 区块优先）
 3. 目标日期前后 2-3 天的日记 — 时间上下文
-4. `prompts/diary-mode.md` — 模式行为规则
+4. 从当天内容抽出 `1-2` 条主线主题
+5. `journal/insights.jsonl` — 历史索引层（找已有命名模式、refs、验证线索）
+6. `journal/memory-archive.md` — 冷归档（找仍 relevant 的旧模式）
+7. 按主线主题 Grep `journal/` — 原始样本日记（关键词、变体表达、相关意象）
+8. 若命中文档中有 `[[...]]` wikilink，再额外读取一层
+9. `prompts/diary-mode.md` — 模式行为规则
+
+**Diary 输出要求（行为层）：**
+- 每篇分析都默认做主题级历史检索，而不是只在想到时才查。
+- 回答里要明确区分：这是旧模式复现、旧模式修正、旧假设验证，还是新模式出现。
+- 结尾默认做一次简短 memory audit：`无需写入` / `值得记录为验证` / `值得记录为新模式`。
+- `journal/insights.jsonl` 只作为检索索引层；面向用户仍优先引用 `[[YYYY-MM-DD]]`。
 
 **写回日记（需要时）：**
 
