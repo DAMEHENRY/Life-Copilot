@@ -44,7 +44,6 @@ inbox/
 resources/
 
 # 7. AI agent local config and scratch files
-AGENTS.md
 GEMINI.md
 .geminiignore
 quant/notes/
