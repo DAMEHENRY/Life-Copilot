@@ -33,6 +33,7 @@ env/
 venv/
 .env
 .pycache/
+logs/
 
 # 5. 如果你未来增加了任何以 “draft” (草稿) 或 “temp” 命名的测试文件夹也可屏蔽
 temp/
