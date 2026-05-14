@@ -9,7 +9,7 @@
 ## 📸 Daily Moment
 > 
 
-## From Kai
+## 💬 From Kai
 
 ## 📊 Quant Protocol Feedback
 *Copy this section to guide the next day's schedule.*
