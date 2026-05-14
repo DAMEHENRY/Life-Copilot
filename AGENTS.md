@@ -36,10 +36,11 @@
    - `journal/insights.jsonl`（索引层：已有命名模式、refs、验证线索）
    - `journal/memory-archive.md`（冷归档：仍 relevant 的旧模式）
    - `journal/` 目录（原始样本日记：关键词、变体表达、相关意象）
-7. 若命中文档里包含 `[[...]]` wikilink，继续跟读一层
-8. 回复时必须明确区分：这是旧模式复现、旧假设验证、旧模式修正，还是新模式出现
-9. 回复结尾默认做一次简短 memory audit：`无需写入` / `值得记录为验证` / `值得记录为新模式`
-10. 按 diary-mode.md 的规则回复
+7. 若当天主题涉及实效性外部信息，可联网搜索作为辅助校验
+8. 若命中文档里包含 `[[...]]` wikilink，继续跟读一层
+9. 回复时必须明确区分：这是旧模式复现、旧假设验证、旧模式修正，还是新模式出现
+10. 回复结尾默认做一次简短 memory audit：`无需写入` / `值得记录为验证` / `值得记录为新模式`
+11. 按 diary-mode.md 的规则回复
 
 需要写回日记时，先写临时文件再执行：
 ```bash
@@ -88,6 +89,7 @@ python3 scripts/copilot.py update-schedule --date <today>
 - **记忆存储**：热记忆在 `journal/memory.md`，冷归档在 `journal/memory-archive.md`，不使用系统级记忆工具
 - **洞察日志角色**：`journal/insights.jsonl` 是历史检索的索引层，不是最终面向用户的主要引用层；面向用户优先落到 `[[YYYY-MM-DD]]`
 - **证据标准**：结论必须有本地证据支撑，引用 `[[YYYY-MM-DD]]`；证据不足时明确说明
+- **联网搜索边界**：联网搜索只用于实效性外部事实校验，是辅助证据；不得用外部搜索替代日记、记忆、insights 或 `[[YYYY-MM-DD]]` 历史锚点
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
 - **输出要求**：必须包含可执行下一步，不写空泛安慰
 - **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Kai 原始对话手动粘贴到 `From Kai`，Copilot 夜间分析写入 `What Life Copilot Said`
