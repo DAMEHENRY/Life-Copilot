@@ -104,12 +104,13 @@ Claude 直接读取：
 1. `journal/YYYY/MM/YYYY-MM-DD.md` — 当日日记
 2. `journal/memory.md` — 长期记忆（Active Hypotheses 区块优先）
 3. 目标日期前后 2-3 天的日记 — 时间上下文
-4. 从当天内容抽出 `1-2` 条主线主题
-5. `journal/insights.jsonl` — 历史索引层（找已有命名模式、refs、验证线索）
-6. `journal/memory-archive.md` — 冷归档（找仍 relevant 的旧模式）
-7. 按主线主题 Grep `journal/` — 原始样本日记（关键词、变体表达、相关意象）
-8. 若命中文档中有 `[[...]]` wikilink，再额外读取一层
-9. `prompts/diary-mode.md` — 模式行为规则
+4. `## From Kai` — 当天 Telegram 原始对话流（若存在），作为白天即时证据层读取
+5. 从当天内容抽出 `1-2` 条主线主题
+6. `journal/insights.jsonl` — 历史索引层（找已有命名模式、refs、验证线索）
+7. `journal/memory-archive.md` — 冷归档（找仍 relevant 的旧模式）
+8. 按主线主题 Grep `journal/` — 原始样本日记（关键词、变体表达、相关意象）
+9. 若命中文档中有 `[[...]]` wikilink，再额外读取一层
+10. `prompts/diary-mode.md` — 模式行为规则
 
 **Diary 输出要求（行为层）：**
 - 每篇分析都默认做主题级历史检索，而不是只在想到时才查。
@@ -121,7 +122,7 @@ Claude 直接读取：
 
 ```bash
 # 先把 AI 分析写到临时文件（路径自定）
-# 再执行写回（只允许追加到 ## What Life Copilot Said 之后）
+# 再执行写回（只写入 ## What Life Copilot Said）
 python3 scripts/copilot.py writeback-journal \
   --date 2026-03-30 \
   --input-file <临时文件路径>
@@ -205,8 +206,9 @@ Claude 直接读取：
 
 | 命令 | 用途 |
 |------|------|
-| `writeback-journal --date YYYY-MM-DD --input-file <path>` | 把 AI 分析写回日记（只追加到 `## What Life Copilot Said` 之后） |
-| `writeback-thought --date YYYY-MM-DD --title "<标题>" --input-file <path>` | 把对话内容写入日记 Thoughts & Reflections，并同步更新 Daily Log |
+| 手动粘贴到 `## From Kai` | 保存当天 Telegram 上与 Kai 的原始对话流，不整理、不改写 |
+| `writeback-journal --date YYYY-MM-DD --input-file <path>` | 把夜间 AI 分析写回日记的 `## What Life Copilot Said` |
+| `writeback-thought --date YYYY-MM-DD --title "<标题>" --input-file <path>` | 把用户自己的日记正文补充写入 Thoughts & Reflections，并同步更新 Daily Log |
 | `writeback-memory --date YYYY-MM-DD --kind "<类型>" --content "<内容>"` | 写入长期记忆 memory.md |
 | `append-insight --date YYYY-MM-DD --kind "<类型>" --content "<内容>"` | **推荐**：同时写入 insights.jsonl + memory.md |
 
@@ -351,7 +353,7 @@ quant/arsenal/
 |------|------|
 | 临时文件路径自定 | 写回前先把内容存为临时文件，路径可在工作区内任意选择 |
 | 禁用 heredoc | 禁止 `--input-file - <<EOF ... EOF` 格式 |
-| 日记边界 | 只能在 `## What Life Copilot Said` 标题之后追加 |
+| 日记边界 | 用户正文补充进 `Daily Log` / `Thoughts & Reflections`；Kai 原始对话手动粘贴到 `From Kai`；夜间分析进 `What Life Copilot Said` |
 | JSONL 只追加 | `insights.jsonl` 等 JSONL 文件只能 append，禁止行级编辑或删除 |
 | 归档代替删除 | 需要"删除"一条 insight 时，将其 `status` 改为 `"archived"` |
 
