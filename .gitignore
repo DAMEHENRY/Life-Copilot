@@ -47,4 +47,5 @@ resources/
 # 7. AI agent local config and scratch files
 GEMINI.md
 .geminiignore
+.antigravitycli/
 quant/notes/

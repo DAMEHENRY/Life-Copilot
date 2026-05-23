@@ -5,7 +5,7 @@
 | 概念         | 路径                                            |
 | ---------- | --------------------------------------------- |
 | 日记         | `journal/YYYY/MM/YYYY-MM-DD.md`               |
-| Kai 原始对话  | 日记内 `## 💬 From Kai`（手动粘贴 Telegram 当天对话） |
+| AI 原始对话   | 日记内 `## 💬 From Kai`（Telegram/Kai 手动粘贴；Codex conversations 可自动导入） |
 | 长期记忆（热）    | `journal/memory.md`                           |
 | 长期记忆（冷）    | `journal/memory-archive.md`                   |
 | 洞察日志       | `journal/insights.jsonl`（append-only）         |
@@ -26,9 +26,14 @@
 
 触发：`#YYYY-MM-DD`
 
+0. 若目标日期日记文件已存在，先执行：
+```bash
+python3 scripts/copilot.py writeback-codex-day --date YYYY-MM-DD
+```
+说明：这会把当天全部 Codex conversations 按 thread 追加到 `## 💬 From Kai`；脚本会按 `### Codex Thread ...` 去重，重复分析同一天时不应重复写入。若日记文件不存在或当天无 Codex conversations，说明后跳过，不要因此中断分析。
 1. 读 `prompts/diary-mode.md`
 2. 读 `journal/YYYY/MM/YYYY-MM-DD.md`
-   - 若有 `## 💬 From Kai`，把它视为当天 Telegram 原始对话流证据层，保留 Henry / Kai 的说话人区分
+   - 若有 `## 💬 From Kai`，把它视为当天 AI 原始对话流证据层，保留 Henry / Kai / Codex 的说话人区分
 3. 读 `journal/memory.md`（热记忆：Active Hypotheses + Canonical）
 4. 读目标日期前后 2-3 天的日记（提供时间上下文）
 5. 从当天内容先抽出 `1-2` 条主线主题
@@ -50,7 +55,7 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 **Diary 写回语义（强制区分）**
 - 如果写回内容是 **对该篇日记的分析 / 镜子 / Copilot 建议**，一律使用 `writeback-journal`，写入 `## What Life Copilot Said`。
 - 如果写回内容是 **想作为“我自己的日记正文补充”保存的对话片段/想法/后续澄清**，才使用 `writeback-thought`，它会写进 `## 📝 Daily Log` 与 `## 💭 Thoughts & Reflections`。
-- 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；当前版本不使用脚本自动整理或改写。
+- 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex conversations**，使用 `writeback-codex-day` 自动追加到 `## 💬 From Kai`。
 - **禁止** 用 `writeback-thought` 去写 Copilot 分析；**禁止** 用 `writeback-journal` 去伪装用户口吻续写正文。
 
 ### Quant Mode
@@ -92,7 +97,7 @@ python3 scripts/copilot.py update-schedule --date <today>
 - **联网搜索边界**：联网搜索只用于实效性外部事实校验，是辅助证据；不得用外部搜索替代日记、记忆、insights 或 `[[YYYY-MM-DD]]` 历史锚点
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
 - **输出要求**：必须包含可执行下一步，不写空泛安慰
-- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Kai 原始对话手动粘贴到 `💬 From Kai`，Copilot 夜间分析写入 `What Life Copilot Said`
+- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex conversations 用 `writeback-codex-day` 自动追加到 `💬 From Kai`，Copilot 夜间分析写入 `What Life Copilot Said`
 
 ## 写入长期记忆
 
@@ -116,7 +121,7 @@ python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "<标题>
 
 适用范围：
 - 仅用于“把对话沉淀成用户自己的日记补充”
-- 不用于粘贴 Kai / Telegram 原始对话；Kai 原始对话直接放入 `## 💬 From Kai`
+- 不用于粘贴 AI 原始对话；Telegram/Kai 原始对话直接放入 `## 💬 From Kai`，Codex conversations 使用 `writeback-codex-day`
 - 不用于 `## What Life Copilot Said` 分析写回
 
 ## XP 完成协议

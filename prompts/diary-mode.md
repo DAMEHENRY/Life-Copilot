@@ -15,6 +15,7 @@
 # Context & Evidence Rules
 
 **要读的文件（按顺序）：**
+0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-codex-day --date YYYY-MM-DD`，把当天全部 Codex conversations 追加到 `## 💬 From Kai`；若日记文件不存在或当天无 Codex conversations，说明后跳过。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
 2. `journal/memory.md`（长期记忆，`Active Hypotheses` 区块优先）
 3. 目标日期前后 2-3 天的日记（时间上下文）
@@ -45,11 +46,12 @@
 - 不得把推断写成已证实事实；若有不确定性，要在语气中体现，或给出验证方向。
 
 **💬 From Kai 证据层：**
-- `## 💬 From Kai` 是用户手动从 Telegram 粘贴的当天原始对话流，通常包含时间戳、Henry 的即时观察/问题，以及 Kai（Life Copilot）的当场回应。
+- `## 💬 From Kai` 是当天 AI 原始对话流证据层：Telegram/Kai 对话可由用户手动粘贴，Codex conversations 可由 `writeback-codex-day` 自动导入。它通常包含时间戳、Henry 的即时观察/问题，以及 Kai/Codex 的当场回应。
 - 它属于当天的第一现场证据层，但不是用户自己的完整日记正文，也不是夜间 `## What Life Copilot Said` 分析。
 - 分析时要保留 provenance：区分 Henry 当时说了什么、Kai 当场反照了什么、晚上日记正文又如何重构这一天。
 - 不要把 Kai 的回答直接复述成夜间分析；夜间分析要做二阶工作：提炼主线、校验 Kai 的判断、补本地历史证据、指出对话流里反复出现的结构。
-- 如果 Kai 在 `💬 From Kai` 里声称“找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
+- 如果 Kai 或 Codex 在 `💬 From Kai` 里声称“找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
+- `writeback-codex-day` 按 `### Codex Thread ...` 去重；重复分析同一天时先执行该命令，不应重复写入已经存在的 thread。
 
 **书写状态校准（Writing-State Calibration）：**
 - 分析前先检查日记末尾的 `## ✍️ Writing State` 字段（时间/地点/情绪）。

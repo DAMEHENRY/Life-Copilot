@@ -34,6 +34,9 @@ QUANT_ARSENAL_DIR = ROOT / "quant" / "arsenal"
 SCHEDULES_DIR = ROOT / "quant" / "schedules"
 TEMPLATES_DIR = ROOT / "templates"
 SCHED_LIBRARY_DAY_TEMPLATE = TEMPLATES_DIR / "sched-library-day.md"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+CODEX_SESSION_INDEX = CODEX_HOME / "session_index.jsonl"
+CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -42,6 +45,7 @@ JOURNAL_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 XP_OPEN_RE = re.compile(r"^- \[ \] \*\*(XP-[^*]+)\*\*: (.+)$")
 XP_DONE_RE = re.compile(r"^- \[x\] \*\*(XP-[^*]+)\*\*: (.+)$", re.IGNORECASE)
 XP_TAG_RE = re.compile(r"#(course|lab)\b", re.IGNORECASE)
+MEMORY_CITATION_RE = re.compile(r"\n?<oai-mem-citation>.*?</oai-mem-citation>\s*", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +142,174 @@ def quant_mission_file(xp_id: str) -> Path:
 
 def format_day_label(d: date) -> str:
     return d.strftime("%A, %b %-d, %Y") if os.name != "nt" else d.strftime("%A, %b %#d, %Y")
+
+
+def format_chat_timestamp(value: str) -> str:
+    """Format a Codex UTC timestamp in the local timezone for diary chat logs."""
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    hour = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.month}/{dt.day}/{dt.year % 100:02d} {hour}:{dt.minute:02d} {ampm}"
+
+
+def content_parts_to_text(parts: object) -> str:
+    if not isinstance(parts, list):
+        return ""
+    texts: List[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in {"input_text", "output_text"}:
+            text = part.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+    return "\n".join(t for t in texts if t).strip()
+
+
+def clean_codex_user_text(text: str) -> str:
+    # Codex Desktop stores the AGENTS/env bootstrap inside the first user message.
+    # For diary transcripts, keep the actual user request and drop the bootstrap.
+    marker = "</environment_context>"
+    if "# AGENTS.md instructions" in text and marker in text:
+        text = text.split(marker, 1)[1].strip()
+    if text.startswith("<turn_aborted>"):
+        return ""
+    return text.strip()
+
+
+def clean_codex_assistant_text(text: str, keep_memory_citation: bool = False) -> str:
+    if not keep_memory_citation:
+        text = MEMORY_CITATION_RE.sub("", text)
+    return text.strip()
+
+
+def latest_codex_thread_id() -> str:
+    if not CODEX_SESSION_INDEX.exists():
+        raise FileNotFoundError(f"Codex session index not found: {CODEX_SESSION_INDEX}")
+    latest = ""
+    for line in read_text(CODEX_SESSION_INDEX).splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record.get("id"), str):
+            latest = record["id"]
+    if not latest:
+        raise ValueError(f"No thread ids found in {CODEX_SESSION_INDEX}")
+    return latest
+
+
+def codex_session_file_for_thread(thread_id: str) -> Path:
+    matches = sorted(CODEX_SESSIONS_DIR.rglob(f"*{thread_id}.jsonl"))
+    if not matches:
+        raise FileNotFoundError(f"No Codex session jsonl found for thread id: {thread_id}")
+    return matches[-1]
+
+
+def codex_session_files_for_date(d: date) -> List[Path]:
+    day_dir = CODEX_SESSIONS_DIR / d.strftime("%Y") / d.strftime("%m") / d.strftime("%d")
+    if not day_dir.exists():
+        return []
+    return sorted(day_dir.glob("*.jsonl"))
+
+
+def codex_thread_label(session_file: Path) -> str:
+    for raw in read_text(session_file).splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") == "session_meta":
+            payload = record.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("id"), str):
+                return payload["id"]
+    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", session_file.name)
+    return m.group(1) if m else session_file.stem
+
+
+def export_codex_day_transcript(
+    d: date,
+    assistant_name: str = "Codex",
+    user_name: str = "Henry",
+    include_commentary: bool = False,
+    keep_memory_citation: bool = False,
+) -> str:
+    blocks: List[str] = []
+    for session_file in codex_session_files_for_date(d):
+        transcript = export_codex_transcript(
+            session_file,
+            assistant_name=assistant_name,
+            user_name=user_name,
+            include_commentary=include_commentary,
+            keep_memory_citation=keep_memory_citation,
+        ).strip()
+        if transcript:
+            blocks.append(f"### Codex Thread {codex_thread_label(session_file)}\n\n{transcript}")
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
+
+
+def export_codex_transcript(
+    session_file: Path,
+    assistant_name: str = "Codex",
+    user_name: str = "Henry",
+    include_commentary: bool = False,
+    keep_memory_citation: bool = False,
+) -> str:
+    lines: List[str] = []
+    current_speaker = ""
+    current_text = ""
+    current_ts = ""
+
+    def flush() -> None:
+        nonlocal current_speaker, current_text, current_ts
+        text = current_text.strip()
+        if text:
+            lines.append(f"[{format_chat_timestamp(current_ts)}] {current_speaker}: {text}")
+        current_speaker = ""
+        current_text = ""
+        current_ts = ""
+
+    for raw in read_text(session_file).splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "message":
+            continue
+        role = payload.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        if role == "assistant" and payload.get("phase") == "commentary" and not include_commentary:
+            continue
+        text = content_parts_to_text(payload.get("content"))
+        if role == "user":
+            text = clean_codex_user_text(text)
+            speaker = user_name
+        else:
+            text = clean_codex_assistant_text(text, keep_memory_citation=keep_memory_citation)
+            speaker = assistant_name
+        if not text:
+            continue
+
+        ts = str(record.get("timestamp") or "")
+        if speaker == current_speaker and ts == current_ts:
+            current_text = f"{current_text}\n\n{text}".strip()
+        else:
+            flush()
+            current_speaker = speaker
+            current_text = text
+            current_ts = ts
+    flush()
+    return "\n\n".join(lines).rstrip() + ("\n" if lines else "")
 
 
 def split_markdown_sections(text: str) -> List[Tuple[str, str]]:
@@ -652,6 +824,42 @@ def replace_journal_copilot_section(journal_text: str, new_section: str) -> str:
     return journal_text[: idx + len(marker)].rstrip() + "\n\n" + new_stripped + ("\n\n" + tail if tail else "\n")
 
 
+def append_journal_section(journal_text: str, marker: str, addition: str, replace: bool = False) -> str:
+    idx = journal_text.find(marker)
+    if idx == -1:
+        raise ValueError(f"marker not found: {marker}")
+
+    body_start = idx + len(marker)
+    after_marker = journal_text[body_start:]
+    next_h2 = re.search(r"(?m)^## ", after_marker)
+    body_end = body_start + next_h2.start() if next_h2 else len(journal_text)
+    before = journal_text[:body_start].rstrip()
+    existing = journal_text[body_start:body_end].strip()
+    tail = journal_text[body_end:]
+    new_addition = addition.strip()
+
+    if replace or not existing:
+        new_body = new_addition
+    else:
+        new_body = existing.rstrip() + "\n\n" + new_addition
+
+    return before + "\n\n" + new_body.rstrip() + ("\n\n" + tail.lstrip("\n") if tail else "\n")
+
+
+def filter_existing_h3_blocks(existing: str, addition: str) -> str:
+    blocks = re.split(r"(?m)(?=^### )", addition.strip())
+    kept: List[str] = []
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+        first_line = stripped.splitlines()[0].strip()
+        if first_line.startswith("### ") and first_line in existing:
+            continue
+        kept.append(stripped)
+    return "\n\n".join(kept).strip()
+
+
 def cmd_writeback_journal(args: argparse.Namespace) -> None:
     target = parse_date_str(args.date)
     jp = journal_path_for_date(target)
@@ -660,6 +868,70 @@ def cmd_writeback_journal(args: argparse.Namespace) -> None:
     if not args.input_file:
         raise ValueError("--input-file is required")
     write_text(jp, replace_journal_copilot_section(read_text(jp), read_text(Path(args.input_file))))
+    print(str(jp))
+
+
+def cmd_writeback_codex_thread(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    jp = journal_path_for_date(target)
+    if not jp.exists():
+        raise FileNotFoundError(f"Journal not found: {jp}")
+
+    if args.session_file:
+        session_file = Path(args.session_file).expanduser()
+        thread_label = session_file.stem
+    else:
+        thread_id = args.thread_id or latest_codex_thread_id()
+        session_file = codex_session_file_for_thread(thread_id)
+        thread_label = thread_id
+    transcript = export_codex_transcript(
+        session_file,
+        assistant_name=args.assistant_name,
+        user_name=args.user_name,
+        include_commentary=args.include_commentary,
+        keep_memory_citation=args.keep_memory_citation,
+    ).strip()
+    if not transcript:
+        raise ValueError(f"No user/assistant transcript messages found in {session_file}")
+
+    heading = args.heading or f"Codex Thread {thread_label}"
+    addition = f"### {heading}\n\n{transcript}"
+    journal_text = read_text(jp)
+    if not args.replace:
+        existing = journal_text[journal_text.find("## 💬 From Kai"):]
+        addition = filter_existing_h3_blocks(existing, addition)
+        if not addition:
+            print(str(jp))
+            return
+    write_text(jp, append_journal_section(journal_text, "## 💬 From Kai", addition, replace=args.replace))
+    print(str(jp))
+
+
+def cmd_writeback_codex_day(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    jp = journal_path_for_date(target)
+    if not jp.exists():
+        raise FileNotFoundError(f"Journal not found: {jp}")
+    transcript = export_codex_day_transcript(
+        target,
+        assistant_name=args.assistant_name,
+        user_name=args.user_name,
+        include_commentary=args.include_commentary,
+        keep_memory_citation=args.keep_memory_citation,
+    ).strip()
+    if not transcript:
+        raise ValueError(f"No Codex transcript messages found for date: {target.isoformat()}")
+    addition = transcript
+    if args.heading:
+        addition = f"### {args.heading}\n\n{transcript}"
+    journal_text = read_text(jp)
+    if not args.replace:
+        existing = journal_text[journal_text.find("## 💬 From Kai"):]
+        addition = filter_existing_h3_blocks(existing, addition)
+        if not addition:
+            print(str(jp))
+            return
+    write_text(jp, append_journal_section(journal_text, "## 💬 From Kai", addition, replace=args.replace))
     print(str(jp))
 
 
@@ -732,6 +1004,56 @@ def cmd_append_insight(args: argparse.Namespace) -> None:
     with open(INSIGHTS_FILE, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     print(str(INSIGHTS_FILE))
+
+
+def cmd_export_codex_thread(args: argparse.Namespace) -> None:
+    if args.session_file:
+        session_file = Path(args.session_file).expanduser()
+    else:
+        thread_id = args.thread_id or latest_codex_thread_id()
+        session_file = codex_session_file_for_thread(thread_id)
+    if not session_file.exists():
+        raise FileNotFoundError(f"Codex session file not found: {session_file}")
+
+    transcript = export_codex_transcript(
+        session_file,
+        assistant_name=args.assistant_name,
+        user_name=args.user_name,
+        include_commentary=args.include_commentary,
+        keep_memory_citation=args.keep_memory_citation,
+    )
+    if not transcript.strip():
+        raise ValueError(f"No user/assistant transcript messages found in {session_file}")
+
+    if args.output_file:
+        out_path = Path(args.output_file).expanduser()
+    else:
+        out_dir = Path(args.output_dir).expanduser() if args.output_dir else Path("/tmp")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_path = out_dir / f"from-codex-{stamp}.md"
+    write_text(out_path, transcript)
+    print(str(out_path))
+
+
+def cmd_export_codex_day(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    transcript = export_codex_day_transcript(
+        target,
+        assistant_name=args.assistant_name,
+        user_name=args.user_name,
+        include_commentary=args.include_commentary,
+        keep_memory_citation=args.keep_memory_citation,
+    )
+    if not transcript.strip():
+        raise ValueError(f"No Codex transcript messages found for date: {target.isoformat()}")
+
+    if args.output_file:
+        out_path = Path(args.output_file).expanduser()
+    else:
+        out_dir = Path(args.output_dir).expanduser() if args.output_dir else Path("/tmp")
+        out_path = out_dir / f"from-codex-{target.isoformat()}.md"
+    write_text(out_path, transcript)
+    print(str(out_path))
 
 
 def cmd_compact_memory(_args: argparse.Namespace) -> None:
@@ -912,6 +1234,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--input-file", required=True)
     s.set_defaults(func=cmd_writeback_journal)
 
+    s = sub.add_parser("writeback-codex-thread")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--thread-id", help="Codex thread id from ~/.codex/session_index.jsonl. Defaults to latest.")
+    g.add_argument("--session-file", help="Direct path to a Codex rollout jsonl file.")
+    s.add_argument("--date", required=True)
+    s.add_argument("--heading", help="Markdown h3 heading under From Kai. Defaults to the thread id.")
+    s.add_argument("--user-name", default="Henry")
+    s.add_argument("--assistant-name", default="Codex")
+    s.add_argument("--include-commentary", action="store_true", help="Include assistant progress/status updates.")
+    s.add_argument("--keep-memory-citation", action="store_true", help="Keep oai memory citation blocks in assistant messages.")
+    s.add_argument("--replace", action="store_true", help="Replace the existing From Kai section instead of appending.")
+    s.set_defaults(func=cmd_writeback_codex_thread)
+
+    s = sub.add_parser("writeback-codex-day")
+    s.add_argument("--date", required=True)
+    s.add_argument("--heading", help="Markdown h3 heading under From Kai. Defaults to the date.")
+    s.add_argument("--user-name", default="Henry")
+    s.add_argument("--assistant-name", default="Codex")
+    s.add_argument("--include-commentary", action="store_true", help="Include assistant progress/status updates.")
+    s.add_argument("--keep-memory-citation", action="store_true", help="Keep oai memory citation blocks in assistant messages.")
+    s.add_argument("--replace", action="store_true", help="Replace the existing From Kai section instead of appending.")
+    s.set_defaults(func=cmd_writeback_codex_day)
+
     s = sub.add_parser("writeback-memory")
     s.add_argument("--date", required=True)
     s.add_argument("--kind", required=True)
@@ -924,6 +1269,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--kind", required=True)
     s.add_argument("--content", required=True)
     s.set_defaults(func=cmd_append_insight)
+
+    s = sub.add_parser("export-codex-thread")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--thread-id", help="Codex thread id from ~/.codex/session_index.jsonl. Defaults to latest.")
+    g.add_argument("--session-file", help="Direct path to a Codex rollout jsonl file.")
+    s.add_argument("--output-file", help="Write transcript to this markdown file.")
+    s.add_argument("--output-dir", help="Directory for auto-named transcript output. Defaults to /tmp.")
+    s.add_argument("--user-name", default="Henry")
+    s.add_argument("--assistant-name", default="Codex")
+    s.add_argument("--include-commentary", action="store_true", help="Include assistant progress/status updates.")
+    s.add_argument("--keep-memory-citation", action="store_true", help="Keep oai memory citation blocks in assistant messages.")
+    s.set_defaults(func=cmd_export_codex_thread)
+
+    s = sub.add_parser("export-codex-day")
+    s.add_argument("--date", required=True)
+    s.add_argument("--output-file", help="Write combined transcript to this markdown file.")
+    s.add_argument("--output-dir", help="Directory for auto-named transcript output. Defaults to /tmp.")
+    s.add_argument("--user-name", default="Henry")
+    s.add_argument("--assistant-name", default="Codex")
+    s.add_argument("--include-commentary", action="store_true", help="Include assistant progress/status updates.")
+    s.add_argument("--keep-memory-citation", action="store_true", help="Keep oai memory citation blocks in assistant messages.")
+    s.set_defaults(func=cmd_export_codex_day)
 
     s = sub.add_parser("compact-memory")
     s.set_defaults(func=cmd_compact_memory)
