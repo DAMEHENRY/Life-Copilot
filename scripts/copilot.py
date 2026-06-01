@@ -4,7 +4,7 @@ Life Copilot — lean orchestration utilities.
 
 Only structural write commands that are unsafe for Claude to do freehand:
 writeback-journal, writeback-thought, writeback-memory, append-insight,
-compact-memory, quant-mission, sync-quant-state,
+compact-memory, quant-mission, quant-question-link, sync-quant-state,
 sync-roadmap-stats, update-schedule.
 """
 
@@ -37,6 +37,10 @@ SCHED_LIBRARY_DAY_TEMPLATE = TEMPLATES_DIR / "sched-library-day.md"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 CODEX_SESSION_INDEX = CODEX_HOME / "session_index.jsonl"
 CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
+
+AI_CONVERSATIONS_DIR = JOURNAL_DIR / "ai-conversations"
+CLAUDIAN_SESSIONS_DIR = ROOT / ".claudian" / "sessions"
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects" / "-Users-henry-Library-Mobile-Documents-iCloud-md-obsidian-Documents-Life"
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -152,6 +156,332 @@ def format_chat_timestamp(value: str) -> str:
     return f"{dt.month}/{dt.day}/{dt.year % 100:02d} {hour}:{dt.minute:02d} {ampm}"
 
 
+def timestamp_to_local_date(value: str) -> Optional[date]:
+    """Convert an ISO timestamp string to its local-timezone date, or None."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().date()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def ai_conversation_dir_for_date(d: date) -> Path:
+    return AI_CONVERSATIONS_DIR / d.strftime("%Y") / d.strftime("%m")
+
+
+def ai_trace_path_for_date(d: date, source: str) -> Path:
+    if source not in {"codex", "claudian"}:
+        raise ValueError(f"Unsupported source: {source}. Use 'codex' or 'claudian'.")
+    return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
+
+
+def obsidian_wikilink_for_path(path: Path) -> str:
+    return f"[[{path.stem}]]"
+
+
+def format_obsidian_link(target_stem: str, alias: str = "", heading: str = "") -> str:
+    """Build an Obsidian wikilink with optional heading anchor and alias.
+
+    Examples:
+        format_obsidian_link("xp-31-derivation-guide")
+        → [[xp-31-derivation-guide]]
+        format_obsidian_link("xp-31-derivation-guide", heading="Shrinkage Estimators")
+        → [[xp-31-derivation-guide#Shrinkage Estimators]]
+        format_obsidian_link("xp-31-derivation-guide", alias="Why does shrinkage help?", heading="Shrinkage Estimators")
+        → [[xp-31-derivation-guide#Shrinkage Estimators|Why does shrinkage help?]]
+    """
+    link = target_stem
+    if heading:
+        link = f"{link}#{heading}"
+    if alias:
+        link = f"{link}|{alias}"
+    return f"[[{link}]]"
+
+
+def parse_markdown_headings(text: str) -> List[Tuple[int, str]]:
+    """Return list of (level, heading_text) for all headings in markdown text.
+
+    Level 1 for '#', level 2 for '##', etc. Only heading text is returned
+    (without the leading '#' markers).
+    """
+    headings: List[Tuple[int, str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and not stripped.startswith("```"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            title = stripped[level:].strip()
+            if title and level <= 4:
+                headings.append((level, title))
+    return headings
+
+
+def iterate_quant_files() -> List[Path]:
+    """Yield markdown files from quant/arsenal/**/*.md plus quant/roadmap.md."""
+    files: List[Path] = []
+    if QUANT_ARSENAL_DIR.exists():
+        files.extend(sorted(QUANT_ARSENAL_DIR.glob("**/*.md")))
+    if ROADMAP_FILE.exists() and ROADMAP_FILE not in files:
+        files.append(ROADMAP_FILE)
+    return files
+
+
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "to", "of", "in", "for",
+    "on", "with", "at", "by", "from", "as", "into", "through", "during",
+    "before", "after", "above", "below", "between", "out", "off", "over",
+    "under", "again", "further", "then", "once", "here", "there", "when",
+    "where", "why", "how", "all", "both", "each", "few", "more", "most",
+    "other", "some", "such", "no", "nor", "not", "only", "own", "same",
+    "so", "than", "too", "very", "just", "and", "but", "or", "if", "while",
+    "about", "up", "down", "it", "its", "that", "this", "what", "which",
+    "who", "whom", "these", "those", "i", "me", "my", "we", "our", "you",
+    "your", "he", "him", "his", "she", "her", "they", "them", "their",
+    "use", "used", "using",
+})
+
+
+def _tokenize(text: str) -> List[str]:
+    """Lowercase alphanumeric tokens, filtering stop words. Deduplicated."""
+    tokens = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", text.lower())
+    seen: set = set()
+    result: List[str] = []
+    for t in tokens:
+        if t not in _STOP_WORDS and len(t) > 1 and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
+_BODY_QUESTION_RE = re.compile(
+    r"(?:"
+    r"^#{4,6}\s+.+\?$"       # h4-h6 ending with ?
+    r"|^\s*[-*]\s+.+\?$"     # bullet ending with ?
+    r"|^\s*\d+[.)]\s+.+\?$"  # numbered item ending with ?
+    r"|^\s*[-*]\s+\*\*.+?\*\*"  # bullet with bold text (checkpoint question)
+    r"|^.+\?$"                # any line ending with ? (catch-all)
+    r")",
+    re.MULTILINE,
+)
+
+
+def _score_file(question_tokens: List[str], path: Path, content: str, xp_boost: str = "") -> dict:
+    """Score a quant file against a tokenized question.
+
+    Returns a dict with score breakdown and matched headings.
+    """
+    stem = path.stem.lower()
+    stem_tokens = set(re.findall(r"[a-z0-9]+", stem))
+    q_set = set(question_tokens)
+
+    # Score from filename stem
+    stem_hits = sum(1 for t in question_tokens if t in stem_tokens)
+    stem_score = stem_hits * 3.0
+
+    # XP boost: if the file stem or content mentions the target XP, add bonus
+    xp_bonus = 0.0
+    if xp_boost:
+        xp_lower = xp_boost.lower()
+        if xp_lower in stem or xp_lower in content[:500].lower():
+            xp_bonus = 12.0
+
+    # Score from headings — use top-3 capped, not sum of all
+    headings = parse_markdown_headings(content)
+    heading_scores: List[Tuple[int, str, float]] = []
+    for level, title in headings:
+        h_tokens = set(_tokenize(title))
+        hits = sum(1 for t in question_tokens if t in h_tokens)
+        if hits > 0:
+            weight = (5 - level) * 1.5
+            heading_scores.append((level, title, hits * weight))
+
+    heading_scores.sort(key=lambda x: x[2], reverse=True)
+    heading_score = sum(h for _, _, h in heading_scores[:3])
+
+    # Score from body — scan full content, detect question-like lines
+    lines = content.splitlines()
+    body_token_hits = 0
+    body_questions: List[dict] = []
+    current_heading = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            h_text = stripped.lstrip("#").strip()
+            if h_text:
+                current_heading = h_text
+            continue
+        lower = stripped.lower()
+        tokens_in_line = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", lower)) - _STOP_WORDS
+        overlap = q_set & tokens_in_line
+        if not overlap:
+            continue
+        body_token_hits += len(overlap)
+        is_question = (
+            stripped.endswith("?")
+            or re.match(r"^\s*[-*]\s+\*\*", stripped) is not None
+            or re.match(r"^\s*\d+[.)]\s+.*\?$", stripped) is not None
+        )
+        if is_question and len(overlap) >= 2:
+            body_questions.append({
+                "line": stripped[:120],
+                "heading": current_heading,
+                "overlap": len(overlap),
+                "tokens": sorted(overlap),
+            })
+
+    body_score = min(body_token_hits * 0.2, 5.0)
+    body_question_bonus = 0.0
+    best_body_heading = ""
+    if body_questions:
+        body_questions.sort(key=lambda q: q["overlap"], reverse=True)
+        best = body_questions[0]
+        body_question_bonus = best["overlap"] * 4.0
+        best_body_heading = best["heading"]
+
+    total = stem_score + xp_bonus + heading_score + body_score + body_question_bonus
+
+    # Pick best heading: prefer a heading-level match, fall back to body question anchor
+    best_heading = ""
+    if heading_scores:
+        best_heading = heading_scores[0][1]
+    elif best_body_heading:
+        best_heading = best_body_heading
+
+    return {
+        "path": path,
+        "stem": path.stem,
+        "total": round(total, 2),
+        "stem_score": round(stem_score, 2),
+        "xp_bonus": round(xp_bonus, 2),
+        "heading_score": round(heading_score, 2),
+        "body_score": round(body_score, 2),
+        "body_question_bonus": round(body_question_bonus, 2),
+        "best_heading": best_heading,
+        "heading_matches": [(lv, h, round(s, 2)) for lv, h, s in heading_scores[:5]],
+        "body_questions": body_questions[:3],
+    }
+
+
+def cmd_quant_question_link(args: argparse.Namespace) -> None:
+    """Search quant files for question-link candidates. Read-only, no mutation."""
+    question = args.question.strip()
+    if not question:
+        raise ValueError("--question is required")
+
+    question_tokens = _tokenize(question)
+    if not question_tokens:
+        raise ValueError("Question produced no meaningful tokens after filtering stop words.")
+
+    xp_boost = ""
+    if args.xp:
+        xp_boost = normalize_xp_id(args.xp)
+
+    files = iterate_quant_files()
+    if not files:
+        print("[warn] No quant files found in quant/arsenal/ or quant/roadmap.md")
+        return
+
+    top_n = args.top or 8
+
+    # Score all files
+    results: List[dict] = []
+    for path in files:
+        try:
+            content = read_text(path)
+        except Exception:
+            continue
+        result = _score_file(question_tokens, path, content, xp_boost=xp_boost)
+        if result["total"] > 0:
+            results.append(result)
+
+    results.sort(key=lambda r: r["total"], reverse=True)
+    top = results[:top_n]
+
+    if args.json:
+        output = {
+            "question": question,
+            "question_tokens": question_tokens,
+            "xp_boost": xp_boost,
+            "search_scope": [str(p.relative_to(ROOT)) for p in files],
+            "note": "Lexical first-pass retrieval only; inspect candidates and run manual rg searches before deciding.",
+            "candidates": [
+                {
+                    "file": str(r["path"].relative_to(ROOT)),
+                    "stem": r["stem"],
+                    "score": r["total"],
+                    "score_breakdown": {
+                        "stem": r["stem_score"],
+                        "xp_bonus": r["xp_bonus"],
+                        "heading": r["heading_score"],
+                        "body": r["body_score"],
+                        "body_question_bonus": r["body_question_bonus"],
+                    },
+                    "best_heading": r["best_heading"],
+                    "heading_matches": [
+                        {"level": lv, "heading": h, "score": s}
+                        for lv, h, s in r["heading_matches"]
+                    ],
+                    "body_questions": r.get("body_questions", []),
+                }
+                for r in top
+            ],
+        }
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+        return
+
+    # Human-readable output
+    print(f"=== Quant Question-Link Retrieval ===")
+    print()
+    print(f"Question: {question}")
+    print(f"Tokens:   {', '.join(question_tokens)}")
+    if xp_boost:
+        print(f"XP boost: {xp_boost}")
+    print(f"Scope:    {len(files)} files searched")
+    print()
+
+    if not top:
+        print("No matching files found. Consider creating a new note in quant/arsenal/.")
+        return
+
+    print(f"--- Top {len(top)} Candidates ---")
+    print()
+    for i, r in enumerate(top, 1):
+        rel = r["path"].relative_to(ROOT)
+        print(f"  {i}. {rel}")
+        print(f"     Score: {r['total']}  (stem={r['stem_score']} xp={r['xp_bonus']} heading={r['heading_score']} body={r['body_score']} q_bonus={r['body_question_bonus']})")
+        if r["best_heading"]:
+            print(f"     Best heading: \"{r['best_heading']}\"")
+        if r["heading_matches"]:
+            matches_str = ", ".join(f"\"{h}\" ({s})" for _, h, s in r["heading_matches"][:3])
+            print(f"     Top headings: {matches_str}")
+        if r.get("body_questions"):
+            for bq in r["body_questions"][:2]:
+                print(f"     Body Q (overlap={bq['overlap']}, under \"{bq['heading']}\"): {bq['line'][:90]}")
+        print()
+
+    print("--- Suggested Obsidian Links ---")
+    print()
+    alias = question
+    for r in top[:3]:
+        stem = r["stem"]
+        heading = r["best_heading"]
+        link = format_obsidian_link(stem, alias=alias, heading=heading)
+        print(f"  - {link}")
+    print()
+
+    print("  ⚠ Ranking is lexical. Open candidates and run additional rg searches")
+    print("    with synonym/mechanism keywords before creating new notes.")
+    print()
+
+    print("--- Decision Checklist ---")
+    print()
+    print("  □ 1. Full answer? → Use alias wikilink with heading anchor.")
+    print("  □ 2. Broad answer? → Link + add a short jump hint.")
+    print("  □ 3. Partial answer? → Extend the existing file, then link.")
+    print("  □ 4. No answer? → Create new note in quant/arsenal/.")
+    print()
+
+
 def content_parts_to_text(parts: object) -> str:
     if not isinstance(parts, list):
         return ""
@@ -231,6 +561,23 @@ def codex_thread_label(session_file: Path) -> str:
     return m.group(1) if m else session_file.stem
 
 
+def codex_session_files_for_date_range(d: date) -> List[Path]:
+    """Gather candidate Codex JSONL files from d-1, d, and d+1 directories.
+
+    This catches sessions that span midnight.  Per-message timestamp filtering
+    in ``export_codex_transcript(target_date=…)`` handles the precise cutoff.
+    """
+    seen: set = set()
+    result: List[Path] = []
+    for offset in (-1, 0, 1):
+        day = d + timedelta(days=offset)
+        for p in codex_session_files_for_date(day):
+            if p not in seen:
+                seen.add(p)
+                result.append(p)
+    return result
+
+
 def export_codex_day_transcript(
     d: date,
     assistant_name: str = "Codex",
@@ -239,13 +586,14 @@ def export_codex_day_transcript(
     keep_memory_citation: bool = False,
 ) -> str:
     blocks: List[str] = []
-    for session_file in codex_session_files_for_date(d):
+    for session_file in codex_session_files_for_date_range(d):
         transcript = export_codex_transcript(
             session_file,
             assistant_name=assistant_name,
             user_name=user_name,
             include_commentary=include_commentary,
             keep_memory_citation=keep_memory_citation,
+            target_date=d,
         ).strip()
         if transcript:
             blocks.append(f"### Codex Thread {codex_thread_label(session_file)}\n\n{transcript}")
@@ -258,7 +606,14 @@ def export_codex_transcript(
     user_name: str = "Henry",
     include_commentary: bool = False,
     keep_memory_citation: bool = False,
+    target_date: Optional[date] = None,
 ) -> str:
+    """Export a Codex session transcript.
+
+    When *target_date* is provided, only records whose timestamp (converted to
+    local timezone) matches that date are included.  This lets multi-day
+    sessions be sliced into per-day traces.
+    """
     lines: List[str] = []
     current_speaker = ""
     current_text = ""
@@ -301,6 +656,11 @@ def export_codex_transcript(
             continue
 
         ts = str(record.get("timestamp") or "")
+        # Per-message date filter: skip records that don't fall on target_date.
+        if target_date is not None:
+            if not ts or timestamp_to_local_date(ts) != target_date:
+                continue
+
         if speaker == current_speaker and ts == current_ts:
             current_text = f"{current_text}\n\n{text}".strip()
         else:
@@ -310,6 +670,139 @@ def export_codex_transcript(
             current_ts = ts
     flush()
     return "\n\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
+def claudian_meta_files() -> List[Path]:
+    if not CLAUDIAN_SESSIONS_DIR.exists():
+        return []
+    return sorted(CLAUDIAN_SESSIONS_DIR.glob("*.meta.json"))
+
+
+def claudian_sessions_for_date(d: date) -> List[dict]:
+    """Return Claudian session metadata dicts whose provider JSONL exists.
+
+    Uses meta createdAt/updatedAt as a coarse pre-filter but also includes
+    sessions whose timestamps don't exactly match d — per-message timestamp
+    filtering in export_claudian_day_transcript handles the precise cutoff.
+    """
+    sessions: List[dict] = []
+    for meta_file in claudian_meta_files():
+        try:
+            meta = json.loads(read_text(meta_file))
+        except (json.JSONDecodeError, FileNotFoundError):
+            continue
+        provider_id = meta.get("providerState", {}).get("providerSessionId")
+        if not provider_id:
+            continue
+        jsonl_path = CLAUDE_PROJECTS_DIR / f"{provider_id}.jsonl"
+        if not jsonl_path.exists():
+            continue
+        # Coarse filter: include if createdAt or updatedAt is within ±1 day of d.
+        # Per-message filtering in export handles the exact date match.
+        created = meta.get("createdAt")
+        updated = meta.get("updatedAt")
+        include = False
+        for ts_ms in [created, updated]:
+            if ts_ms:
+                meta_date = datetime.fromtimestamp(ts_ms / 1000).date()
+                if abs((meta_date - d).days) <= 1:
+                    include = True
+                    break
+        if include:
+            sessions.append(meta)
+    return sessions
+
+
+def export_claudian_day_transcript(d: date, user_name: str = "Henry", assistant_name: str = "Claudian") -> Tuple[str, int, int]:
+    """Build a combined transcript of all Claudian sessions for date d.
+
+    Returns (transcript_text, message_count, session_count).
+    Only includes messages whose record timestamp falls on d in local timezone.
+    """
+    sessions = claudian_sessions_for_date(d)
+    blocks: List[str] = []
+    total_messages = 0
+    for meta in sessions:
+        provider_id = meta["providerState"]["providerSessionId"]
+        title = meta.get("title") or provider_id
+        jsonl_path = CLAUDE_PROJECTS_DIR / f"{provider_id}.jsonl"
+        if not jsonl_path.exists():
+            continue
+        lines: List[str] = []
+        current_speaker = ""
+        current_text = ""
+        current_ts = ""
+
+        def flush() -> None:
+            nonlocal current_speaker, current_text, current_ts
+            text = current_text.strip()
+            if text:
+                lines.append(f"[{current_ts}] {current_speaker}: {text}")
+            current_speaker = ""
+            current_text = ""
+            current_ts = ""
+
+        for raw in read_text(jsonl_path).splitlines():
+            if not raw.strip():
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            rec_type = record.get("type")
+            if rec_type not in ("user", "assistant"):
+                continue
+
+            # Date filter: only include messages whose timestamp falls on d.
+            ts = str(record.get("timestamp") or "")
+            if not ts or timestamp_to_local_date(ts) != d:
+                continue
+
+            if rec_type == "user":
+                msg = record.get("message", {})
+                content = msg.get("content")
+                if isinstance(content, str):
+                    text = content.strip()
+                elif isinstance(content, list):
+                    text_parts = [
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "input_text" and p.get("text")
+                    ]
+                    text = "\n".join(text_parts).strip()
+                else:
+                    continue
+                if not text:
+                    continue
+                speaker = user_name
+            else:
+                msg = record.get("message", {})
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                text_parts = [
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text" and p.get("text")
+                ]
+                text = "\n".join(text_parts).strip()
+                if not text:
+                    continue
+                speaker = assistant_name
+
+            formatted_ts = format_chat_timestamp(ts)
+            if speaker == current_speaker and formatted_ts == current_ts:
+                current_text = f"{current_text}\n\n{text}".strip()
+            else:
+                flush()
+                current_speaker = speaker
+                current_text = text
+                current_ts = formatted_ts
+        flush()
+        if lines:
+            total_messages += len(lines)
+            blocks.append(f"### Claudian Session {provider_id} - {title}\n\n" + "\n\n".join(lines))
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
 
 
 def split_markdown_sections(text: str) -> List[Tuple[str, str]]:
@@ -674,6 +1167,11 @@ def render_quant_mission(xp_id: str, xp_task: str, d: date) -> str:
         "    Follow the Learning Collaboration Protocol in prompts/quant-mode.md.",
         "    Classify as THEORY / CODE / HYBRID and generate accordingly.",
         "    Replace this block with your generated content. -->", "",
+        "## Question Links",
+        "<!-- AI_FILL: After generating the mission guide, collect reusable learning",
+        "    questions as bullet-point wikilinks here. Use [[target#heading|question]]",
+        "    format. Run: python3 scripts/copilot.py quant-question-link --question \"...\"",
+        "    to search existing files before creating new link targets. -->", "",
     ])
 
 
@@ -932,6 +1430,124 @@ def cmd_writeback_codex_day(args: argparse.Namespace) -> None:
             print(str(jp))
             return
     write_text(jp, append_journal_section(journal_text, "## 💬 From Kai", addition, replace=args.replace))
+    print(str(jp))
+
+
+def cmd_preview_ai_day(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    jp = journal_path_for_date(target)
+
+    codex_transcript = export_codex_day_transcript(target).strip()
+    codex_msg_count = codex_transcript.count("\n[") + (1 if codex_transcript.startswith("[") else 0) if codex_transcript else 0
+    codex_session_count = codex_transcript.count("### Codex Thread ") if codex_transcript else 0
+
+    claudian_transcript, claudian_msg_count, claudian_session_count = export_claudian_day_transcript(target)
+
+    codex_path = ai_trace_path_for_date(target, "codex")
+    claudian_path = ai_trace_path_for_date(target, "claudian")
+    codex_link = obsidian_wikilink_for_path(codex_path)
+    claudian_link = obsidian_wikilink_for_path(claudian_path)
+
+    print(f"=== AI Day Preview: {target.isoformat()} ===")
+    print()
+
+    if codex_transcript:
+        print(f"  Codex trace file:     {codex_path.relative_to(ROOT)}")
+        print(f"  Codex sessions:       {codex_session_count}")
+        print(f"  Codex messages:       {codex_msg_count}")
+        print(f"  Journal wikilink:     - {codex_link}：Life Copilot / planning / reflection conversations.")
+    else:
+        print("  Codex:                (no messages for this date)")
+
+    print()
+
+    if claudian_transcript:
+        print(f"  Claudian trace file:  {claudian_path.relative_to(ROOT)}")
+        print(f"  Claudian sessions:    {claudian_session_count}")
+        print(f"  Claudian messages:    {claudian_msg_count}")
+        print(f"  Journal wikilink:     - {claudian_link}：Obsidian-side Quant Mode and note-navigation conversations.")
+    else:
+        print("  Claudian:             (no sessions for this date)")
+
+    print()
+
+    if jp.exists():
+        print(f"  Journal file:         {jp.relative_to(ROOT)} (exists)")
+    else:
+        print(f"  Journal file:         {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
+
+    if not codex_transcript and not claudian_transcript:
+        print("\n  No AI conversations found for this date.")
+
+
+def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    jp = journal_path_for_date(target)
+    if not jp.exists():
+        raise FileNotFoundError(f"Journal not found: {jp}")
+
+    codex_transcript = export_codex_day_transcript(target).strip()
+    claudian_transcript, _, _ = export_claudian_day_transcript(target)
+
+    if not codex_transcript and not claudian_transcript:
+        raise ValueError(f"No AI conversations (Codex or Claudian) found for date: {target.isoformat()}")
+
+    codex_path = ai_trace_path_for_date(target, "codex")
+    claudian_path = ai_trace_path_for_date(target, "claudian")
+    codex_link = obsidian_wikilink_for_path(codex_path)
+    claudian_link = obsidian_wikilink_for_path(claudian_path)
+
+    # Write Codex trace file
+    if codex_transcript:
+        codex_content = "\n".join([
+            "---",
+            f"date: {target.isoformat()}",
+            "source: codex",
+            "generated_by: scripts/copilot.py writeback-ai-day",
+            "---",
+            "",
+            f"# {target.isoformat()} Codex Trace",
+            "",
+            codex_transcript,
+        ])
+        write_text(codex_path, codex_content)
+        print(f"  wrote: {codex_path.relative_to(ROOT)}")
+
+    # Write Claudian trace file
+    if claudian_transcript:
+        claudian_content = "\n".join([
+            "---",
+            f"date: {target.isoformat()}",
+            "source: claudian",
+            "generated_by: scripts/copilot.py writeback-ai-day",
+            "---",
+            "",
+            f"# {target.isoformat()} Claudian Trace",
+            "",
+            claudian_transcript,
+        ])
+        write_text(claudian_path, claudian_content)
+        print(f"  wrote: {claudian_path.relative_to(ROOT)}")
+
+    # Append deduped wikilink bullets to journal
+    journal_text = read_text(jp)
+    from_kai_marker = "## 💬 From Kai"
+    if from_kai_marker not in journal_text:
+        raise ValueError(f"Section '{from_kai_marker}' not found in journal")
+
+    links_to_add: List[str] = []
+    if codex_transcript and codex_link not in journal_text:
+        links_to_add.append(f"- {codex_link}：Life Copilot / planning / reflection conversations.")
+    if claudian_transcript and claudian_link not in journal_text:
+        links_to_add.append(f"- {claudian_link}：Obsidian-side Quant Mode and note-navigation conversations.")
+
+    if links_to_add:
+        addition = "\n".join(links_to_add)
+        write_text(jp, append_journal_section(journal_text, from_kai_marker, addition))
+        print(f"  updated: {jp.relative_to(ROOT)}")
+    else:
+        print(f"  (wikilinks already present in {jp.relative_to(ROOT)})")
+
     print(str(jp))
 
 
@@ -1223,6 +1839,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_quant_mission)
 
+    s = sub.add_parser(
+        "quant-question-link",
+        help="First-pass candidate retrieval for question links; inspect files before deciding.",
+        description="First-pass candidate retrieval for question links; inspect files before deciding.",
+    )
+    s.add_argument("--question", required=True, help="The learning question to search for.")
+    s.add_argument("--xp", default="", help="XP ID to boost in scoring (e.g. XP-31). Does not restrict search.")
+    s.add_argument("--top", type=int, default=8, help="Number of top candidates to show. Default: 8.")
+    s.add_argument("--json", action="store_true", help="Emit structured JSON instead of human-readable bullets.")
+    s.set_defaults(func=cmd_quant_question_link)
+
     s = sub.add_parser("writeback-thought")
     s.add_argument("--date", required=True)
     s.add_argument("--title", required=True)
@@ -1256,6 +1883,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--keep-memory-citation", action="store_true", help="Keep oai memory citation blocks in assistant messages.")
     s.add_argument("--replace", action="store_true", help="Replace the existing From Kai section instead of appending.")
     s.set_defaults(func=cmd_writeback_codex_day)
+
+    s = sub.add_parser("preview-ai-day")
+    s.add_argument("--date", required=True)
+    s.set_defaults(func=cmd_preview_ai_day)
+
+    s = sub.add_parser("writeback-ai-day")
+    s.add_argument("--date", required=True)
+    s.set_defaults(func=cmd_writeback_ai_day)
 
     s = sub.add_parser("writeback-memory")
     s.add_argument("--date", required=True)

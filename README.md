@@ -1,6 +1,6 @@
 # Life Copilot — 使用手册
 
-> 版本：v4.1（2026-03-30）
+> 版本：v4.2（2026-06-01）
 > 运行环境：Claude Code (或任意代理 AI) + Obsidian + macOS
 > 核心脚本：`scripts/copilot.py`
 
@@ -27,23 +27,22 @@
 
 Life Copilot 是一个本地 AI 个人操作系统，运行在 Obsidian 工作目录上，通过 Claude Code 提供智能分析与写回能力。
 
-**核心设计原则（v4.0）：**
+**核心设计原则（v4.2）：**
 
 - **直读源文件**：Claude Code 直接读取日记、记忆、路线图等原始文件，无需预生成上下文包
+- **AI 对话可追溯**：Codex / Claudian 当日对话归档为独立 trace 文件，日记只保留 wikilink 索引
 - **Append-only 数据**：洞察日志（insights.jsonl）、日程历史只增不改
-- **两层路由**：CLAUDE.md（路由 + 文件地图）→ mode prompt（完整行为规则）
+- **两层路由**：AGENTS.md（路由 + 文件地图）→ mode prompt（完整行为规则）；CLAUDE.md 仅保留兼容转发
 - **本地优先**：所有数据在 iCloud 同步的 Obsidian 目录，无外部数据库依赖
 
-**v4.0 相比 v3.0 的主要变化：**
+**v4.2 相比 v4.0 的主要变化：**
 
-| 项目 | v3.0 | v4.0 |
+| 项目 | v4.0 | v4.2 |
 |------|------|------|
-| 脚本行数 | 2,376 行 | 884 行 |
-| CLAUDE.md 行数 | 228 行 | ~80 行 |
-| 每次交互上下文 | ~80KB（预生成上下文包） | ~15-25KB（直读源文件） |
-| 索引系统 | 词法 + 语义双索引（10.8MB） | 无（Grep 替代） |
-| 子命令数 | 16 | 11 |
-| 间接层数 | 4 层 | 1 层 |
+| AI 原始对话 | Codex 直接追加进日记 | Codex / Claudian 写入 `journal/ai-conversations/` trace，日记保存 wikilink |
+| Diary 预处理 | `writeback-codex-day` | `writeback-ai-day`，支持每日预览 `preview-ai-day` |
+| Quant 学习链接 | 主要靠手动 Grep | `quant-question-link` 做第一轮候选检索，代理仍需打开文件验证 |
+| 索引策略 | 无 embedding/index，Grep 替代 | 继续本地文件直读，避免恢复旧 embedding/index 系统 |
 
 ---
 
@@ -51,7 +50,8 @@ Life Copilot 是一个本地 AI 个人操作系统，运行在 Obsidian 工作�
 
 ```
 Life/                                     ← Obsidian 工作目录根
-├── CLAUDE.md                             ← AI 行为规则（文件地图 + 模式路由 + 护栏）
+├── AGENTS.md                             ← AI 行为规则（文件地图 + 模式路由 + 护栏）
+├── CLAUDE.md                             ← 兼容入口，转发到 AGENTS.md
 ├── README.md                             ← 本文件
 ├── .gitignore                            ← 🌟 隐私防洪堤（拦截日记、目标与配置不入库）
 │
@@ -60,6 +60,7 @@ Life/                                     ← Obsidian 工作目录根
 │
 ├── journal/                              ← 日记模块 (绝对私密区)
 │   ├── YYYY/MM/YYYY-MM-DD.md            ← 每日日记
+│   ├── ai-conversations/YYYY/MM/         ← Codex / Claudian 每日 trace 文件
 │   ├── memory.md                         ← 长期热记忆（结构化分区，Claude 直读）
 │   ├── memory-archive.md                 ← 🌟 记忆冷归档（过期假设自动沉淀至此）
 │   └── insights.jsonl                    ← 洞察日志（append-only）
@@ -98,13 +99,31 @@ Life/                                     ← Obsidian 工作目录根
 
 **触发方式：** 输入 `#YYYY-MM-DD`（例如 `#2026-03-30`）
 
-**AI 执行流程（无预处理命令）：**
+**AI 执行流程：**
+
+若目标日期日记存在，先归档当天 AI 对话：
+
+```bash
+python3 scripts/copilot.py writeback-ai-day --date 2026-03-30
+```
+
+这会把当天 Codex / Claudian 对话写入：
+- `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-codex-trace.md`
+- `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-claudian-trace.md`
+
+日记的 `## 💬 From Kai` 只追加 `[[YYYY-MM-DD-codex-trace]]` / `[[YYYY-MM-DD-claudian-trace]]` 这样的 wikilink 索引。重复执行按 wikilink 去重。
+
+如果只是想先看会写入什么，使用：
+
+```bash
+python3 scripts/copilot.py preview-ai-day --date 2026-03-30
+```
 
 Claude 直接读取：
 1. `journal/YYYY/MM/YYYY-MM-DD.md` — 当日日记
 2. `journal/memory.md` — 长期记忆（Active Hypotheses 区块优先）
 3. 目标日期前后 2-3 天的日记 — 时间上下文
-4. `## 💬 From Kai` — 当天 Telegram 原始对话流（若存在），作为白天即时证据层读取
+4. `## 💬 From Kai` — 当天 Telegram 原始对话流（若存在）和 AI trace wikilink 索引；若有 wikilink，需要跟读 trace 文件
 5. 从当天内容抽出 `1-2` 条主线主题
 6. `journal/insights.jsonl` — 历史索引层（找已有命名模式、refs、验证线索）
 7. `journal/memory-archive.md` — 冷归档（找仍 relevant 的旧模式）
@@ -197,10 +216,15 @@ Claude 直接读取：
 | 命令 | 用途 | 输出文件 |
 |------|------|----------|
 | `quant-mission --xp XP-XX [--date YYYY-MM-DD] [--force]` | 生成 XP 任务 Mission Guide 脚手架 | `quant/arsenal/xp-xx-mission-guide.md` |
+| `quant-question-link --question "..." [--xp XP-XX] [--top 8] [--json]` | 检索现有 quant 文件中可复用的问题链接候选（只读，不写文件） | stdout |
 | `quant-note --xp XP-XX --type <类型> --content "<内容>"` | 追加执行笔记 | `quant/arsenal/xp-xx-session-notes.md` |
 | `quant-summary --xp XP-XX [--date YYYY-MM-DD] [--force]` | 生成 XP 完结总结 | `quant/arsenal/xp-xx-summary.md` |
 
 `--type` 可选值：`question` / `decision` / `issue` / `result` / `insight`
+
+`quant-question-link` 用于 Quant 学习中出现可复用问题时，先搜索 `quant/arsenal/` 和 `quant/roadmap.md` 已有文件，输出候选链接（`[[target#heading|question]]` 格式），帮助决定是直接链接、扩展已有文件还是新建笔记。默认输出人类可读 bullets，`--json` 输出结构化 JSON。
+
+这是一个**只读的第一轮候选检索工具**，不是最终语义判断。返回候选后，代理应打开文件验证内容，并在候选不足时用 `rg` 换同义词/机制词继续搜索。它有意取代了旧的 embedding/index 方案，改用本地文件直读 + 模型引导搜索。
 
 ---
 
@@ -209,6 +233,8 @@ Claude 直接读取：
 | 命令 | 用途 |
 |------|------|
 | 手动粘贴到 `## 💬 From Kai` | 保存当天 Telegram 上与 Kai 的原始对话流，不整理、不改写 |
+| `preview-ai-day --date YYYY-MM-DD` | 预览当天 Codex / Claudian trace 文件与日记 wikilink，不写文件 |
+| `writeback-ai-day --date YYYY-MM-DD` | 归档当天 Codex / Claudian trace，并把 wikilink 索引追加到日记 `## 💬 From Kai` |
 | `writeback-journal --date YYYY-MM-DD --input-file <path>` | 把夜间 AI 分析写回日记的 `## What Life Copilot Said` |
 | `writeback-thought --date YYYY-MM-DD --title "<标题>" --input-file <path>` | 把用户自己的日记正文补充写入 Thoughts & Reflections，并同步更新 Daily Log |
 | `writeback-memory --date YYYY-MM-DD --kind "<类型>" --content "<内容>"` | 写入长期记忆 memory.md |
@@ -355,7 +381,7 @@ quant/arsenal/
 |------|------|
 | 临时文件路径自定 | 写回前先把内容存为临时文件，路径可在工作区内任意选择 |
 | 禁用 heredoc | 禁止 `--input-file - <<EOF ... EOF` 格式 |
-| 日记边界 | 用户正文补充进 `Daily Log` / `Thoughts & Reflections`；Kai 原始对话手动粘贴到 `💬 From Kai`；夜间分析进 `What Life Copilot Said` |
+| 日记边界 | 用户正文补充进 `Daily Log` / `Thoughts & Reflections`；Kai 原始对话手动粘贴到 `💬 From Kai`；Codex / Claudian 对话用 `writeback-ai-day` 写入 trace 并索引；夜间分析进 `What Life Copilot Said` |
 | JSONL 只追加 | `insights.jsonl` 等 JSONL 文件只能 append，禁止行级编辑或删除 |
 | 归档代替删除 | 需要"删除"一条 insight 时，将其 `status` 改为 `"archived"` |
 
@@ -442,7 +468,7 @@ python3 scripts/copilot.py append-insight \
 
 ## 12. GitHub 部署与隐私保护
 
-Life Copilot v4.1 原生支持**“开源系统引擎，私有核心数据”**的代码库部署架构。
+Life Copilot v4.2 原生支持**“开源系统引擎，私有核心数据”**的代码库部署架构。
 
 根目录下的 `.gitignore` 作为一个硬性“防洪堤”，彻底拦截了以下敏感数据进入版本库：
 - 日记区 (`journal/`)：含所有记忆池与每日复盘
@@ -454,4 +480,4 @@ Life Copilot v4.1 原生支持**“开源系统引擎，私有核心数据”**�
 
 ---
 
-*最后更新：[[2026-03-30]]*
+*最后更新：[[2026-06-01]]*
