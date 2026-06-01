@@ -50,6 +50,63 @@ Task classification guidance:
 
 **Principle**: The Mission Guide itself should stay clean, mainly housing meta-information, objectives, and the roadmap. Place large teaching content and scaffolds in **Companion Files** (such as the `.py` and `.md` files described above). Link them from the Mission Guide after generation.
 
+## Question-Link Retrieval Protocol
+
+When a reusable Quant learning question appears, **search existing quant files before creating any new link target**. Apply minimum necessary intervention.
+
+**Decision protocol (in priority order):**
+
+1. **Full answer exists**: An existing file/section fully answers the question.
+   → Use an alias wikilink with a heading anchor:
+   - `[[existing-note#Relevant Heading|the user's actual question]]`
+
+2. **Broad answer exists**: An existing file answers the question but is broader.
+   → Link to the file/heading and add a short jump hint (e.g., "see the covariance section"):
+   - `[[existing-note#Broad Relevant Heading|the user's narrower question]]`
+
+3. **Partial answer exists**: An existing file partially answers the question.
+   → Minimally extend that file with a focused section, then link to the new section.
+   → Do not create a separate file for the missing piece.
+
+4. **No existing file owns the answer**: No file naturally covers this topic.
+   → Create a new small note only then, preferably under `quant/arsenal/` using the existing naming style (`xp-XX-topic.md`).
+
+**Link format rules:**
+- Use bullets, callouts (`> [!tip]`), or definition lists for question links.
+- **Do not use Markdown tables** — `[[target|alias]]` contains pipes and breaks CLI/table renderers.
+- One file may answer many different questions.
+- One question may point to multiple files: prefer one Primary link plus optional Supporting links.
+- Inline math: `$...$`, display math: `$$...$$`. No LaTeX in headings.
+
+**Examples (format — replace targets with actual file/heading matches from `quant-question-link`):**
+```markdown
+## Question Links
+
+- **Why does sample covariance create unstable portfolio optimization results?**
+  Primary: [[xp-91-mission-guide#Q5. Why does sample covariance create unstable portfolio optimization results?|Why does sample covariance create unstable portfolio optimization results?]]
+  Supporting: [[xp-78-mission-guide|Why sample covariance breaks optimizers (see Mission Output section)]]
+
+- **Why does shrinkage help small-sample covariance?**
+  → [[xp-78-mission-guide#Core Pattern|Why does shrinkage help small-sample covariance?]]
+```
+
+**Automation:** Use `python3 scripts/copilot.py quant-question-link --question "..." [--xp XP-XX] [--top 8]` to search existing files and surface candidate links before writing.
+
+### Model-Guided Search Rule
+
+`quant-question-link` is a **first-pass candidate retriever only** — do not trust its ranking as the final semantic judge.
+
+After running it, the agent **must**:
+
+1. **Open and read** the top candidate files. Inspect the relevant headings and nearby sections to verify whether the content actually answers the question.
+2. **Run manual `rg` searches** with variant keywords when candidates look weak or incomplete. Generate search variants from the question:
+   - **Literal tokens** from the user's question (e.g., `biased covariance`, `unbiased sample`)
+   - **Mechanism words** — synonyms or related concepts (e.g., `shrinkage`, `estimation error`, `condition number`, `extreme weights`, `regularization`)
+   - **XP/context words** — project or domain anchors (e.g., `XP-78`, `Markowitz`, `optimizer`, `sample covariance`, `GMV`)
+3. **Do not create or extend notes** just because the candidate list was empty or low-scoring. A weak retrieval result means "search more," not "write new."
+4. Final decision still follows the 4-case protocol above: link (full/broad), extend (partial), or create (no owner).
+5. Do not restore embedding or vector index systems unless the user explicitly asks.
+
 ## Primary Inputs
 
 - `quant/state.md`

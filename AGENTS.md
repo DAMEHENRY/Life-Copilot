@@ -5,7 +5,8 @@
 | 概念         | 路径                                            |
 | ---------- | --------------------------------------------- |
 | 日记         | `journal/YYYY/MM/YYYY-MM-DD.md`               |
-| AI 原始对话   | 日记内 `## 💬 From Kai`（Telegram/Kai 手动粘贴；Codex conversations 可自动导入） |
+| AI 原始对话索引 | 日记内 `## 💬 From Kai`（wikilink 索引到 trace 文件；Telegram/Kai 手动粘贴） |
+| AI 对话 trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claudian}-trace.md` |
 | 长期记忆（热）    | `journal/memory.md`                           |
 | 长期记忆（冷）    | `journal/memory-archive.md`                   |
 | 洞察日志       | `journal/insights.jsonl`（append-only）         |
@@ -28,9 +29,9 @@
 
 0. 若目标日期日记文件已存在，先执行：
 ```bash
-python3 scripts/copilot.py writeback-codex-day --date YYYY-MM-DD
+python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 ```
-说明：这会把当天全部 Codex conversations 按 thread 追加到 `## 💬 From Kai`；脚本会按 `### Codex Thread ...` 去重，重复分析同一天时不应重复写入。若日记文件不存在或当天无 Codex conversations，说明后跳过，不要因此中断分析。
+说明：这会把当天全部 Codex 和 Claudian 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件（`YYYY-MM-DD-codex-trace.md` 和 `YYYY-MM-DD-claudian-trace.md`），并在日记 `## 💬 From Kai` 追加 wikilink 索引。脚本按 wikilink 去重，重复分析同一天时不应重复写入。若日记文件不存在或当天无 AI conversations，说明后跳过，不要因此中断分析。
 1. 读 `prompts/diary-mode.md`
 2. 读 `journal/YYYY/MM/YYYY-MM-DD.md`
    - 若有 `## 💬 From Kai`，把它视为当天 AI 原始对话流证据层，保留 Henry / Kai / Codex 的说话人区分
@@ -55,7 +56,7 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 **Diary 写回语义（强制区分）**
 - 如果写回内容是 **对该篇日记的分析 / 镜子 / Copilot 建议**，一律使用 `writeback-journal`，写入 `## What Life Copilot Said`。
 - 如果写回内容是 **想作为“我自己的日记正文补充”保存的对话片段/想法/后续澄清**，才使用 `writeback-thought`，它会写进 `## 📝 Daily Log` 与 `## 💭 Thoughts & Reflections`。
-- 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex conversations**，使用 `writeback-codex-day` 自动追加到 `## 💬 From Kai`。
+- 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex 或 Claudian conversations**，使用 `writeback-ai-day` 自动归档 trace 文件并在 `## 💬 From Kai` 追加 wikilink 索引。
 - **禁止** 用 `writeback-thought` 去写 Copilot 分析；**禁止** 用 `writeback-journal` 去伪装用户口吻续写正文。
 
 ### Quant Mode
@@ -90,6 +91,7 @@ python3 scripts/copilot.py update-schedule --date <today>
 - **语言**：日记/聊天全部简体中文，Quant 用英文
 - **Obsidian 兼容**：`[[YYYY-MM-DD]]` wikilink、Obsidian Callout（`> [!info]`）、无 HTML
 - **Wikilink 主动链接**：输出中应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap 等），目标是构建丰富的 Obsidian Graph View。不要凭空创造链接，只链接确实存在的文件。
+- **Quant 问题链接协议**：Quant Q&A 中出现可复用学习问题时，必须先搜索 `quant/arsenal/` 和 `quant/roadmap.md` 已有文件，再决定是直接链接、扩展已有文件、还是新建笔记。遵循最小必要干预原则，优先用 `[[target#heading|question]]` 别名链接，避免笔记膨胀。用 `python3 scripts/copilot.py quant-question-link --question "..."` 检索候选链接。**注意：`quant-question-link` 只是候选检索，不是最终判断。** Claude/Claudian/Codex 必须打开候选文件读相关段落验证；如果候选不够好，要主动用 `rg` 换同义词、机制词、XP 上下文关键词继续搜。禁止因为候选排名低或列表为空就直接新建文件——排名低意味着需要更多搜索，不是需要更多笔记。
 - **Wikilink 解析（深度 1）**：读取任何文档时，若文档内包含 `[[...]]` wikilink，需额外读取这些被链接的文档（仅一层，不递归——即被链接文档中的 wikilink 不再跟进）。
 - **记忆存储**：热记忆在 `journal/memory.md`，冷归档在 `journal/memory-archive.md`，不使用系统级记忆工具
 - **洞察日志角色**：`journal/insights.jsonl` 是历史检索的索引层，不是最终面向用户的主要引用层；面向用户优先落到 `[[YYYY-MM-DD]]`
@@ -97,7 +99,7 @@ python3 scripts/copilot.py update-schedule --date <today>
 - **联网搜索边界**：联网搜索只用于实效性外部事实校验，是辅助证据；不得用外部搜索替代日记、记忆、insights 或 `[[YYYY-MM-DD]]` 历史锚点
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
 - **输出要求**：必须包含可执行下一步，不写空泛安慰
-- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex conversations 用 `writeback-codex-day` 自动追加到 `💬 From Kai`，Copilot 夜间分析写入 `What Life Copilot Said`
+- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex/Claudian conversations 用 `writeback-ai-day` 自动归档 trace 文件并在 `💬 From Kai` 追加 wikilink 索引，Copilot 夜间分析写入 `What Life Copilot Said`
 
 ## 写入长期记忆
 
@@ -121,7 +123,7 @@ python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "<标题>
 
 适用范围：
 - 仅用于“把对话沉淀成用户自己的日记补充”
-- 不用于粘贴 AI 原始对话；Telegram/Kai 原始对话直接放入 `## 💬 From Kai`，Codex conversations 使用 `writeback-codex-day`
+- 不用于粘贴 AI 原始对话；Telegram/Kai 原始对话直接放入 `## 💬 From Kai`，Codex/Claudian conversations 使用 `writeback-ai-day`
 - 不用于 `## What Life Copilot Said` 分析写回
 
 ## XP 完成协议
