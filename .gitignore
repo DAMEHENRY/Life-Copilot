@@ -48,6 +48,6 @@ resources/
 GEMINI.md
 .geminiignore
 .antigravitycli/
-.claude/settings.local.json
+.claude/
 .claudian/
 quant/notes/
