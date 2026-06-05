@@ -6,9 +6,9 @@
 journal/
 
 # 2. 个人领域笔记与目标细节 (忽略内容部分)
-quant/01-projects/
-quant/03-career-moats/
-quant/04-university/
+quant/projects/
+quant/career-moats/
+quant/university/
 quant/arsenal/
 quant/resumes/
 quant/schedules/

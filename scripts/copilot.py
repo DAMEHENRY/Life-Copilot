@@ -38,6 +38,15 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 CODEX_SESSION_INDEX = CODEX_HOME / "session_index.jsonl"
 CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
 
+PHASE_PROTOCOLS: Dict[str, str] = {
+    "Landing":        "Re-acclimate after time off or disruption. Prioritize routine rebuild and gentle momentum.",
+    "Build":          "High-intensity deep work. Execute pending tasks with full focus.",
+    "Study":          "Learning-focused phase. Prioritize course material and conceptual understanding.",
+    "Market Waiting": "Light maintenance while external factors are pending. Review, organize, refine.",
+    "Recovery":       "Low-intensity day. Protect rest, light review only if energy permits.",
+    "Review":         "Retrospective and planning. Audit progress, update roadmap, consolidate learnings.",
+}
+
 AI_CONVERSATIONS_DIR = JOURNAL_DIR / "ai-conversations"
 CLAUDIAN_SESSIONS_DIR = ROOT / ".claudian" / "sessions"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects" / "-Users-henry-Library-Mobile-Documents-iCloud-md-obsidian-Documents-Life"
@@ -840,9 +849,10 @@ def extract_quant_feedback(journal_text: str) -> Dict[str, str]:
     lines = journal_text.splitlines()
     start = end = None
     for i, line in enumerate(lines):
-        if line.strip().startswith("## 📊 Quant Protocol Feedback"):
+        stripped = line.strip()
+        if stripped.startswith("## 📊 Legacy Quant Feedback") or stripped.startswith("## 📊 Quant Protocol Feedback"):
             start = i
-        elif start is not None and i > start and line.strip().startswith("## "):
+        elif start is not None and i > start and stripped.startswith("## "):
             end = i
             break
     if start is None:
@@ -867,11 +877,18 @@ def extract_quant_feedback(journal_text: str) -> Dict[str, str]:
 
 
 def has_filled_quant_feedback(journal_text: str) -> bool:
-    # The section title alone is not enough. We only treat Quant Protocol Feedback
-    # as "filled" when at least one parsed field contains a real value rather than
-    # template placeholders such as ___%, High/Low, or empty strings.
+    # The section title alone is not enough. We only treat Legacy Quant Feedback
+    # as "filled" when at least one Quant-specific execution field contains a real
+    # value rather than template placeholders such as ___%, High/Low, or empty strings.
+    # tomorrow_request alone does NOT qualify — it is a general life planning hint,
+    # not evidence of Quant execution feedback. It can only contribute after at least
+    # one execution field (morning/afternoon/evening scores, roadblocks, energy) passes.
     fb = extract_quant_feedback(journal_text)
-    return any(bool(v.strip()) for v in fb.values())
+    execution_fields = ["morning_score", "afternoon_score", "evening_score", "roadblocks", "energy"]
+    has_execution = any(bool(fb.get(f, "").strip()) for f in execution_fields)
+    if not has_execution:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +955,7 @@ def cmd_sync_quant_state(args: argparse.Namespace) -> None:
     evidence: List[str] = [e for e in state.get("evidence_log", []) if e and e != "(none)"]  # type: ignore
     pending = [f"{xp}: {task}" for xp, task in summarize_open_xp(6)]
     focus_items = [xp for xp, _ in summarize_open_xp(3)]
-    focus = ", ".join(focus_items) if focus_items else "maintain momentum"
+    focus = ", ".join(focus_items) if focus_items else "no pending XP; refer to life-board.md"
 
     journal_path = journal_path_for_date(today)
     if journal_path.exists():
@@ -948,7 +965,7 @@ def cmd_sync_quant_state(args: argparse.Namespace) -> None:
         # Date-based sync is gated by filled journal feedback. Manual chat-note
         # overrides stay available because they are an explicit secondary source.
         if not has_feedback and not args.chat_note:
-            print(f"[skip] Filled Quant Protocol Feedback not found in {journal_path}; quant state not updated.")
+            print(f"[skip] Filled Legacy Quant Feedback not found in {journal_path}; quant state not updated.")
             return
         if has_feedback:
             if fb.get("tomorrow_request"):
@@ -1012,13 +1029,13 @@ def cmd_update_schedule(args: argparse.Namespace) -> None:
         target = base + timedelta(days=1)
         journal_path = journal_path_for_date(base)
         # Date-based schedule refresh only happens when today's journal contains
-        # filled Quant Protocol Feedback. Use --target-date for an explicit manual
+        # filled Legacy Quant Feedback. Use --target-date for an explicit manual
         # schedule generation / repoint path.
         if not journal_path.exists():
             print(f"[skip] Journal not found for {base.isoformat()}; schedule not updated.")
             return
         if not has_filled_quant_feedback(read_text(journal_path)):
-            print(f"[skip] Filled Quant Protocol Feedback not found in {journal_path}; schedule not updated.")
+            print(f"[skip] Filled Legacy Quant Feedback not found in {journal_path}; schedule not updated.")
             return
 
     roadmap_content = read_text(ROADMAP_FILE)
@@ -1050,7 +1067,7 @@ def _extract_schedule_date(content: str) -> Optional[date]:
             return date.fromisoformat(m.group(1))
         except ValueError:
             pass
-    m2 = re.search(r"## ⚡️ Active Schedule:.*?(\w+), (\w+) (\d+), (\d{4})", content)
+    m2 = re.search(r"## ⚡️ (?:Legacy Quant Schedule|Active Schedule):.*?(\w+), (\w+) (\d+), (\d{4})", content)
     if m2:
         try:
             return datetime.strptime(f"{m2.group(2)} {m2.group(3)} {m2.group(4)}", "%b %d %Y").date()
@@ -1059,11 +1076,38 @@ def _extract_schedule_date(content: str) -> Optional[date]:
     return None
 
 
+def _detect_schedule_phase(
+    tomorrow_request: str,
+    roadblocks: str,
+    pending: List[str],
+    focus: str,
+) -> str:
+    """Determine the schedule phase from available signals."""
+    tr_lower = tomorrow_request.lower()
+    rb_lower = roadblocks.lower()
+    focus_lower = focus.lower()
+    combined = f"{tr_lower} {rb_lower} {focus_lower}"
+
+    # Explicit phase keywords in tomorrow_request or focus
+    for phase in PHASE_PROTOCOLS:
+        if phase.lower() in combined:
+            return phase
+
+    # Heuristic: no pending XP and no request → recovery or review
+    if not pending and not tomorrow_request.strip():
+        return "Recovery"
+
+    # Default: if there are pending items, assume Build
+    if pending:
+        return "Build"
+
+    return "Review"
+
+
 def build_active_schedule_block(base_date: date) -> str:
     target = base_date + timedelta(days=1)
     state = load_quant_state()
     pending = [p for p in state.get("pending_xp", []) if isinstance(p, str) and p and p != "(none)"]
-    fallback = pending[:4] if pending else ["XP-15: Array Mediums", "XP-16: DP Basics", "XP-17: HashMap"]
     focus = state.get("current_focus", "quant execution")
     hints = [h for h in state.get("schedule_hints", []) if isinstance(h, str)]
 
@@ -1081,13 +1125,16 @@ def build_active_schedule_block(base_date: date) -> str:
         top = (requested_targets + remaining)[:4]
         focus = ", ".join(requested_ids)
     else:
-        top = fallback
+        top = pending[:4]
+
+    phase = _detect_schedule_phase(tr, rb, pending, focus)
+    phase_protocol = PHASE_PROTOCOLS.get(phase, PHASE_PROTOCOLS["Build"])
 
     weekday = target.strftime("%A")
     date_label = target.strftime("%b %-d, %Y") if os.name != "nt" else target.strftime("%b %#d, %Y")
     xp_targets = focus
-    xp_morning = top[0]
-    xp_afternoon = top[1] if len(top) > 1 else top[0]
+    xp_morning = top[0] if top else "No pending tasks — use for review or exploration."
+    xp_afternoon = top[1] if len(top) > 1 else xp_morning
     personal_action_1 = tr if tr else "Keep Agency Time flexible for recovery or side exploration."
     personal_action_2 = "Do not turn Agency Time into a scored execution block."
     execution_intent = (
@@ -1100,6 +1147,7 @@ def build_active_schedule_block(base_date: date) -> str:
             "{{weekday}}": weekday,
             "{{date}}": date_label,
             "{{xp-targets}}": xp_targets,
+            "{{phase-protocol}}": f"[{phase}] {phase_protocol}",
             "{{yesterday-request}}": tr if tr else "(none)",
             "{{yesterday-roadblocks}}": rb if rb else "(none)",
             "{{xp-morning}}": xp_morning,
@@ -1112,12 +1160,14 @@ def build_active_schedule_block(base_date: date) -> str:
             template = template.replace(key, value)
         return template
 
+    target_ids = ", ".join(t.split(":")[0] for t in top[:3]) if top else "(none)"
     b = [
-        f"## ⚡️ Active Schedule: {format_day_label(target)}",
+        f"## ⚡️ Legacy Quant Schedule: {format_day_label(target)}",
         f"*Focus: {focus}*", "",
-        "> **Current Protocol**: **[FULL POWER]** High-intensity deep work.",
-        f"> **Target**: {', '.join(t.split(':')[0] for t in top[:3])}.",
+        f"> **Current Phase**: **[{phase}]** {phase_protocol}",
+        f"> **Target**: {target_ids}.",
         f"> **Context Hint**: Yesterday's request: {tr if tr else '(none)'}; Roadblocks: {rb if rb else '(none)'}.", "",
+        "> _Legacy Quant schedule — not the v4.3 default projection. Adjust based on actual energy and events._", "",
         "| Time | Block Name | Target Task |",
         "| :--- | :--------- | :---------- |",
         "| **07:30 - 08:30** | **🌅 Morning Routine** | Wake, hygiene, ride to library. |",
@@ -1127,7 +1177,7 @@ def build_active_schedule_block(base_date: date) -> str:
         f"| **14:00 - 17:00** | **⚔️ Deep Work B** | {xp_afternoon}. |",
         "| **17:00 - 18:00** | **🍲 Dinner** | Fixed Time Anchor. |",
         "| **18:00 - 22:00** | **🕹️ Agency Time** | Free-choice block: sports / reading / social / casual exploration. No execution score applied. |",
-        "| **22:00 - 22:30** | **📔 Reflection** | Daily log + quant feedback. |",
+        "| **22:00 - 22:30** | **📔 Reflection** | Daily log + tomorrow projection input. |",
         "| **22:30 - 23:00** | **🛌 Wind Down** | No screens. |",
         "| **23:00** | **💤 Sleep** | System Shutdown. |",
     ]
@@ -1812,7 +1862,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("sync-quant-state")
-    s.add_argument("--date", required=True, help="Journal date to inspect for filled Quant Protocol Feedback.")
+    s.add_argument("--date", required=True, help="Journal date to inspect for filled Legacy Quant Feedback (old heading 'Quant Protocol Feedback' also accepted).")
     s.add_argument("--chat-note", default="", help="Explicit manual override note. Allows sync even without filled journal feedback.")
     s.add_argument(
         "--allow-missing-journal",
@@ -1825,7 +1875,7 @@ def build_parser() -> argparse.ArgumentParser:
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument(
         "--date",
-        help="Base journal date. Refreshes the next day's schedule only when that journal has filled Quant Protocol Feedback.",
+        help="Base journal date. Refreshes the next day's schedule only when that journal has filled Legacy Quant Feedback (old heading also accepted).",
     )
     g.add_argument(
         "--target-date",

@@ -11,16 +11,12 @@
 
 ## 💬 From Kai
 
-## 📊 Quant Protocol Feedback
-*Copy this section to guide the next day's schedule.*
-*Only filled values in this section drive `sync-quant-state --date` / `update-schedule --date`; blank placeholders do not count.*
-- **Execution Score (0-100%)**:
-    - [ ] Morning Block: `___%`
-    - [ ] Afternoon Block: `___%`
-    - [ ] Evening Block: `___%`
-- **Roadblocks**: 
-- **Energy Level (AM/PM/Eve)**: `High/Low` | `High/Low` | `High/Low`
-- **Request for Tomorrow**: 
+## 🧭 Tomorrow Projection Input
+*Used by diary analysis to generate a conversational projection for tomorrow. Not a script gate.*
+- **One thing for tomorrow**:
+- **Active board track**:
+- **Energy / constraints**:
+- **Do-not-expand boundary**:
 
 ## 🏃‍♂️ Habits (Optional)
 - [ ] Sports: 

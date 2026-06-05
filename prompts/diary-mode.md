@@ -159,8 +159,10 @@
 - 若用户未明确授权写入，可在结尾用 1-2 句说明建议写入哪些条目；只有用户同意后，才调用 `writeback-memory`。
 - 写入内容必须满足：一条一事实、可复用、可检索、避免纯情绪句。
 
-**Quant Feedback Handoff：**
-- 若当日日记包含已填写的 `## 📊 Quant Protocol Feedback` 或明显量化执行反馈，可在末尾短短带一句，建议进入 Quant Mode 完整更新计划。
+**Tomorrow Projection：**
+- 默认在回复结尾给出明天的最小动作建议，写在分析正文或 `## What Life Copilot Said` 中。
+- 这是 conversational projection，不是脚本生成的 `sched-*` 文件。不依赖 Legacy Quant Feedback。
+- 默认日记模板不再包含 `## 📊 Legacy Quant Feedback`。若当日日记碰巧包含已填写的该 section（或旧标题 `## 📊 Quant Protocol Feedback`）且含真实执行分数，可在末尾短短带一句，建议进入 Quant Mode 完整更新计划。
 - 不在本模式直接重写 `quant/roadmap.md`。
 
 # Safety Protocol

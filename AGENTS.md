@@ -1,5 +1,7 @@
 # Life Copilot — Codex
 
+> Version: v4.3 (2026-06-04). See [[life-copilot-v4.3-rfc]] for rationale and migration notes.
+
 ## 文件地图
 
 | 概念         | 路径                                            |
@@ -10,22 +12,35 @@
 | 长期记忆（热）    | `journal/memory.md`                           |
 | 长期记忆（冷）    | `journal/memory-archive.md`                   |
 | 洞察日志       | `journal/insights.jsonl`（append-only）         |
-| Quant 路线   | `quant/roadmap.md`                            |
-| Quant 状态   | `quant/state.md`                              |
+| Active Board | `life-board.md`                               |
+| Seeds        | `seeds/`（候选项目孵化区）                          |
+| Quant 路线（历史参考） | `quant/roadmap.md`                       |
+| Quant 状态（历史参考） | `quant/state.md`                         |
 | XP 产物      | `quant/arsenal/xp-XX-{type}.md`               |
 | 日程         | `quant/schedules/YYYY/MM/sched-YYYY-MM-DD.md` |
 | 日记模式设定     | `prompts/diary-mode.md`                       |
 | Quant 模式设定 | `prompts/quant-mode.md`                       |
 | Chat 模式设定  | `prompts/chat-mode.md`                        |
+| Study 模式设定 | `prompts/study-mode.md`                       |
 | 脚本         | `scripts/copilot.py`                          |
 
 禁止假设"已记住所有历史"；必须先读取本地文件再分析。
 
 ## 模式路由
 
+> **v4.3 routing philosophy**: mode triggers are **soft suggestions**, not hard gates. The system reads `life-board.md` + `journal/memory.md` + today's diary to decide what matters. When a conversation blends tracks, route by context, not keyword. See [[life-copilot-v4.3-rfc]] §4.
+
+### Index-Guided Routing (v4.3)
+
+Before routing to a specific mode, assess context:
+1. Read `life-board.md` — what tracks are active?
+2. Read `journal/memory.md` — what hypotheses are hot?
+3. Read today's diary (if exists) — what is already in motion?
+4. Route based on the intersection, not the keyword.
+
 ### Diary Mode
 
-触发：`#YYYY-MM-DD`
+触发（软触发）：`#YYYY-MM-DD`，或对话明显围绕某天的日记 / 情绪复盘
 
 0. 若目标日期日记文件已存在，先执行：
 ```bash
@@ -61,25 +76,35 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 
 ### Quant Mode
 
-触发：`#quant` 或出现 `XP-` / `roadmap` / `Active Schedule` / `quant-leap-roadmap`
+触发（软触发）：`#quant`，或出现 `XP-` / `roadmap` / `Active Schedule`，或对话明显围绕量化学习 / 职业准备
 
-1. 执行：
+> **Post-roadmap note** (v4.3): The roadmap is 100% complete. `sync-quant-state --date` 和 `update-schedule --date` 不再是默认 daily loop；它们仍保留原本的 Legacy Quant Feedback gate，用作 legacy Quant / 新训练阶段 / 明确手动 override 的工具。一般生活规划先读 `life-board.md`，不要因为出现 `roadmap` 这个词就自动跑 Quant scripts。
+>
+> **Template note**: Default diary template (`templates/daily-log.md`) no longer includes `## 📊 Legacy Quant Feedback`. When legacy Quant scripts need filled feedback, paste the snippet from `templates/legacy-quant-feedback.md` into today's journal first.
+
+1. 若需要同步量化状态（仅在有新 roadmap 或手动 override 时）：
 ```bash
-python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal
-python3 scripts/copilot.py update-schedule --date <today>
+python3 scripts/copilot.py sync-quant-state --date <today> --allow-missing-journal --chat-note "manual override"
+python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
 ```
-说明：
-- `update-schedule --date <today>` 的语义是“把 `<today>` 当基准日，生成明日日程”。
-- 若需要直接生成或指向某个明确日期的日程，使用 `python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD`。
 2. 读 `prompts/quant-mode.md`
-3. 读 `quant/state.md`
-4. 读 `quant/roadmap.md`（只关注未完成 XP + 里程碑）
+3. 读 `quant/state.md`（历史参考）
+4. 读 `quant/roadmap.md`（历史参考；Active Board `life-board.md` 是新的 single source of truth）
 5. 若讨论具体 XP，读对应 arsenal 文件
 6. 按 quant-mode.md 的规则回复
 
+### Study Mode
+
+触发（软触发）：`#study`，或对话围绕学习主题（阅读、概念理解、代码练习），且不属于 Quant 专业化
+
+1. 读 `prompts/study-mode.md`
+2. 读 `journal/memory.md`（热记忆）
+3. 搜索已有笔记（`quant/arsenal/` 或相关目录）再决定是否新建
+4. 按 study-mode.md 的规则回复
+
 ### Chat Mode
 
-触发：不属于 Diary/Quant 的普通对话
+触发：不属于 Diary / Quant / Study 的普通对话
 
 1. 读 `prompts/chat-mode.md`
 2. 读 `journal/memory.md`（热记忆：Active Hypotheses + Canonical）
@@ -88,9 +113,9 @@ python3 scripts/copilot.py update-schedule --date <today>
 
 ## 通用护栏
 
-- **语言**：日记/聊天全部简体中文，Quant 用英文
+- **语言**：日记/聊天全部简体中文，Quant / Study 用英文
 - **Obsidian 兼容**：`[[YYYY-MM-DD]]` wikilink、Obsidian Callout（`> [!info]`）、无 HTML
-- **Wikilink 主动链接**：输出中应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap 等），目标是构建丰富的 Obsidian Graph View。不要凭空创造链接，只链接确实存在的文件。
+- **Wikilink 主动链接**：输出中应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap、life-board 等），目标是构建丰富的 Obsidian Graph View。不要凭空创造链接，只链接确实存在的文件。
 - **Quant 问题链接协议**：Quant Q&A 中出现可复用学习问题时，必须先搜索 `quant/arsenal/` 和 `quant/roadmap.md` 已有文件，再决定是直接链接、扩展已有文件、还是新建笔记。遵循最小必要干预原则，优先用 `[[target#heading|question]]` 别名链接，避免笔记膨胀。用 `python3 scripts/copilot.py quant-question-link --question "..."` 检索候选链接。**注意：`quant-question-link` 只是候选检索，不是最终判断。** Claude/Claudian/Codex 必须打开候选文件读相关段落验证；如果候选不够好，要主动用 `rg` 换同义词、机制词、XP 上下文关键词继续搜。禁止因为候选排名低或列表为空就直接新建文件——排名低意味着需要更多搜索，不是需要更多笔记。
 - **Wikilink 解析（深度 1）**：读取任何文档时，若文档内包含 `[[...]]` wikilink，需额外读取这些被链接的文档（仅一层，不递归——即被链接文档中的 wikilink 不再跟进）。
 - **记忆存储**：热记忆在 `journal/memory.md`，冷归档在 `journal/memory-archive.md`，不使用系统级记忆工具
@@ -100,6 +125,51 @@ python3 scripts/copilot.py update-schedule --date <today>
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
 - **输出要求**：必须包含可执行下一步，不写空泛安慰
 - **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex/Claudian conversations 用 `writeback-ai-day` 自动归档 trace 文件并在 `💬 From Kai` 追加 wikilink 索引，Copilot 夜间分析写入 `What Life Copilot Said`
+- **命名规则**：新建文件夹和普通文档一律使用 lowercase kebab-case；不要使用 `01-xxx` 这类排序前缀。例外：`AGENTS.md`、`CLAUDE.md` 保持大写；`00-index.md`、`00-readme.md` 这类目录入口文件可保留 `00-` 前缀。
+
+## Active Board（v4.3）
+
+`life-board.md` 是 "Henry 正在做什么" 的 single source of truth。它取代了 `quant/roadmap.md` 作为生活全景的隐含假设。
+
+每个 track 有四个字段：
+- **Active question** — 当前待回答的问题
+- **Next artifact** — 下一个具体产出物
+- **Stop condition** — 什么时候算完成
+- **Status** — `active` / `waiting` / `paused` / `done`
+
+Board 在日记分析或 Henry 明确要求时更新，不由脚本自动更新。
+
+当用户问"我现在该做什么"或"我有什么进行中的项目"时，先读 `life-board.md`。
+
+## Seeds 与 Inbox Flush
+
+- `inbox/` 是零摩擦捕获缓冲区
+- `seeds/` 是候选项目孵化区（详见 `seeds/00-index.md`）
+- Inbox flush 流程：inbox 中高置信但暂不可行的想法 → `seeds/`（带 confidence + reason + source）
+- Seeds 在 inbox flush 时审查；3+ 个月未动且不再共鸣的种子可修剪（git history 里还在）
+- Seeds 升级为 active track 需满足：有 active question、有 next artifact、有 stop condition、不挤占更高优先级项目
+
+## Schedule as Projection（v4.3）
+
+默认日程是**投影**，不是训练时代那种由脚本自动生成的执行清单。
+- 日程投影在日记分析或用户要求时以对话形式产生，不要求 Quant Feedback 或 XP targets
+- 读 `life-board.md` → 每个 active track 的 next artifact → 今天最重要的一件事 = 日程投影
+- `update-schedule` 脚本仍保留 legacy/manual 用途（尤其是 `--target-date`），但不再是日常默认入口
+
+## Negative Backlog（v4.3）
+
+以下项目已从默认流程退役，但仍保留在代码库中：
+
+| 退役项 | 退役原因 |
+|--------|---------|
+| `sync-quant-state --date` 默认日常入口 | Post-roadmap，无每日 Legacy Quant Feedback 可填；脚本 gate 保留给 legacy/manual Quant |
+| `update-schedule --date` 默认日常入口 | 同上；一般日程改用 conversational projection |
+| FULL POWER 每日默认 | 不是每天都是训练日 |
+| XP-only 日程投影 | 生活不止 Quant 一个 track |
+| 硬模式触发（`#quant`、`#YYYY-MM-DD`） | 对话跨 track；上下文路由更优 |
+| `quant/roadmap.md` 作为生活全景 | `life-board.md` 替代此角色 |
+
+> **复用规则**：若新建 Quant roadmap 或 Henry 明确进入训练阶段，以上可重新激活。退役是阶段感知的，不是永久的。
 
 ## 写入长期记忆
 
@@ -107,7 +177,7 @@ python3 scripts/copilot.py update-schedule --date <today>
 python3 scripts/copilot.py writeback-memory --date <today> --kind "<类型>" --content "<内容>"
 ```
 
-新洞察同时写入 JSONL：
+新洞察追加到 JSONL（只写 `journal/insights.jsonl`，不写 memory.md）：
 ```bash
 python3 scripts/copilot.py append-insight --date <today> --kind "<类型>" --content "<内容>"
 ```

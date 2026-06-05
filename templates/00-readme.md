@@ -1,11 +1,25 @@
-# 80-templates: System Blueprints
+# templates — System Blueprints
 
-## 🎯 Purpose
-**Standardization & Efficiency.**
-Stores the DNA of your notes. Using templates reduces the activation energy required to start a new document.
+## Purpose
+Standardized note templates that reduce activation energy for creating new documents. Keeps formatting consistent across journal entries, schedules, and other recurring note types.
 
-## ⚡ Protocols
-1.  **Keep it Lean:** Only maintain templates you actually use.
-2.  **Iterate:** If you find yourself always changing a template, update the source here.
+## Accepts
+- Note templates for any vault folder (journal, quant, resources)
+- Schedule templates
+- Any `.md` file that serves as a reusable structural skeleton
 
-> "Civilization advances by extending the number of important operations which we can perform without thinking about them."
+## Rejects
+- Completed notes that used a template (→ the relevant folder)
+- Copilot prompt definitions (→ `prompts/`)
+- One-off documents that happen to look like a template
+
+## Subfolders
+No subfolders — flat directory. Keep it lean.
+
+## Create-New-Folder Rule
+Do not create subfolders. If template count exceeds 15, review and prune unused ones before organizing.
+
+## Active / Important Files
+- `daily-log.md` — template for journal daily log entries (Tomorrow Projection Input, Writing State; no Legacy Quant Feedback)
+- `legacy-quant-feedback.md` — standalone snippet for legacy Quant state/schedule scripts; paste into journal only when explicitly needed
+- `sched-library-day.md` — legacy Quant schedule template (used only by `update-schedule`; not the v4.3 default projection)
