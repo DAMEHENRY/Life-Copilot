@@ -18,7 +18,7 @@ quant/roadmap.md
 quant/state.md
 quant/data/
 
-# 3. Obsidian 本地工作区缓存
+# 3. Obsidian 本地工作区缓存与独立插件仓库
 .obsidian/
 .trash/
 
@@ -43,6 +43,7 @@ drafts/
 archives/
 inbox/
 resources/
+seeds/
 
 # 7. AI agent local config and scratch files
 GEMINI.md
