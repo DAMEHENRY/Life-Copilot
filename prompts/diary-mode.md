@@ -15,7 +15,7 @@
 # Context & Evidence Rules
 
 **要读的文件（按顺序）：**
-0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex 和 Claudian 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 追加 wikilink 索引；若日记文件不存在或当天无 AI conversations，说明后跳过。
+0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex 和 Life Claude Renderer 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 追加 wikilink 索引；若日记文件不存在或当天无 AI conversations，说明后跳过。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
 2. `journal/memory.md`（长期记忆，`Active Hypotheses` 区块优先）
 3. 目标日期前后 2-3 天的日记（时间上下文）
@@ -46,9 +46,9 @@
 - 不得把推断写成已证实事实；若有不确定性，要在语气中体现，或给出验证方向。
 
 **💬 From Kai 证据层：**
-- `## 💬 From Kai` 是当天 AI 原始对话流的索引层。它包含指向每日 AI trace 文件的 wikilink，例如 `[[2026-06-01-codex-trace]]` 和 `[[2026-06-01-claudian-trace]]`。
-- 完整的 Codex 和 Claudian 对话记录存放在 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件中，由 `writeback-ai-day` 自动归档。Telegram/Kai 对话仍可由用户手动粘贴到此 section。
-- 分析时需跟读 wikilink 读取完整 trace 文件，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Claudian 当场反照了什么、晚上日记正文又如何重构这一天。
+- `## 💬 From Kai` 是当天 AI 原始对话流的索引层。它包含指向每日 AI trace 文件的 wikilink，例如 `[[2026-06-01-codex-trace]]` 和 `[[2026-06-01-life-claude-renderer-trace]]`。
+- 完整的 Codex 和 Life Claude Renderer 对话记录存放在 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件中，由 `writeback-ai-day` 自动归档。Telegram/Kai 对话仍可由用户手动粘贴到此 section。历史 `*-claudian-trace.md` 文件是旧版产物，保持不动。
+- 分析时需跟读 wikilink 读取完整 trace 文件，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Life Claude Renderer 当场反照了什么、晚上日记正文又如何重构这一天。
 - 不要把 AI 的回答直接复述成夜间分析；夜间分析要做二阶工作：提炼主线、校验 AI 的判断、补本地历史证据、指出对话流里反复出现的结构。
 - 如果 AI 在 trace 文件里声称”找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
 - `writeback-ai-day` 按 wikilink 去重；重复分析同一天时先执行该命令，不应重复写入已经存在的 wikilink。
@@ -160,10 +160,11 @@
 - 写入内容必须满足：一条一事实、可复用、可检索、避免纯情绪句。
 
 **Tomorrow Projection：**
-- 默认在回复结尾给出明天的最小动作建议，写在分析正文或 `## What Life Copilot Said` 中。
+- 默认在回复结尾给出明天的最小动作建议；若执行写回，将建议单独写入第二天的 `## 🧭 Daily Suggestion`。
 - 这是 conversational projection，不是脚本生成的 `sched-*` 文件。不依赖 Legacy Quant Feedback。
 - 默认日记模板不再包含 `## 📊 Legacy Quant Feedback`。若当日日记碰巧包含已填写的该 section（或旧标题 `## 📊 Quant Protocol Feedback`）且含真实执行分数，可在末尾短短带一句，建议进入 Quant Mode 完整更新计划。
 - 不在本模式直接重写 `quant/roadmap.md`。
+- 明天的执行建议（Daily Suggestion）通过独立的 `writeback-daily-suggestion` 写入第二天日记的 `## 🧭 Daily Suggestion`，不混入 `What Life Copilot Said`。分析和 suggestion 必须通过两个独立 input file 写回。
 
 # Safety Protocol
 

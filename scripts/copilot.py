@@ -3,9 +3,9 @@
 Life Copilot — lean orchestration utilities.
 
 Only structural write commands that are unsafe for Claude to do freehand:
-writeback-journal, writeback-thought, writeback-memory, append-insight,
-compact-memory, quant-mission, quant-question-link, sync-quant-state,
-sync-roadmap-stats, update-schedule.
+writeback-journal, writeback-thought, writeback-daily-suggestion,
+writeback-memory, append-insight, compact-memory, quant-mission,
+quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ PHASE_PROTOCOLS: Dict[str, str] = {
 AI_CONVERSATIONS_DIR = JOURNAL_DIR / "ai-conversations"
 CLAUDIAN_SESSIONS_DIR = ROOT / ".claudian" / "sessions"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects" / "-Users-henry-Library-Mobile-Documents-iCloud-md-obsidian-Documents-Life"
+LIFE_CLAUDE_RENDERER_HISTORY = ROOT / ".obsidian" / "plugins" / "life-claude-renderer" / "history.json"
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -178,8 +179,8 @@ def ai_conversation_dir_for_date(d: date) -> Path:
 
 
 def ai_trace_path_for_date(d: date, source: str) -> Path:
-    if source not in {"codex", "claudian"}:
-        raise ValueError(f"Unsupported source: {source}. Use 'codex' or 'claudian'.")
+    if source not in {"codex", "claudian", "life-claude-renderer"}:
+        raise ValueError(f"Unsupported source: {source}. Use 'codex', 'claudian', or 'life-claude-renderer'.")
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
 
@@ -814,6 +815,106 @@ def export_claudian_day_transcript(d: date, user_name: str = "Henry", assistant_
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
 
 
+def load_life_claude_renderer_history(history_path: Path) -> List[dict]:
+    """Load conversations from the plugin's history.json.
+
+    Returns an empty list when the file is missing or malformed.
+    Validates conservatively: top-level must be a JSON array, each element
+    must have sessionId (string) and messages (list).
+    Never modifies the source file.
+    """
+    if not history_path.exists():
+        return []
+    try:
+        raw = read_text(history_path)
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    result: List[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        sid = item.get("sessionId")
+        msgs = item.get("messages")
+        if not isinstance(sid, str) or not isinstance(msgs, list):
+            continue
+        result.append(item)
+    return result
+
+
+def export_life_claude_renderer_day_transcript(
+    d: date,
+    history_path: Optional[Path] = None,
+    user_name: str = "Henry",
+    assistant_name: str = "Claude",
+) -> Tuple[str, int, int]:
+    """Build a combined transcript of all Life Claude Renderer sessions for date d.
+
+    Returns (transcript_text, message_count, session_count).
+    Only includes messages whose millisecond timestamp falls on d in local timezone.
+    A conversation spanning several dates is sliced per message date.
+    Sessions are sorted by their earliest included message timestamp.
+    """
+    if history_path is None:
+        history_path = LIFE_CLAUDE_RENDERER_HISTORY
+    conversations = load_life_claude_renderer_history(history_path)
+
+    session_blocks: List[Tuple[float, str]] = []  # (earliest_ts, block_text)
+    total_messages = 0
+
+    for conv in conversations:
+        sid = conv.get("sessionId", "")
+        title = conv.get("title") or sid
+        messages = conv.get("messages", [])
+        if not isinstance(messages, list):
+            continue
+
+        lines: List[str] = []
+        earliest_ts: Optional[float] = None
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            ts_ms = msg.get("timestamp")
+            if not isinstance(ts_ms, (int, float)):
+                continue
+            # Per-message date filter
+            msg_date = datetime.fromtimestamp(ts_ms / 1000).date()
+            if msg_date != d:
+                continue
+
+            if role == "user":
+                text = msg.get("displayContent") or msg.get("content") or ""
+            else:
+                text = msg.get("content") or ""
+            if not isinstance(text, str) or not text.strip():
+                continue
+
+            if earliest_ts is None or ts_ms < earliest_ts:
+                earliest_ts = ts_ms
+
+            formatted_ts = format_chat_timestamp(
+                datetime.fromtimestamp(ts_ms / 1000).isoformat()
+            )
+            speaker = user_name if role == "user" else assistant_name
+            lines.append(f"[{formatted_ts}] {speaker}: {text.strip()}")
+
+        if lines and earliest_ts is not None:
+            total_messages += len(lines)
+            block = f"### Life Claude Renderer Session {sid} - {title}\n\n" + "\n\n".join(lines)
+            session_blocks.append((earliest_ts, block))
+
+    # Sort by earliest included message timestamp
+    session_blocks.sort(key=lambda x: x[0])
+    blocks = [block for _, block in session_blocks]
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
+
+
 def split_markdown_sections(text: str) -> List[Tuple[str, str]]:
     lines = text.splitlines()
     sections: List[Tuple[str, str]] = []
@@ -1324,7 +1425,6 @@ def append_thought_to_journal(journal_text: str, title: str, content: str) -> st
         return start, end or len(lines)
 
     thought_block = f"\n'{title}'\n\n{content.strip()}\n"
-    daily_bullet = f"- [ ] {title}\n"
 
     tr_start, tr_end = section_bounds("Thoughts & Reflections")
     if tr_start is None:
@@ -1334,13 +1434,6 @@ def append_thought_to_journal(journal_text: str, title: str, content: str) -> st
         i -= 1
     lines.insert(i + 1, thought_block)
 
-    dl_start, dl_end = section_bounds("Daily Log")
-    if dl_start is None:
-        raise ValueError("Section '📝 Daily Log' not found in journal")
-    j = dl_end - 1
-    while j > dl_start and lines[j].strip() == "":
-        j -= 1
-    lines.insert(j + 1, daily_bullet)
     return "".join(lines)
 
 
@@ -1392,6 +1485,109 @@ def append_journal_section(journal_text: str, marker: str, addition: str, replac
         new_body = existing.rstrip() + "\n\n" + new_addition
 
     return before + "\n\n" + new_body.rstrip() + ("\n\n" + tail.lstrip("\n") if tail else "\n")
+
+
+def render_diary_from_template(target_date: date) -> str:
+    """Create a diary from the daily-log template for *target_date*.
+
+    The time field is left blank — pre-created diaries must not fake a creation time.
+    """
+    template_path = TEMPLATES_DIR / "daily-log.md"
+    template = read_text(template_path)
+    rendered = template.replace("{{date:YYYY-MM-DD}}", target_date.isoformat())
+    rendered = rendered.replace("{{time:HH:mm}}", "")
+    return rendered
+
+
+def write_daily_suggestion(
+    journal_text: str,
+    content: str,
+    source_date: date,
+    force: bool = False,
+) -> str:
+    """Write or update the ``## 🧭 Daily Suggestion`` section.
+
+    Idempotent: re-running with the same *source_date* replaces the body.
+    Refuses to overwrite when the section already holds content from a
+    different source unless *force* is True.
+    """
+    marker = "## 🧭 Daily Suggestion"
+    provenance = f"> Generated from [[{source_date.isoformat()}]] diary analysis."
+    block = f"{provenance}\n\n{content.strip()}"
+
+    if marker in journal_text:
+        idx = journal_text.find(marker)
+        body_start = idx + len(marker)
+        after = journal_text[body_start:]
+        next_h2 = re.search(r"(?m)^## ", after)
+        body_end = body_start + next_h2.start() if next_h2 else len(journal_text)
+        existing = journal_text[body_start:body_end].strip()
+
+        if existing:
+            existing_source = re.search(
+                r"> Generated from \[\[(\d{4}-\d{2}-\d{2})\]\]", existing
+            )
+            if existing_source:
+                if existing_source.group(1) == source_date.isoformat():
+                    # Same source — replace body (idempotent re-run).
+                    return (
+                        journal_text[:body_start].rstrip()
+                        + "\n\n"
+                        + block
+                        + "\n"
+                        + journal_text[body_end:]
+                    )
+                # Different source
+                if not force:
+                    raise ValueError(
+                        f"Daily Suggestion already has content from "
+                        f"{existing_source.group(1)}. Use --force to overwrite."
+                    )
+            elif not force:
+                raise ValueError(
+                    "Daily Suggestion contains content without provenance. "
+                    "Use --force to overwrite."
+                )
+        # Replace body (empty section or forced overwrite).
+        return (
+            journal_text[:body_start].rstrip()
+            + "\n\n"
+            + block
+            + "\n"
+            + journal_text[body_end:]
+        )
+
+    # Section does not exist — insert before Thoughts & Reflections if present.
+    tr_idx = journal_text.find("## 💭 Thoughts & Reflections")
+    if tr_idx != -1:
+        return (
+            journal_text[:tr_idx].rstrip()
+            + "\n\n"
+            + marker
+            + "\n\n"
+            + block
+            + "\n\n"
+            + journal_text[tr_idx:]
+        )
+    # No Thoughts section either — append at end.
+    return journal_text.rstrip() + "\n\n" + marker + "\n\n" + block + "\n"
+
+
+def cmd_writeback_daily_suggestion(args: argparse.Namespace) -> None:
+    source_date = parse_date_str(args.source_date)
+    target_date = source_date + timedelta(days=1)
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    content = read_text(input_path).strip()
+    if not content:
+        raise ValueError("Input file is empty")
+
+    jp = journal_path_for_date(target_date)
+    journal_text = read_text(jp) if jp.exists() else render_diary_from_template(target_date)
+    updated = write_daily_suggestion(journal_text, content, source_date, force=args.force)
+    write_text(jp, updated)
+    print(str(jp))
 
 
 def filter_existing_h3_blocks(existing: str, addition: str) -> str:
@@ -1491,42 +1687,42 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     codex_msg_count = codex_transcript.count("\n[") + (1 if codex_transcript.startswith("[") else 0) if codex_transcript else 0
     codex_session_count = codex_transcript.count("### Codex Thread ") if codex_transcript else 0
 
-    claudian_transcript, claudian_msg_count, claudian_session_count = export_claudian_day_transcript(target)
+    renderer_transcript, renderer_msg_count, renderer_session_count = export_life_claude_renderer_day_transcript(target)
 
     codex_path = ai_trace_path_for_date(target, "codex")
-    claudian_path = ai_trace_path_for_date(target, "claudian")
+    renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
     codex_link = obsidian_wikilink_for_path(codex_path)
-    claudian_link = obsidian_wikilink_for_path(claudian_path)
+    renderer_link = obsidian_wikilink_for_path(renderer_path)
 
     print(f"=== AI Day Preview: {target.isoformat()} ===")
     print()
 
     if codex_transcript:
-        print(f"  Codex trace file:     {codex_path.relative_to(ROOT)}")
-        print(f"  Codex sessions:       {codex_session_count}")
-        print(f"  Codex messages:       {codex_msg_count}")
-        print(f"  Journal wikilink:     - {codex_link}：Life Copilot / planning / reflection conversations.")
+        print(f"  Codex trace file:                {codex_path.relative_to(ROOT)}")
+        print(f"  Codex sessions:                  {codex_session_count}")
+        print(f"  Codex messages:                  {codex_msg_count}")
+        print(f"  Journal wikilink:                - {codex_link}：Life Copilot / planning / reflection conversations.")
     else:
-        print("  Codex:                (no messages for this date)")
+        print("  Codex:                           (no messages for this date)")
 
     print()
 
-    if claudian_transcript:
-        print(f"  Claudian trace file:  {claudian_path.relative_to(ROOT)}")
-        print(f"  Claudian sessions:    {claudian_session_count}")
-        print(f"  Claudian messages:    {claudian_msg_count}")
-        print(f"  Journal wikilink:     - {claudian_link}：Obsidian-side Quant Mode and note-navigation conversations.")
+    if renderer_transcript:
+        print(f"  Life Claude Renderer trace file: {renderer_path.relative_to(ROOT)}")
+        print(f"  Life Claude Renderer sessions:   {renderer_session_count}")
+        print(f"  Life Claude Renderer messages:   {renderer_msg_count}")
+        print(f"  Journal wikilink:                - {renderer_link}：Obsidian-rendered Claude Code conversations.")
     else:
-        print("  Claudian:             (no sessions for this date)")
+        print("  Life Claude Renderer:            (no sessions for this date)")
 
     print()
 
     if jp.exists():
-        print(f"  Journal file:         {jp.relative_to(ROOT)} (exists)")
+        print(f"  Journal file:                    {jp.relative_to(ROOT)} (exists)")
     else:
-        print(f"  Journal file:         {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
+        print(f"  Journal file:                    {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
 
-    if not codex_transcript and not claudian_transcript:
+    if not codex_transcript and not renderer_transcript:
         print("\n  No AI conversations found for this date.")
 
 
@@ -1537,15 +1733,15 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Journal not found: {jp}")
 
     codex_transcript = export_codex_day_transcript(target).strip()
-    claudian_transcript, _, _ = export_claudian_day_transcript(target)
+    renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
 
-    if not codex_transcript and not claudian_transcript:
-        raise ValueError(f"No AI conversations (Codex or Claudian) found for date: {target.isoformat()}")
+    if not codex_transcript and not renderer_transcript:
+        raise ValueError(f"No AI conversations (Codex or Life Claude Renderer) found for date: {target.isoformat()}")
 
     codex_path = ai_trace_path_for_date(target, "codex")
-    claudian_path = ai_trace_path_for_date(target, "claudian")
+    renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
     codex_link = obsidian_wikilink_for_path(codex_path)
-    claudian_link = obsidian_wikilink_for_path(claudian_path)
+    renderer_link = obsidian_wikilink_for_path(renderer_path)
 
     # Write Codex trace file
     if codex_transcript:
@@ -1563,21 +1759,21 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         write_text(codex_path, codex_content)
         print(f"  wrote: {codex_path.relative_to(ROOT)}")
 
-    # Write Claudian trace file
-    if claudian_transcript:
-        claudian_content = "\n".join([
+    # Write Life Claude Renderer trace file
+    if renderer_transcript:
+        renderer_content = "\n".join([
             "---",
             f"date: {target.isoformat()}",
-            "source: claudian",
+            "source: life-claude-renderer",
             "generated_by: scripts/copilot.py writeback-ai-day",
             "---",
             "",
-            f"# {target.isoformat()} Claudian Trace",
+            f"# {target.isoformat()} Life Claude Renderer Trace",
             "",
-            claudian_transcript,
+            renderer_transcript,
         ])
-        write_text(claudian_path, claudian_content)
-        print(f"  wrote: {claudian_path.relative_to(ROOT)}")
+        write_text(renderer_path, renderer_content)
+        print(f"  wrote: {renderer_path.relative_to(ROOT)}")
 
     # Append deduped wikilink bullets to journal
     journal_text = read_text(jp)
@@ -1588,8 +1784,8 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
     links_to_add: List[str] = []
     if codex_transcript and codex_link not in journal_text:
         links_to_add.append(f"- {codex_link}：Life Copilot / planning / reflection conversations.")
-    if claudian_transcript and claudian_link not in journal_text:
-        links_to_add.append(f"- {claudian_link}：Obsidian-side Quant Mode and note-navigation conversations.")
+    if renderer_transcript and renderer_link not in journal_text:
+        links_to_add.append(f"- {renderer_link}：Obsidian-rendered Claude Code conversations.")
 
     if links_to_add:
         addition = "\n".join(links_to_add)
@@ -1905,6 +2101,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--title", required=True)
     s.add_argument("--input-file", required=True)
     s.set_defaults(func=cmd_writeback_thought)
+
+    s = sub.add_parser("writeback-daily-suggestion")
+    s.add_argument("--source-date", required=True, help="Date of the diary analysis that generated the suggestion (YYYY-MM-DD). Target diary is source-date + 1 day.")
+    s.add_argument("--input-file", required=True, help="Path to file containing the suggestion content.")
+    s.add_argument("--force", action="store_true", help="Overwrite existing suggestion even if it has different or missing provenance.")
+    s.set_defaults(func=cmd_writeback_daily_suggestion)
 
     s = sub.add_parser("writeback-journal")
     s.add_argument("--date", required=True)

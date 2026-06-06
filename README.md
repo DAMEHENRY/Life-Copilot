@@ -90,14 +90,15 @@ The most important safety rule is that different kinds of text go to different p
 
 | Content | Destination | Command / method |
 |---|---|---|
-| Henry's own diary continuation | `Daily Log` / `Thoughts & Reflections` | `writeback-thought` |
+| Henry's own diary continuation | `Thoughts & Reflections` | `writeback-thought` |
 | Copilot analysis of a diary | `What Life Copilot Said` | `writeback-journal` |
-| Codex / Claudian daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Next-day execution suggestion | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
+| Codex / Life Claude Renderer daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `writeback-memory` |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
 
-Do not use `writeback-thought` for Copilot analysis. Do not use `writeback-journal` to imitate Henry's diary voice.
+Do not use `writeback-thought` for Copilot analysis. Do not use `writeback-journal` to imitate Henry's diary voice. Analysis and next-day suggestions must go through separate input files.
 
 Common commands:
 
@@ -106,6 +107,7 @@ python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file /tmp/analysis.md
 python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "标题" --input-file /tmp/thought.md
+python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file /tmp/suggestion.md
 python3 scripts/copilot.py writeback-memory --date YYYY-MM-DD --kind "pattern" --content "..."
 python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --content "..."
 ```
@@ -157,6 +159,7 @@ Default path:
 2. Look at active tracks.
 3. Pick the next artifact that matters today.
 4. Make a lightweight plan in conversation or diary analysis.
+5. If the plan includes a next-day suggestion, write it to tomorrow's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`.
 
 Legacy Quant schedule generation still exists:
 

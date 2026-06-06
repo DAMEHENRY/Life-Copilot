@@ -8,7 +8,7 @@
 | ---------- | --------------------------------------------- |
 | 日记         | `journal/YYYY/MM/YYYY-MM-DD.md`               |
 | AI 原始对话索引 | 日记内 `## 💬 From Kai`（wikilink 索引到 trace 文件；Telegram/Kai 手动粘贴） |
-| AI 对话 trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claudian}-trace.md` |
+| AI 对话 trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,life-claude-renderer}-trace.md` |
 | 长期记忆（热）    | `journal/memory.md`                           |
 | 长期记忆（冷）    | `journal/memory-archive.md`                   |
 | 洞察日志       | `journal/insights.jsonl`（append-only）         |
@@ -46,7 +46,7 @@ Before routing to a specific mode, assess context:
 ```bash
 python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 ```
-说明：这会把当天全部 Codex 和 Claudian 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件（`YYYY-MM-DD-codex-trace.md` 和 `YYYY-MM-DD-claudian-trace.md`），并在日记 `## 💬 From Kai` 追加 wikilink 索引。脚本按 wikilink 去重，重复分析同一天时不应重复写入。若日记文件不存在或当天无 AI conversations，说明后跳过，不要因此中断分析。
+说明：这会把当天全部 Codex 和 Life Claude Renderer 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件（`YYYY-MM-DD-codex-trace.md` 和 `YYYY-MM-DD-life-claude-renderer-trace.md`），并在日记 `## 💬 From Kai` 追加 wikilink 索引。脚本按 wikilink 去重，重复分析同一天时不应重复写入。若日记文件不存在或当天无 AI conversations，说明后跳过，不要因此中断分析。历史 `*-claudian-trace.md` 文件是旧版产物，保持不动。
 1. 读 `prompts/diary-mode.md`
 2. 读 `journal/YYYY/MM/YYYY-MM-DD.md`
    - 若有 `## 💬 From Kai`，把它视为当天 AI 原始对话流证据层，保留 Henry / Kai / Codex 的说话人区分
@@ -70,8 +70,9 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 
 **Diary 写回语义（强制区分）**
 - 如果写回内容是 **对该篇日记的分析 / 镜子 / Copilot 建议**，一律使用 `writeback-journal`，写入 `## What Life Copilot Said`。
-- 如果写回内容是 **想作为“我自己的日记正文补充”保存的对话片段/想法/后续澄清**，才使用 `writeback-thought`，它会写进 `## 📝 Daily Log` 与 `## 💭 Thoughts & Reflections`。
-- 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex 或 Claudian conversations**，使用 `writeback-ai-day` 自动归档 trace 文件并在 `## 💬 From Kai` 追加 wikilink 索引。
+- 如果写回内容是 **想作为“我自己的日记正文补充”保存的对话片段/想法/后续澄清**，才使用 `writeback-thought`，它会写进 `## 💭 Thoughts & Reflections`。
+- 如果写回内容是 **基于前一天日记分析生成的第二天执行建议**，使用 `writeback-daily-suggestion`，写入第二天日记的 `## 🧭 Daily Suggestion`。`What Life Copilot Said` 只保存对当前日记的分析、镜子和 memory audit，不再承载第二天建议。
+- 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex 或 Life Claude Renderer conversations**，使用 `writeback-ai-day` 自动归档 trace 文件并在 `## 💬 From Kai` 追加 wikilink 索引。
 - **禁止** 用 `writeback-thought` 去写 Copilot 分析；**禁止** 用 `writeback-journal` 去伪装用户口吻续写正文。
 
 ### Quant Mode
@@ -124,7 +125,7 @@ python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
 - **联网搜索边界**：联网搜索只用于实效性外部事实校验，是辅助证据；不得用外部搜索替代日记、记忆、insights 或 `[[YYYY-MM-DD]]` 历史锚点
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
 - **输出要求**：必须包含可执行下一步，不写空泛安慰
-- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Daily Log` / `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex/Claudian conversations 用 `writeback-ai-day` 自动归档 trace 文件并在 `💬 From Kai` 追加 wikilink 索引，Copilot 夜间分析写入 `What Life Copilot Said`
+- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex/Life Claude Renderer conversations 用 `writeback-ai-day` 自动归档 trace 文件并在 `💬 From Kai` 追加 wikilink 索引，Copilot 夜间分析写入 `What Life Copilot Said`，第二天执行建议写入 `Daily Suggestion`
 - **命名规则**：新建文件夹和普通文档一律使用 lowercase kebab-case；不要使用 `01-xxx` 这类排序前缀。例外：`AGENTS.md`、`CLAUDE.md` 保持大写；`00-index.md`、`00-readme.md` 这类目录入口文件可保留 `00-` 前缀。
 
 ## Active Board（v4.3）
@@ -193,8 +194,22 @@ python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "<标题>
 
 适用范围：
 - 仅用于“把对话沉淀成用户自己的日记补充”
-- 不用于粘贴 AI 原始对话；Telegram/Kai 原始对话直接放入 `## 💬 From Kai`，Codex/Claudian conversations 使用 `writeback-ai-day`
+- 写入 `## 💭 Thoughts & Reflections`，不要求 `Daily Log` 存在
+- 不用于粘贴 AI 原始对话；Telegram/Kai 原始对话直接放入 `## 💬 From Kai`，Codex/Life Claude Renderer conversations 使用 `writeback-ai-day`
 - 不用于 `## What Life Copilot Said` 分析写回
+
+## 写入第二天执行建议
+
+```bash
+python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <临时文件路径>
+```
+
+适用范围：
+- 基于前一天日记分析生成的第二天执行建议
+- 目标日记不存在时自动从模板创建
+- 写入 `## 🧭 Daily Suggestion`，添加 provenance 标注来源日期
+- 重复执行同一 source-date 不会产生重复 section
+- `What Life Copilot Said` 只保存对当前日记的分析，不承载第二天建议
 
 ## XP 完成协议
 

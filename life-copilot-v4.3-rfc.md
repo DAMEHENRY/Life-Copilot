@@ -172,6 +172,8 @@ It does not require Quant Feedback, XP targets, or energy scores. It just asks: 
 
 Schedule projection happens during diary analysis or on explicit request. It is a conversation, not a script command.
 
+Next-day execution suggestions are written to tomorrow's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`, separate from the current diary's `What Life Copilot Said` analysis.
+
 ---
 
 ## 5. Negative Backlog
