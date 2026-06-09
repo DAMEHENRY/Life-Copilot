@@ -1,6 +1,5 @@
 #diary
 #  📅  {{date:YYYY-MM-DD}}
-#  ⏰{{time:HH:mm}} 
 ## 🧭 Daily Suggestion
 
 ## 💭 Thoughts & Reflections
