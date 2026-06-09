@@ -195,6 +195,7 @@ python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD -
 
 **边界：**
 - `What Life Copilot Said` 不承载明天建议；明天建议只进次日日记的 `## 🧭 Daily Suggestion`。
+- 输入文件不要手写 `Generated from ...` provenance；脚本会自动添加。
 - 如果 `writeback-daily-suggestion` 因已有不同 provenance 或无 provenance 内容而失败，不要自动 `--force`；报告冲突，让 Henry 决定。
 
 ## Step 3 — Inbox Audit

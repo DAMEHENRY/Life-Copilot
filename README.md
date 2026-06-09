@@ -110,6 +110,8 @@ The most important safety rule is that different kinds of text go to different p
 
 Do not use `writeback-thought` for Copilot analysis. Do not use `writeback-journal` to imitate Henry's diary voice. Analysis and next-day suggestions must go through separate input files.
 
+For Diary Mode, these closing steps are default unless Henry explicitly says `dry run`, `only investigate`, or `do not write back`: write today's analysis with `writeback-journal`, write tomorrow's suggestion with `writeback-daily-suggestion`, then audit `inbox/` and propose destinations without moving files. The Daily Suggestion input file should contain only the suggestion body; `writeback-daily-suggestion` adds the provenance line itself.
+
 Common commands:
 
 ```bash

@@ -117,6 +117,8 @@ class TestRenderDiaryFromTemplate:
         target = date(2026, 6, 7)
         rendered = render_diary_from_template(target)
         assert "2026-06-07" in rendered
+        assert "{{time:HH:mm}}" not in rendered
+        assert "⏰" not in rendered
 
     def test_no_creation_time_line(self):
         """Rendered diary must not contain a creation time line or placeholder."""
@@ -124,6 +126,9 @@ class TestRenderDiaryFromTemplate:
         rendered = render_diary_from_template(target)
         assert "⏰" not in rendered
         assert "{{time:HH:mm}}" not in rendered
+        # Should not contain any HH:mm like "22:00" or "00:00"
+        import re
+        assert not re.search(r"\d{2}:\d{2}", rendered)
 
     def test_contains_daily_suggestion_section(self):
         target = date(2026, 6, 7)

@@ -63,6 +63,24 @@ python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 10. 回复结尾默认做一次简短 memory audit：`无需写入` / `值得记录为验证` / `值得记录为新模式`
 11. 按 diary-mode.md 的规则回复
 
+**Diary Mode Completion Contract（默认收尾）**
+
+除非 Henry 明确说“只调查 / 不要写回 / dry run”，完成某天 diary analysis 后必须继续做三个收尾动作：
+
+1. **Analysis writeback**：把当天分析正文写入临时 markdown 文件，然后执行：
+```bash
+python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临时文件路径>
+```
+写入内容只包含对当天日记的分析、镜子、建议和 memory audit；不要包含工具日志、执行报告或 inbox audit；不要伪装成 Henry 的日记正文。
+
+2. **Daily Suggestion writeback**：把第二天建议写入另一个临时 markdown 文件，然后执行：
+```bash
+python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <临时文件路径>
+```
+输入文件只写建议正文，不要手写 `Generated from ...` provenance；脚本会自动添加。若目标日记已有不同 provenance 或无 provenance 内容，不要自动 `--force`，先报告冲突。
+
+3. **Inbox audit**：两个写回完成后，读取 `inbox/00-readme.md`，列出 `inbox/` 中待处理文件（忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`），对每个文件给出建议去向、confidence 和 reason。默认只提出建议，不移动或删除文件，除非 Henry 明确要求 flush/move。
+
 需要写回日记时，先写临时文件再执行：
 ```bash
 python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临时文件路径>
