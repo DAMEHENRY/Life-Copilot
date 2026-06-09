@@ -75,6 +75,39 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 - 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex 或 Life Claude Renderer conversations**，使用 `writeback-ai-day` 自动归档 trace 文件并在 `## 💬 From Kai` 追加 wikilink 索引。
 - **禁止** 用 `writeback-thought` 去写 Copilot 分析；**禁止** 用 `writeback-journal` 去伪装用户口吻续写正文。
 
+### Diary Mode Completion Contract（v4.3）
+
+完成某天的 diary analysis 后，以下三步是**默认收尾动作**，除非 Henry 明确说"只调查 / 不要写回 / dry run"：
+
+**Step 1 — Analysis Writeback（默认执行）**
+1. 将分析正文（镜子、memory audit、历史锚点、微行动）写入临时 markdown 文件。
+2. 执行：
+   ```bash
+   python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <tmp-analysis-file>
+   ```
+3. 写入内容只能是对当天日记的分析、镜子、memory audit。**不要**包含工具日志、inbox audit 报告、执行报告，也不要伪装成 Henry 的日记正文。
+4. **禁止** heredoc 作为 writeback input；必须先写临时文件再 `--input-file`。
+5. **禁止** 使用 `writeback-thought` 写 Copilot 分析。
+
+**Step 2 — Daily Suggestion Writeback（默认执行）**
+1. 基于当天分析，产出一个短小、可执行、24 小时内可启动的次日建议。
+2. 将建议写入**另一个**临时 markdown 文件。
+3. 执行：
+   ```bash
+   python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <tmp-suggestion-file>
+   ```
+4. 边界：`What Life Copilot Said` 不承载明天建议；明天建议只进次日日记的 `## 🧭 Daily Suggestion`。
+5. 如果 `writeback-daily-suggestion` 因已有不同 provenance 或无 provenance 内容而失败，**不要**自动 `--force`；报告冲突，让 Henry 决定。
+
+**Step 3 — Inbox Audit（默认执行）**
+1. 读取 `inbox/00-readme.md`，了解 flush 规则和 destination map。
+2. 列出 `inbox/` 里待处理文件；忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`。
+3. 对每个待处理文件做轻量判断：建议去向（`journal/`、`quant/` 或相关 project、`resources/`、`seeds/`、`delete`）、confidence、reason。
+4. 默认只"提出应该挪到哪里"，不要移动或删除，除非 Henry 明确要求 flush/move。
+5. 如果 inbox 为空，最终回复中简短说明无需处理。
+
+**Completion Contract 总结**：分析 → 写回分析 → 写回次日建议 → inbox audit → 最终回复。两个写回和 inbox audit 是默认动作，不需要 Henry 每次提醒。
+
 ### Quant Mode
 
 触发（软触发）：`#quant`，或出现 `XP-` / `roadmap` / `Active Schedule`，或对话明显围绕量化学习 / 职业准备

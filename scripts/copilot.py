@@ -1490,7 +1490,9 @@ def append_journal_section(journal_text: str, marker: str, addition: str, replac
 def render_diary_from_template(target_date: date) -> str:
     """Create a diary from the daily-log template for *target_date*.
 
-    The time field is left blank — pre-created diaries must not fake a creation time.
+    The template no longer contains a creation-time field. The {{time:HH:mm}}
+    replacement is kept as a harmless no-op for backward compatibility with
+    older template copies that still carry the placeholder.
     """
     template_path = TEMPLATES_DIR / "daily-log.md"
     template = read_text(template_path)

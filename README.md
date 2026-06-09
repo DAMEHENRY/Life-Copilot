@@ -61,6 +61,16 @@ Default planning is **not** `update-schedule`. It is:
 
 Scripts are used only when they protect a structure that is easy to damage by hand.
 
+### Diary Mode Completion Contract
+
+When Diary Mode analysis completes for a day, the following three steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"):
+
+1. **Analysis Writeback** — write the analysis to `What Life Copilot Said` via `writeback-journal`.
+2. **Daily Suggestion Writeback** — write a short, actionable next-day suggestion to tomorrow's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`.
+3. **Inbox Audit** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks.
+
+The two writebacks and inbox audit are default closing steps — Henry does not need to request them each time. Details: see `AGENTS.md` §Diary Mode Completion Contract and `prompts/diary-mode.md` §Completion Contract.
+
 ---
 
 ## 3. Routing

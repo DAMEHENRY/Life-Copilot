@@ -31,7 +31,6 @@ from scripts import copilot as copilot_module
 TEMPLATE_MINIMAL = textwrap.dedent("""\
     #diary
     #  📅  2026-06-06
-    #  ⏰
     ## 🧭 Daily Suggestion
 
     ## 💭 Thoughts & Reflections
@@ -64,7 +63,7 @@ TEMPLATE_MINIMAL = textwrap.dedent("""\
 
 def _journal_with_sections(*sections: str) -> str:
     """Build a minimal journal with given section headings."""
-    lines = ["#diary\n# 📅 2026-06-06\n# ⏰ 22:00\n"]
+    lines = ["#diary\n# 📅 2026-06-06\n"]
     for s in sections:
         lines.append(f"## {s}\n\n")
     return "".join(lines)
@@ -118,23 +117,13 @@ class TestRenderDiaryFromTemplate:
         target = date(2026, 6, 7)
         rendered = render_diary_from_template(target)
         assert "2026-06-07" in rendered
-        # Time should be blank (not a fake timestamp)
-        lines = rendered.splitlines()
-        time_line = next((l for l in lines if "⏰" in l), "")
-        assert "HH:mm" not in time_line  # placeholder removed
-        # The time portion after ⏰ should be empty or just whitespace
-        time_part = time_line.split("⏰")[-1].strip() if "⏰" in time_line else ""
-        assert time_part == "" or time_part == ""
 
-    def test_does_not_fake_creation_time(self):
-        """Pre-created diaries must not have a fabricated timestamp."""
+    def test_no_creation_time_line(self):
+        """Rendered diary must not contain a creation time line or placeholder."""
         target = date(2026, 6, 7)
         rendered = render_diary_from_template(target)
-        # Should not contain any HH:mm like "22:00" or "00:00"
-        import re
-        assert not re.search(r"\d{2}:\d{2}", rendered.split("\n")[2]), (
-            "Template time line should be blank"
-        )
+        assert "⏰" not in rendered
+        assert "{{time:HH:mm}}" not in rendered
 
     def test_contains_daily_suggestion_section(self):
         target = date(2026, 6, 7)
@@ -266,8 +255,7 @@ class TestWriteDailySuggestionCommand:
             templates_dir.mkdir(parents=True)
             (templates_dir / "daily-log.md").write_text(
                 TEMPLATE_MINIMAL
-                .replace("2026-06-06", "{{date:YYYY-MM-DD}}")
-                .replace("#  ⏰", "#  ⏰{{time:HH:mm}}"),
+                .replace("2026-06-06", "{{date:YYYY-MM-DD}}"),
                 encoding="utf-8",
             )
             input_file = root / "suggestion.md"
@@ -294,7 +282,8 @@ class TestWriteDailySuggestionCommand:
             assert target.exists()
             text = target.read_text(encoding="utf-8")
             assert "#  📅  2026-06-07" in text
-            assert "#  ⏰\n" in text
+            assert "⏰" not in text
+            assert "{{time:HH:mm}}" not in text
             assert "完成一个最小动作。" in text
             assert "> Generated from [[2026-06-06]] diary analysis." in text
 
