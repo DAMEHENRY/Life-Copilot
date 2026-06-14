@@ -331,6 +331,91 @@ class TestExportDayTranscript(unittest.TestCase):
             assert msg_count == 1
             assert "valid" in text
 
+    def test_image_attachment_provenance_in_transcript(self):
+        """Image contextAttachments should appear as provenance lines after the user message."""
+        with tempfile.TemporaryDirectory() as tmp:
+            msg = _make_message("user", "describe this", _TS_BASE_MS)
+            msg["contextAttachments"] = [
+                {
+                    "type": "image",
+                    "path": "attachments/1234-abcd.png",
+                    "text": "[image: 1234-abcd.png]",
+                    "mime": "image/png",
+                    "sizeBytes": 54321,
+                }
+            ]
+            conv = _make_conversation("sid-img", "Image test", [msg])
+            p = _write_history(Path(tmp), [conv])
+            text, msg_count, _ = export_life_claude_renderer_day_transcript(
+                date(2026, 6, 6), history_path=p,
+            )
+            assert "describe this" in text
+            assert "Attachments:" in text
+            assert "Image: path=attachments/1234-abcd.png" in text
+            assert "mime=image/png" in text
+            assert "size=54321 bytes" in text
+            # message_count should still be 1 (attachment lines are part of the user message, not extra messages)
+            assert msg_count == 1
+
+    def test_image_attachment_no_base64_or_thumbnail_exported(self):
+        """base64 and thumbnail fields must NOT appear in the transcript."""
+        with tempfile.TemporaryDirectory() as tmp:
+            msg = _make_message("user", "look at this", _TS_BASE_MS)
+            msg["contextAttachments"] = [
+                {
+                    "type": "image",
+                    "path": "attachments/photo.jpg",
+                    "text": "[image: photo.jpg]",
+                    "mime": "image/jpeg",
+                    "sizeBytes": 9999,
+                    "thumbnail": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+                }
+            ]
+            conv = _make_conversation("sid-no-b64", "No b64", [msg])
+            p = _write_history(Path(tmp), [conv])
+            text, _, _ = export_life_claude_renderer_day_transcript(
+                date(2026, 6, 6), history_path=p,
+            )
+            assert "base64" not in text
+            assert "thumbnail" not in text
+            assert "/9j/4AAQSkZJRg" not in text
+            # But the path/mime/size should still be there
+            assert "path=attachments/photo.jpg" in text
+
+    def test_non_image_attachments_not_exported_as_image_lines(self):
+        """editor-selection and pdf-selection attachments should not produce Image: lines."""
+        with tempfile.TemporaryDirectory() as tmp:
+            msg = _make_message("user", "check this", _TS_BASE_MS)
+            msg["contextAttachments"] = [
+                {"type": "editor-selection", "path": "notes/a.md", "lines": "1-5", "text": "selected"},
+                {"type": "pdf-selection", "path": "paper.pdf", "page": "3", "text": "pdf text"},
+            ]
+            conv = _make_conversation("sid-no-img", "No img", [msg])
+            p = _write_history(Path(tmp), [conv])
+            text, _, _ = export_life_claude_renderer_day_transcript(
+                date(2026, 6, 6), history_path=p,
+            )
+            assert "Attachments:" not in text
+            assert "Image:" not in text
+            assert "check this" in text
+
+    def test_message_count_with_image_attachment(self):
+        """message_count should count user+assistant messages, not attachment lines."""
+        with tempfile.TemporaryDirectory() as tmp:
+            user_msg = _make_message("user", "what is this", _TS_BASE_MS)
+            user_msg["contextAttachments"] = [
+                {"type": "image", "path": "img.png", "text": "[image: img.png]", "mime": "image/png", "sizeBytes": 100},
+            ]
+            asst_msg = _make_message("assistant", "It shows a cat.", _TS_BASE_MS + 2000)
+            conv = _make_conversation("sid-cnt", "Count test", [user_msg, asst_msg])
+            p = _write_history(Path(tmp), [conv])
+            text, msg_count, _ = export_life_claude_renderer_day_transcript(
+                date(2026, 6, 6), history_path=p,
+            )
+            # Two chat messages (user + assistant), not 3
+            assert msg_count == 2
+            assert "It shows a cat." in text
+
 
 # ---------------------------------------------------------------------------
 # Tests: ai_trace_path_for_date with life-claude-renderer

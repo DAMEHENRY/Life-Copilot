@@ -895,6 +895,25 @@ def export_life_claude_renderer_day_transcript(
             if not isinstance(text, str) or not text.strip():
                 continue
 
+            # Append image attachment provenance for user messages
+            if role == "user":
+                attachments = msg.get("contextAttachments") or []
+                image_lines = []
+                for att in attachments:
+                    if not isinstance(att, dict) or att.get("type") != "image":
+                        continue
+                    att_path = att.get("path", "")
+                    att_mime = att.get("mime", "")
+                    att_size = att.get("sizeBytes")
+                    parts = [f"path={att_path}"]
+                    if att_mime:
+                        parts.append(f"mime={att_mime}")
+                    if att_size is not None:
+                        parts.append(f"size={att_size} bytes")
+                    image_lines.append(f"  - Image: {', '.join(parts)}")
+                if image_lines:
+                    text = text.rstrip() + "\n\nAttachments:\n" + "\n".join(image_lines)
+
             if earliest_ts is None or ts_ms < earliest_ts:
                 earliest_ts = ts_ms
 
