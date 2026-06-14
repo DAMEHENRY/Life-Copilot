@@ -20,6 +20,6 @@ No subfolders — flat directory. Keep it lean.
 Do not create subfolders. If template count exceeds 15, review and prune unused ones before organizing.
 
 ## Active / Important Files
-- `daily-log.md` — template for journal daily entries (Daily Suggestion, Tomorrow Projection Input, Writing State; no Legacy Quant Feedback)
+- `daily-log.md` — template for journal daily entries (Daily Suggestion, Tomorrow Projection Input with Tomorrow anchor / Context / track / Known limits / Do-not-expand, Writing State; no Legacy Quant Feedback)
 - `legacy-quant-feedback.md` — standalone snippet for legacy Quant state/schedule scripts; paste into journal only when explicitly needed
 - `sched-library-day.md` — legacy Quant schedule template (used only by `update-schedule`; not the v4.3 default projection)

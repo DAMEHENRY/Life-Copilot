@@ -137,7 +137,7 @@ The old mode prompts (`prompts/diary-mode.md`, `prompts/quant-mode.md`, `prompts
 
 ### Layer 5: Active Board
 
-`life-board.md` is the single source of truth for "what is Henry working on across all life tracks." It replaces the implicit assumption that `quant/roadmap.md` = life.
+`life-board.md` is a slow-variable active context map — not a daily planner or todo list. It replaces the implicit assumption that `quant/roadmap.md` = life.
 
 Each track has exactly four fields:
 - **Active question** — the current open question
@@ -145,7 +145,9 @@ Each track has exactly four fields:
 - **Stop condition** — when to declare this done
 - **Status** — one of: `active`, `waiting`, `paused`, `done`
 
-The board is updated during diary analysis or when Henry explicitly asks. It is not auto-updated by scripts.
+Daily projection reads the board but does not update it by default. Board updates are event-driven and evidence-based: next artifact completed, active question answered/expired, seed promoted, track paused/waiting/done/deleted, or repeated diary evidence showing the board no longer matches life.
+
+Periodic audit behavior: every 7-14 days, or when diary evidence suggests drift, Life Copilot reminds Henry and proposes minimal patches (add/change/delete/pause/done). Henry approves; Copilot performs the maintenance. No auto-apply without Henry's confirmation unless he explicitly asks.
 
 ### Layer 6: Project Protocol
 
@@ -172,7 +174,9 @@ It does not require Quant Feedback, XP targets, or energy scores. It just asks: 
 
 Schedule projection happens during diary analysis or on explicit request. It is a conversation, not a script command.
 
-Next-day execution suggestions are written to tomorrow's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`, separate from the current diary's `What Life Copilot Said` analysis.
+**Tomorrow Projection Input** is a low-friction input surface in the daily template, not a task list or script gate. Fields: **Tomorrow anchor** (a fixed event, a minimal artifact, or both; does not limit tomorrow to one thing), **Context / track** (natural language; Copilot maps it to board tracks during analysis), **Known limits** (known commitments/constraints; `unknown` is acceptable), **Do-not-expand** (active boundary: what this should not turn into).
+
+Next-day execution suggestions are written to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`, using target-day voice (`today`, not `tomorrow`). The completion contract runs inbox audit before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush.
 
 ---
 

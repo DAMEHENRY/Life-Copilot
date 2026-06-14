@@ -10,11 +10,11 @@
 ## 💬 From Kai
 
 ## 🧭 Tomorrow Projection Input
-*Used by diary analysis to generate a conversational projection for tomorrow. Not a script gate.*
-- **One thing for tomorrow**:
-- **Active board track**:
-- **Energy / constraints**:
-- **Do-not-expand boundary**:
+*Low-friction input surface for tomorrow's conversational projection. Not a task list or script gate.*
+- **Tomorrow anchor**:
+- **Context / track**:
+- **Known limits**:
+- **Do-not-expand**:
 
 ## 🏃‍♂️ Habits (Optional)
 - [ ] Sports: 

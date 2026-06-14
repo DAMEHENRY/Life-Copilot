@@ -63,13 +63,14 @@ Scripts are used only when they protect a structure that is easy to damage by ha
 
 ### Diary Mode Completion Contract
 
-When Diary Mode analysis completes for a day, the following three steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"):
+When Diary Mode analysis completes for a day, the following four steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"):
 
 1. **Analysis Writeback** — write the analysis to `What Life Copilot Said` via `writeback-journal`.
-2. **Daily Suggestion Writeback** — write a short, actionable next-day suggestion to tomorrow's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`.
-3. **Inbox Audit** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks.
+2. **Inbox Audit / Inbox Closure Check** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks. If inbox is empty, briefly note that.
+3. **Daily Suggestion Writeback** — write a short, actionable suggestion to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`. The suggestion body must use target-day voice (`today`, not `tomorrow`) and should reflect post-inbox-closure state — do not recommend inbox actions for files already moved during the audit.
+4. **Final Response**.
 
-The two writebacks and inbox audit are default closing steps — Henry does not need to request them each time. Details: see `AGENTS.md` §Diary Mode Completion Contract and `prompts/diary-mode.md` §Completion Contract.
+Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush. Details: see `AGENTS.md` §Diary Mode Completion Contract and `prompts/diary-mode.md` §Completion Contract.
 
 ---
 
@@ -110,7 +111,7 @@ The most important safety rule is that different kinds of text go to different p
 
 Do not use `writeback-thought` for Copilot analysis. Do not use `writeback-journal` to imitate Henry's diary voice. Analysis and next-day suggestions must go through separate input files.
 
-For Diary Mode, these closing steps are default unless Henry explicitly says `dry run`, `only investigate`, or `do not write back`: write today's analysis with `writeback-journal`, write tomorrow's suggestion with `writeback-daily-suggestion`, then audit `inbox/` and propose destinations without moving files. The Daily Suggestion input file should contain only the suggestion body; `writeback-daily-suggestion` adds the provenance line itself.
+For Diary Mode, these closing steps are default unless Henry explicitly says `dry run`, `only investigate`, or `do not write back`: write today's analysis with `writeback-journal`, audit `inbox/` and propose destinations without moving files, then write the target-day suggestion with `writeback-daily-suggestion` using target-day voice (`today`, not `tomorrow`). The Daily Suggestion input file should contain only the suggestion body; `writeback-daily-suggestion` adds the provenance line itself. Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush.
 
 Common commands:
 
@@ -141,12 +142,16 @@ For normal diary analysis, prefer `writeback-ai-day`.
 
 ## 5. Active Board And Seeds
 
-`life-board.md` is the single source of truth for active work. Each track has:
+`life-board.md` is a slow-variable active context map, not a daily planner or todo list. Each track has:
 
 - Active question
 - Next artifact
 - Stop condition
 - Status
+
+Daily projection reads the board but does not update it by default. Board updates are event-driven and evidence-based: next artifact completed, active question answered/expired, seed promoted, track paused/waiting/done/deleted, or repeated diary evidence showing drift.
+
+**Periodic audit**: every 7-14 days, or when diary evidence suggests drift, Life Copilot reminds Henry and proposes minimal patches. Henry approves; Copilot performs the maintenance. The audit may propose add/change/delete/pause/done, but does not auto-apply without Henry's confirmation.
 
 `seeds/` is the greenhouse for ideas that are valuable but not active.
 
@@ -171,7 +176,16 @@ Default path:
 2. Look at active tracks.
 3. Pick the next artifact that matters today.
 4. Make a lightweight plan in conversation or diary analysis.
-5. If the plan includes a next-day suggestion, write it to tomorrow's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`.
+5. If the plan includes a next-day suggestion, write it to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`, using target-day voice (`today`, not `tomorrow`).
+
+### Tomorrow Projection Input
+
+The `## 🧭 Tomorrow Projection Input` section in the daily template is a low-friction input surface for tomorrow's conversational projection. It is **not** a task list or script gate.
+
+- **Tomorrow anchor** — a fixed event, a minimal artifact, or both; it does not mean tomorrow can only have one thing.
+- **Context / track** — natural language like `study`, `quant`, `body`, `family`, `Life Copilot`, `untracked`, or blank. Henry does not need to manually classify against `life-board.md`; Copilot maps it during analysis.
+- **Known limits** — known commitments/constraints (NBA game, sleep, deadline, body condition, travel, family call, attention residue). Not a demand to predict tomorrow's energy. `unknown` is acceptable.
+- **Do-not-expand** — the active boundary: what this should not turn into (e.g. "read paper but do not write code", "watch game but do not browse forums afterward").
 
 Legacy Quant schedule generation still exists:
 
