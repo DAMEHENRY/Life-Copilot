@@ -85,6 +85,8 @@ Mode triggers are soft suggestions, not hard gates.
 | Study | Non-Quant learning, reading, concepts, practice | `prompts/study-mode.md` |
 | Quant | Quant learning, XP artifacts, legacy Quant workflows | `prompts/quant-mode.md` |
 
+Diary analysis uses nearby context plus a default "far objective anchor" pass: for durable themes, it searches older dated journal entries, artifacts, and archived memories to weave 2–4 high-quality anchors (including at least one outside the recent 30 days when available) into a mini timeline. Details: `prompts/diary-mode.md` §远期客观锚点检索.
+
 Before routing, the assistant should usually inspect:
 
 - `life-board.md`
