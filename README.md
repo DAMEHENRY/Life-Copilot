@@ -1,8 +1,9 @@
 # Life Copilot
 
-> Version: v4.3 (2026-06-04)
+> Version: v4.3 (base: 2026-06-04; current protocol updated 2026-07-07)
 > Runtime: Claude Code / Codex + Obsidian + local files
 > Design note: [[life-copilot-v4.3-rfc]]
+> Current update: Life Board audit gate + resources archive routing
 
 Life Copilot is Henry's local personal operating system. It is not a task app, not a scheduler, and not a database. It is a small set of files and scripts that help an AI assistant read the right local evidence, preserve provenance, and suggest the smallest useful next step.
 
@@ -303,4 +304,4 @@ If the system feels lighter and no critical workflow breaks, v4.3 is working.
 
 ---
 
-*Last updated: [[2026-06-05]]*
+*Last updated: [[2026-07-07]]*
