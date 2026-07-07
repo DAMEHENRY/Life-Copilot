@@ -63,14 +63,15 @@ Scripts are used only when they protect a structure that is easy to damage by ha
 
 ### Diary Mode Completion Contract
 
-When Diary Mode analysis completes for a day, the following four steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"):
+When Diary Mode analysis completes for a day, the following five steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"):
 
 1. **Analysis Writeback** — write the analysis to `What Life Copilot Said` via `writeback-journal`.
-2. **Inbox Audit / Inbox Closure Check** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks. If inbox is empty, briefly note that.
-3. **Daily Suggestion Writeback** — write a short, actionable suggestion to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`. The suggestion body must use target-day voice (`today`, not `tomorrow`) and should reflect post-inbox-closure state — do not recommend inbox actions for files already moved during the audit.
-4. **Final Response**.
+2. **Life Board Audit Gate** — run `audit-life-board --date YYYY-MM-DD`. If the board is due or the diary explicitly mentions board drift, the final response must include `Proposed Life Board Patch`; do not edit `life-board.md` unless Henry confirms.
+3. **Inbox Audit / Inbox Closure Check** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks. If inbox is empty, briefly note that.
+4. **Daily Suggestion Writeback** — write a short, actionable suggestion to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`. The suggestion body must use target-day voice (`today`, not `tomorrow`) and should reflect post-inbox-closure state — do not recommend inbox actions for files already moved during the audit.
+5. **Final Response**.
 
-Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush. Details: see `AGENTS.md` §Diary Mode Completion Contract and `prompts/diary-mode.md` §Completion Contract.
+Life Board audit runs before inbox/Daily Suggestion so stale board context is surfaced while keeping board patches out of `What Life Copilot Said` unless the board is the diary topic. Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush. Details: see `AGENTS.md` §Diary Mode Completion Contract and `prompts/diary-mode.md` §Completion Contract.
 
 ---
 
@@ -153,7 +154,14 @@ For normal diary analysis, prefer `writeback-ai-day`.
 
 Daily projection reads the board but does not update it by default. Board updates are event-driven and evidence-based: next artifact completed, active question answered/expired, seed promoted, track paused/waiting/done/deleted, or repeated diary evidence showing drift.
 
-**Periodic audit**: every 7-14 days, or when diary evidence suggests drift, Life Copilot reminds Henry and proposes minimal patches. Henry approves; Copilot performs the maintenance. The audit may propose add/change/delete/pause/done, but does not auto-apply without Henry's confirmation.
+**Periodic audit**: every diary analysis runs `audit-life-board --date YYYY-MM-DD`. If `life-board.md` is 7+ days stale or the diary explicitly mentions board drift/mechanism/review, Life Copilot must propose minimal patches in the final response. Henry approves; Copilot performs the maintenance through `writeback-life-board`. The audit may propose add/change/delete/pause/done, but does not auto-apply without Henry's confirmation.
+
+Common board commands:
+
+```bash
+python3 scripts/copilot.py audit-life-board --date YYYY-MM-DD
+python3 scripts/copilot.py writeback-life-board --date YYYY-MM-DD --input-file /tmp/life-board.md
+```
 
 `seeds/` is the greenhouse for ideas that are valuable but not active.
 
@@ -168,7 +176,24 @@ The board should stay clean. Parked ideas belong in `seeds/00-index.md`, not on 
 
 ---
 
-## 6. Schedule Projection
+## 6. Resources Archive Mechanism
+
+`resources/` is a topical library, not a dumping ground. Inbox flushes should route reference material into the closest stable shelf instead of leaving ordinary files at the root:
+
+- Health/body/medical/nutrition/wearable data -> `resources/health-data/`
+- School/enrollment/degree/UIBE administrative material -> `resources/uibe/`
+- Reusable procedures and troubleshooting workflows -> `resources/sops/`
+- Lifestyle, shopping, grooming, body comfort, or setup references -> `resources/better-life/`
+- Film/TV/personal media inventories -> `resources/media/`
+- Durable conceptual frameworks or methodology documents -> `resources/frameworks/`
+- Family education references -> `resources/family-education/`
+- Quant/finance references that are not XP notes -> `resources/finance-quant/`
+
+The root of `resources/` should normally contain only `00-readme.md`, vault-level indexes, or rare cross-folder entrypoints. New resource folders should be created with a `00-index.md`; private resource contents remain covered by `.gitignore`.
+
+---
+
+## 7. Schedule Projection
 
 v4.3 schedules are projections, not training-era generated plans.
 
@@ -205,7 +230,7 @@ templates/legacy-quant-feedback.md
 
 ---
 
-## 7. Quant Tools
+## 8. Quant Tools
 
 Quant Mode is now mostly a specialized study/project mode, not the default life loop.
 
@@ -227,7 +252,7 @@ Session notes and summaries are maintained manually in `quant/arsenal/`.
 
 ---
 
-## 8. File Rules
+## 9. File Rules
 
 Naming:
 
@@ -252,7 +277,7 @@ git diff --check
 
 ---
 
-## 9. What RFC Means
+## 10. What RFC Means
 
 `RFC` means **Request for Comments**.
 
@@ -262,7 +287,7 @@ Use the RFC when you want to understand why the system changed. Use this README 
 
 ---
 
-## 10. Trial Week
+## 11. Trial Week
 
 v4.3 should now be tested in real use for one week.
 

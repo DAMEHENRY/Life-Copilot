@@ -66,7 +66,7 @@ python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 
 **Diary Mode Completion Contract（默认收尾）**
 
-除非 Henry 明确说“只调查 / 不要写回 / dry run”，完成某天 diary analysis 后必须继续做四个收尾动作：
+除非 Henry 明确说“只调查 / 不要写回 / dry run”，完成某天 diary analysis 后必须继续做五个收尾动作：
 
 1. **Analysis writeback**：把当天分析正文写入临时 markdown 文件，然后执行：
 ```bash
@@ -74,15 +74,24 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 ```
 写入内容只包含对当天日记的分析、镜子、建议和 memory audit；不要包含工具日志、执行报告或 inbox audit；不要伪装成 Henry 的日记正文。
 
-2. **Inbox audit / inbox closure check**：读取 `inbox/00-readme.md`，列出 `inbox/` 中待处理文件（忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`），对每个文件给出建议去向、confidence 和 reason。默认只提出建议，不移动或删除文件，除非 Henry 明确要求 flush/move。如果 inbox 为空或无需操作，在回复中简短说明。如果 inbox 有待处理文件且 Henry 明确要求 flush/move，执行后再进入下一步。
+2. **Life Board audit gate**：执行：
+```bash
+python3 scripts/copilot.py audit-life-board --date YYYY-MM-DD
+```
+若输出显示 `needs_audit`（例如超过 7 天未更新，或当天日记显式提到 Life Board / board 机制 / board 审计），最终回复必须包含 `Proposed Life Board Patch`，列出建议的 add/change/delete/pause/done、证据日期和 reason。未经 Henry 明确确认，不要修改 `life-board.md`。若 Henry 确认 patch，再把完整替换版 board 写入临时 markdown 文件并执行：
+```bash
+python3 scripts/copilot.py writeback-life-board --date YYYY-MM-DD --input-file <tmp-board-file>
+```
 
-3. **Daily Suggestion writeback**：基于 post-inbox-closure 状态产出次日建议，写入另一个临时 markdown 文件，然后执行：
+3. **Inbox audit / inbox closure check**：读取 `inbox/00-readme.md`，列出 `inbox/` 中待处理文件（忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`），对每个文件给出建议去向、confidence 和 reason。默认只提出建议，不移动或删除文件，除非 Henry 明确要求 flush/move。如果 inbox 为空或无需操作，在回复中简短说明。如果 inbox 有待处理文件且 Henry 明确要求 flush/move，执行后再进入下一步。
+
+4. **Daily Suggestion writeback**：基于 post-inbox-closure 状态产出次日建议，写入另一个临时 markdown 文件，然后执行：
 ```bash
 python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <临时文件路径>
 ```
 输入文件只写建议正文，不要手写 `Generated from ...` provenance；脚本会自动添加。若目标日记已有不同 provenance 或无 provenance 内容，不要自动 `--force`，先报告冲突。
 
-4. **Final response**。
+5. **Final response**。
 
 需要写回日记时，先写临时文件再执行：
 ```bash
@@ -98,7 +107,7 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 
 ### Diary Mode Completion Contract（v4.3）
 
-完成某天的 diary analysis 后，以下四步是**默认收尾动作**，除非 Henry 明确说"只调查 / 不要写回 / dry run"：
+完成某天的 diary analysis 后，以下五步是**默认收尾动作**，除非 Henry 明确说"只调查 / 不要写回 / dry run"：
 
 **Step 1 — Analysis Writeback（默认执行）**
 1. 将分析正文（镜子、memory audit、历史锚点、微行动）写入临时 markdown 文件。
@@ -110,15 +119,27 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 4. **禁止** heredoc 作为 writeback input；必须先写临时文件再 `--input-file`。
 5. **禁止** 使用 `writeback-thought` 写 Copilot 分析。
 
-**Step 2 — Inbox Audit / Inbox Closure Check（默认执行）**
+**Step 2 — Life Board Audit Gate（默认执行）**
+1. 执行：
+   ```bash
+   python3 scripts/copilot.py audit-life-board --date YYYY-MM-DD
+   ```
+2. 若结果为 `needs_audit`，最终回复必须包含 `Proposed Life Board Patch`，逐条列出建议动作（add/change/delete/pause/done）、证据日期、reason。
+3. 默认只提出 patch，不修改 `life-board.md`。未经 Henry 明确确认，不要自动 apply。
+4. 若 Henry 明确确认 patch，先写完整替换版 board 到临时 markdown 文件，再执行：
+   ```bash
+   python3 scripts/copilot.py writeback-life-board --date YYYY-MM-DD --input-file <tmp-board-file>
+   ```
+
+**Step 3 — Inbox Audit / Inbox Closure Check（默认执行）**
 1. 读取 `inbox/00-readme.md`，了解 flush 规则和 destination map。
 2. 列出 `inbox/` 里待处理文件；忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`。
 3. 对每个待处理文件做轻量判断：建议去向（`journal/`、`quant/` 或相关 project、`resources/`、`seeds/`、`delete`）、confidence、reason。
 4. 默认只"提出应该挪到哪里"，不要移动或删除，除非 Henry 明确要求 flush/move。
 5. 如果 inbox 为空或无需操作，在回复中简短说明。
-6. 如果 Henry 明确要求 flush/move，执行后再进入 Step 3。
+6. 如果 Henry 明确要求 flush/move，执行后再进入 Step 4。
 
-**Step 3 — Daily Suggestion Writeback（默认执行）**
+**Step 4 — Daily Suggestion Writeback（默认执行）**
 1. 基于当天分析和 post-inbox-closure 状态，产出一个短小、可执行、目标日当天可启动的建议。
 2. 将建议写入**另一个**临时 markdown 文件。
 3. 执行：
@@ -128,9 +149,9 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临
 4. 边界：`What Life Copilot Said` 不承载次日建议；次日建议只进目标日日记的 `## 🧭 Daily Suggestion`。
 5. 如果 `writeback-daily-suggestion` 因已有不同 provenance 或无 provenance 内容而失败，**不要**自动 `--force`；报告冲突，让 Henry 决定。
 
-**Step 4 — Final Response**
+**Step 5 — Final Response**
 
-**Completion Contract 总结**：分析 → 写回分析 → inbox audit / closure check → 写回次日建议 → 最终回复。Inbox audit 在 Daily Suggestion 之前完成，确保建议基于 inbox closure 后的状态。
+**Completion Contract 总结**：分析 → 写回分析 → Life Board audit gate → inbox audit / closure check → 写回次日建议 → 最终回复。Life Board audit gate 负责触发 patch 草案但不自动修改 board；Inbox audit 在 Daily Suggestion 之前完成，确保建议基于 inbox closure 后的状态。
 
 ### Quant Mode
 
@@ -197,7 +218,7 @@ python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
 
 **更新语义**：Daily projection 读 board，但默认不更新它。Board 更新应 event-driven 且 evidence-based：next artifact 完成、active question 已答/过期、seed promoted、track paused/waiting/done/deleted，或重复日记证据显示 board 不再匹配生活。
 
-**定期审计**：每 7-14 天，或当日记证据显示 drift 时，Life Copilot 应提醒 Henry 并提议最小 patch。Henry 批准后 Copilot 执行维护。Henry 不应手动维护整个 board。审计可提议 add/change/delete/pause/done，但未经 Henry 确认不得自动应用（除非他明确要求）。
+**定期审计**：每次 diary analysis 的 Completion Contract 都应运行 `audit-life-board --date YYYY-MM-DD`。若超过 7 天未更新，或当日记证据显示 drift / 显式提到 board 机制，Life Copilot 必须在最终回复中提出最小 patch。Henry 批准后 Copilot 执行维护。Henry 不应手动维护整个 board。审计可提议 add/change/delete/pause/done，但未经 Henry 确认不得自动应用（除非他明确要求）。
 
 当用户问"我现在该做什么"或"我有什么进行中的项目"时，先读 `life-board.md`。
 
@@ -206,6 +227,8 @@ python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
 - `inbox/` 是零摩擦捕获缓冲区
 - `seeds/` 是候选项目孵化区（详见 `seeds/00-index.md`）
 - Inbox flush 流程：inbox 中高置信但暂不可行的想法 → `seeds/`（带 confidence + reason + source）
+- `resources/` 是有货架的资料库，不是根目录停车场。Reference material flush 时继续细分：健康/身体/医疗/营养/Apple Health → `resources/health-data/`；学校/入学/学位/UIBE 行政材料 → `resources/uibe/`；可复用流程/SOP → `resources/sops/`；生活用品/身体舒适/购物/北京落地设置 → `resources/better-life/`；影视/个人媒体清单 → `resources/media/`；方法论/概念框架/审计镜头 → `resources/frameworks/`；家庭教育机会/弟弟学习相关资料 → `resources/family-education/`；非 XP 的 quant/finance 外部参考 → `resources/finance-quant/`。
+- `resources/` 根目录默认只保留 `00-readme.md`、全局索引或少数跨目录入口；新建 resource 子目录时同时写 `00-index.md`。实际私密资源内容仍受 `.gitignore` 保护，不因机制说明而默认公开。
 - Seeds 在 inbox flush 时审查；3+ 个月未动且不再共鸣的种子可修剪（git history 里还在）
 - Seeds 升级为 active track 需满足：有 active question、有 next artifact、有 stop condition、不挤占更高优先级项目
 

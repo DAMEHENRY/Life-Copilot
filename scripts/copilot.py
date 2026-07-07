@@ -4,8 +4,9 @@ Life Copilot — lean orchestration utilities.
 
 Only structural write commands that are unsafe for Claude to do freehand:
 writeback-journal, writeback-thought, writeback-daily-suggestion,
-writeback-memory, append-insight, compact-memory, quant-mission,
-quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
+writeback-life-board, writeback-memory, append-insight, compact-memory,
+quant-mission, quant-question-link, sync-quant-state, sync-roadmap-stats,
+update-schedule.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
 JOURNAL_DIR = ROOT / "journal"
+LIFE_BOARD_FILE = ROOT / "life-board.md"
 MEMORY_FILE = JOURNAL_DIR / "memory.md"
 MEMORY_ARCHIVE_FILE = JOURNAL_DIR / "memory-archive.md"
 INSIGHTS_FILE = JOURNAL_DIR / "insights.jsonl"
@@ -1506,6 +1508,148 @@ def append_journal_section(journal_text: str, marker: str, addition: str, replac
     return before + "\n\n" + new_body.rstrip() + ("\n\n" + tail.lstrip("\n") if tail else "\n")
 
 
+LIFE_BOARD_TRIGGER_RE = re.compile(
+    r"(?i)\b(life[- ]board|active[- ]board|life-board\.md)\b"
+)
+BOARD_CONTEXT_TRIGGER_RE = re.compile(
+    r"\bboard\b.{0,40}(机制|审计|更新|重构|过期|mechanism|audit|review|update|patch|scratch)"
+    r"|(机制|审计|更新|重构|过期|mechanism|audit|review|update|patch|scratch).{0,40}\bboard\b",
+    re.IGNORECASE | re.DOTALL,
+)
+LIFE_BOARD_LAST_UPDATED_RE = re.compile(
+    r"(?im)^\*?Last updated:\s*\[\[(\d{4}-\d{2}-\d{2})\]\]\*?\s*$"
+)
+LIFE_BOARD_STATUS_RE = re.compile(
+    r"(?im)^-\s+\*\*Status\*\*:\s*`(active|waiting|paused|done)`"
+)
+LIFE_BOARD_ALLOWED_STATUSES = {"active", "waiting", "paused", "done"}
+
+
+def parse_life_board_last_updated(board_text: str) -> Optional[date]:
+    m = LIFE_BOARD_LAST_UPDATED_RE.search(board_text)
+    return parse_date_str(m.group(1)) if m else None
+
+
+def has_life_board_explicit_trigger(journal_text: str) -> bool:
+    return bool(
+        LIFE_BOARD_TRIGGER_RE.search(journal_text)
+        or BOARD_CONTEXT_TRIGGER_RE.search(journal_text)
+    )
+
+
+def audit_life_board(target: date) -> Dict[str, object]:
+    if not LIFE_BOARD_FILE.exists():
+        raise FileNotFoundError(f"Life Board not found: {LIFE_BOARD_FILE}")
+
+    board_text = read_text(LIFE_BOARD_FILE)
+    last_updated = parse_life_board_last_updated(board_text)
+    days_since_update = (target - last_updated).days if last_updated else None
+    due = last_updated is None or (days_since_update is not None and days_since_update >= 7)
+
+    jp = journal_path_for_date(target)
+    journal_exists = jp.exists()
+    explicit_trigger = has_life_board_explicit_trigger(read_text(jp)) if journal_exists else False
+
+    reasons: List[str] = []
+    if last_updated is None:
+        reasons.append("last_updated_missing")
+    elif due:
+        reasons.append("last_updated_older_than_7_days")
+    if explicit_trigger:
+        reasons.append("journal_explicit_trigger")
+
+    return {
+        "date": target.isoformat(),
+        "board_path": str(LIFE_BOARD_FILE),
+        "journal_path": str(jp),
+        "journal_exists": journal_exists,
+        "last_updated": last_updated.isoformat() if last_updated else None,
+        "days_since_update": days_since_update,
+        "due": due,
+        "explicit_trigger": explicit_trigger,
+        "needs_audit": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+def cmd_audit_life_board(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    result = audit_life_board(target)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    status = "needs_audit" if result["needs_audit"] else "no_audit_needed"
+    print(f"Life Board audit: {status}")
+    print(f"- date: {result['date']}")
+    print(f"- last_updated: {result['last_updated'] or '(missing)'}")
+    print(f"- days_since_update: {result['days_since_update']}")
+    print(f"- due: {result['due']}")
+    print(f"- explicit_trigger: {result['explicit_trigger']}")
+    if result["reasons"]:
+        print("- reasons:")
+        for reason in result["reasons"]:  # type: ignore[union-attr]
+            print(f"  - {reason}")
+    if result["needs_audit"]:
+        print("Next step: include a Proposed Life Board Patch in the final response; do not edit life-board.md without Henry approval.")
+
+
+def split_life_board_track_sections(board_text: str) -> List[Tuple[str, str]]:
+    sections: List[Tuple[str, str]] = []
+    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", board_text))
+    for idx, match in enumerate(matches):
+        title = match.group(1).strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(board_text)
+        if title.lower() == "seeds":
+            continue
+        sections.append((title, board_text[start:end]))
+    return sections
+
+
+def validate_life_board_text(board_text: str) -> None:
+    if "# Life Board" not in board_text:
+        raise ValueError("Life Board heading not found")
+
+    tracks = split_life_board_track_sections(board_text)
+    if not tracks:
+        raise ValueError("No Life Board track sections found")
+
+    required_fields = [
+        ("Active question", r"(?im)^-\s+\*\*Active question\*\*:"),
+        ("Next artifact", r"(?im)^-\s+\*\*Next artifact\*\*:"),
+        ("Stop condition", r"(?im)^-\s+\*\*Stop condition\*\*:"),
+        ("Status", r"(?im)^-\s+\*\*Status\*\*:"),
+    ]
+    for title, body in tracks:
+        for field_name, pattern in required_fields:
+            if not re.search(pattern, body):
+                raise ValueError(f"Track '{title}' missing field: {field_name}")
+        m = LIFE_BOARD_STATUS_RE.search(body)
+        if not m or m.group(1) not in LIFE_BOARD_ALLOWED_STATUSES:
+            raise ValueError(f"Track '{title}' has invalid status")
+
+
+def set_life_board_last_updated(board_text: str, target: date) -> str:
+    line = f"*Last updated: [[{target.isoformat()}]]*"
+    if LIFE_BOARD_LAST_UPDATED_RE.search(board_text):
+        return LIFE_BOARD_LAST_UPDATED_RE.sub(line, board_text).rstrip() + "\n"
+    return board_text.rstrip() + "\n\n---\n\n" + line + "\n"
+
+
+def cmd_writeback_life_board(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    board_text = read_text(input_path)
+    validate_life_board_text(board_text)
+    updated = set_life_board_last_updated(board_text, target)
+    validate_life_board_text(updated)
+    write_text(LIFE_BOARD_FILE, updated)
+    print(str(LIFE_BOARD_FILE))
+
+
 def render_diary_from_template(target_date: date) -> str:
     """Create a diary from the daily-log template for *target_date*.
 
@@ -2133,6 +2277,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--date", required=True)
     s.add_argument("--input-file", required=True)
     s.set_defaults(func=cmd_writeback_journal)
+
+    s = sub.add_parser("audit-life-board")
+    s.add_argument("--date", required=True, help="Diary date used to check board audit due/drift state (YYYY-MM-DD).")
+    s.add_argument("--json", action="store_true", help="Emit structured JSON instead of human-readable output.")
+    s.set_defaults(func=cmd_audit_life_board)
+
+    s = sub.add_parser("writeback-life-board")
+    s.add_argument("--date", required=True, help="Approval date to stamp into the board Last updated line (YYYY-MM-DD).")
+    s.add_argument("--input-file", required=True, help="Path to the approved replacement board markdown.")
+    s.set_defaults(func=cmd_writeback_life_board)
 
     s = sub.add_parser("writeback-codex-thread")
     g = s.add_mutually_exclusive_group()
