@@ -188,7 +188,7 @@
 
 # Completion Contract（默认收尾流程）
 
-完成某天的 diary analysis 后，以下四步是**默认收尾动作**，除非 Henry 明确说"只调查 / 不要写回 / dry run"：
+完成某天的 diary analysis 后，以下五步是**默认收尾动作**，除非 Henry 明确说"只调查 / 不要写回 / dry run"：
 
 ## Step 1 — Analysis Writeback
 
@@ -206,16 +206,30 @@ python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <tmp
 - 禁止 heredoc 作为 writeback input；必须先写临时文件再 `--input-file`。
 - 禁止使用 `writeback-thought` 写 Copilot 分析。
 
-## Step 2 — Inbox Audit / Inbox Closure Check
+## Step 2 — Life Board Audit Gate
+
+执行：
+```bash
+python3 scripts/copilot.py audit-life-board --date YYYY-MM-DD
+```
+
+若结果为 `needs_audit`，最终回复必须包含 `Proposed Life Board Patch`，列出建议的 add/change/delete/pause/done、证据日期和 reason。默认只提出 patch，不修改 `life-board.md`；只有 Henry 明确确认后，才把完整替换版 board 写入临时 markdown 文件并执行：
+```bash
+python3 scripts/copilot.py writeback-life-board --date YYYY-MM-DD --input-file <tmp-board-file>
+```
+
+Board patch 属于系统维护报告，不写进 `What Life Copilot Said`，除非当天分析主题本身就是 Life Board 机制。
+
+## Step 3 — Inbox Audit / Inbox Closure Check
 
 1. 读取 `inbox/00-readme.md`，了解 flush 规则和 destination map。
 2. 列出 `inbox/` 里待处理文件；忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`。
 3. 对每个待处理文件做轻量判断：建议去向（`journal/`、`quant/` 或相关 project、`resources/`、`seeds/`、`delete`）、confidence、reason。
 4. 默认只"提出应该挪到哪里"，不要移动或删除，除非 Henry 明确要求 flush/move。
 5. 如果 inbox 为空或无需操作，在回复中简短说明。
-6. 如果 Henry 明确要求 flush/move，执行后再进入 Step 3。
+6. 如果 Henry 明确要求 flush/move，执行后再进入 Step 4。
 
-## Step 3 — Daily Suggestion Writeback
+## Step 4 — Daily Suggestion Writeback
 
 基于当天分析和 post-inbox-closure 状态，产出一个短小、可执行、目标日当天可启动的建议。将建议写入**另一个**临时 markdown 文件，然后执行：
 ```bash
@@ -233,15 +247,15 @@ python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD -
 - 传递给 `writeback-daily-suggestion` 的 input file 应已经是目标日语态。脚本只写 provenance 和正文，不改代词。
 
 **Daily Suggestion 与 inbox 联动：**
-- 如果文件在 Step 2 的 inbox audit/flush 中已移走，建议应将其视为已完成上下文，不列为待办。
+- 如果文件在 Step 3 的 inbox audit/flush 中已移走，建议应将其视为已完成上下文，不列为待办。
 - 如果 `inbox/` 为空，建议不应提及 inbox flush。
 - 仅当相关文件在 inbox audit 后仍存在于 `inbox/` 且操作确实需要等到目标日时，才将 inbox 操作写入建议。
 
-## Step 4 — Final Response
+## Step 5 — Final Response
 
 ## 收尾顺序
 
-分析 → 写回分析 → inbox audit / closure check → 写回次日建议 → 最终回复。Inbox audit 在 Daily Suggestion 之前完成，确保建议基于 inbox closure 后的状态。四个步骤都是默认动作，不需要 Henry 每次提醒。
+分析 → 写回分析 → Life Board audit gate → inbox audit / closure check → 写回次日建议 → 最终回复。Life Board audit gate 负责自动判断是否 due/drift，并在触发时要求最终回复包含 patch 草案，但不自动修改 `life-board.md`。Inbox audit 在 Daily Suggestion 之前完成，确保建议基于 inbox closure 后的状态。五个步骤都是默认动作，不需要 Henry 每次提醒。
 
 # Safety Protocol
 
