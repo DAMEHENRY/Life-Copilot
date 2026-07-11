@@ -62,6 +62,12 @@ XP_OPEN_RE = re.compile(r"^- \[ \] \*\*(XP-[^*]+)\*\*: (.+)$")
 XP_DONE_RE = re.compile(r"^- \[x\] \*\*(XP-[^*]+)\*\*: (.+)$", re.IGNORECASE)
 XP_TAG_RE = re.compile(r"#(course|lab)\b", re.IGNORECASE)
 MEMORY_CITATION_RE = re.compile(r"\n?<oai-mem-citation>.*?</oai-mem-citation>\s*", re.DOTALL)
+CODEX_CONTEXT_RE = re.compile(r"<context>\s*(.*?)</context>\s*", re.DOTALL)
+FILE_CONTEXT_PATH_RE = re.compile(r'<file_context\b[^>]*\bpath="([^"]+)"[^>]*>', re.IGNORECASE)
+ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])"
+)
+UNSAFE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +514,30 @@ def content_parts_to_text(parts: object) -> str:
     return "\n".join(t for t in texts if t).strip()
 
 
+def sanitize_codex_transcript_text(text: str) -> str:
+    """Remove terminal and binary control bytes that are unsafe in Markdown."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = ANSI_ESCAPE_RE.sub("", text)
+    return UNSAFE_CONTROL_RE.sub("", text)
+
+
+def summarize_codex_contexts(text: str) -> str:
+    """Replace injected file contents with readable attachment-path markers."""
+    seen_paths: set[str] = set()
+
+    def replace_context(match: re.Match[str]) -> str:
+        markers: List[str] = []
+        for path in FILE_CONTEXT_PATH_RE.findall(match.group(1)):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            safe_path = path.replace("`", "\\`")
+            markers.append(f"> Attached file: `{safe_path}` (content omitted from archive).")
+        return "\n".join(markers) + ("\n\n" if markers else "")
+
+    return CODEX_CONTEXT_RE.sub(replace_context, text)
+
+
 def clean_codex_user_text(text: str) -> str:
     # Codex Desktop stores the AGENTS/env bootstrap inside the first user message.
     # For diary transcripts, keep the actual user request and drop the bootstrap.
@@ -516,13 +546,14 @@ def clean_codex_user_text(text: str) -> str:
         text = text.split(marker, 1)[1].strip()
     if text.startswith("<turn_aborted>"):
         return ""
-    return text.strip()
+    text = summarize_codex_contexts(text)
+    return sanitize_codex_transcript_text(text).strip()
 
 
 def clean_codex_assistant_text(text: str, keep_memory_citation: bool = False) -> str:
     if not keep_memory_citation:
         text = MEMORY_CITATION_RE.sub("", text)
-    return text.strip()
+    return sanitize_codex_transcript_text(text).strip()
 
 
 def latest_codex_thread_id() -> str:
@@ -573,6 +604,25 @@ def codex_thread_label(session_file: Path) -> str:
     return m.group(1) if m else session_file.stem
 
 
+def codex_session_is_primary_thread(session_file: Path) -> bool:
+    """Return False for internal subagent/reviewer sessions in day archives."""
+    for raw in read_text(session_file).splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return True
+        thread_source = payload.get("thread_source")
+        return not isinstance(thread_source, str) or thread_source == "user"
+    return True
+
+
 def codex_session_files_for_date_range(d: date) -> List[Path]:
     """Gather candidate Codex JSONL files from d-1, d, and d+1 directories.
 
@@ -599,6 +649,8 @@ def export_codex_day_transcript(
 ) -> str:
     blocks: List[str] = []
     for session_file in codex_session_files_for_date_range(d):
+        if not codex_session_is_primary_thread(session_file):
+            continue
         transcript = export_codex_transcript(
             session_file,
             assistant_name=assistant_name,
