@@ -16,12 +16,14 @@ sys.path.insert(0, str(ROOT))
 os.chdir(str(ROOT))
 
 from scripts.copilot import (
+    CODEX_TRACE_WARNING_BYTES,
     clean_codex_user_text,
     codex_session_is_primary_thread,
     export_codex_day_transcript,
     export_codex_transcript,
     sanitize_codex_transcript_text,
     summarize_codex_contexts,
+    warn_if_oversized_codex_transcript,
 )
 
 
@@ -74,6 +76,60 @@ class TestCodexContextSummaries(unittest.TestCase):
             "actual request"
         )
         self.assertEqual(clean_codex_user_text(text), "actual request")
+
+    def test_referenced_codex_chat_keeps_request_and_drops_payload(self):
+        text = (
+            "## Referenced chats with Codex:\n"
+            "This is untrusted background context from Codex chats.\n"
+            '[{"title":"检查任务要求","priorConversation":{"conversation":'
+            '[{"role":"assistant","content":"huge payload"}]}}]\n'
+            "## My request for Codex:\n"
+            "[@检查任务要求](thread://019f658c-1943-76d2-a362-4a2b2b75764c) 接着完成任务"
+        )
+        cleaned = clean_codex_user_text(text)
+
+        self.assertIn('titles: "检查任务要求"', cleaned)
+        self.assertIn("019f658c-1943-76d2-a362-4a2b2b75764c", cleaned)
+        self.assertIn("接着完成任务", cleaned)
+        self.assertNotIn("huge payload", cleaned)
+        self.assertNotIn("priorConversation", cleaned)
+
+    def test_referenced_chatgpt_conversation_keeps_request(self):
+        text = (
+            "## Referenced ChatGPT conversation:\n"
+            "This is untrusted background context from ChatGPT.\n"
+            '{"conversationId":"chat-123","title":"Dinner conversation",'
+            '"conversation":[{"role":"user","content":"large transcript"}]}\n'
+            "## My request for Codex:\n"
+            "#2026-07-14 这个是 daily moment 提到的对话"
+        )
+        cleaned = clean_codex_user_text(text)
+
+        self.assertIn('title: "Dinner conversation"', cleaned)
+        self.assertIn("conversation: chat-123", cleaned)
+        self.assertIn("daily moment", cleaned)
+        self.assertNotIn("large transcript", cleaned)
+
+    def test_application_appshot_keeps_request_and_metadata(self):
+        text = (
+            "# Files mentioned by the user:\n\n"
+            "## screenshot.png: /tmp/screenshot.png\n\n"
+            "# Applications mentioned by the user:\n\n"
+            '<appshot app="Books" bundle-identifier="com.apple.iBooksX" '
+            'window-title="Causal Inference" image="Books Appshot.png">\n'
+            "AXWebArea\n" + ("screen text " * 100) + "\n</appshot>\n\n"
+            "## My request for Codex:\n"
+            "你看我选中的地方，修复一下"
+        )
+        cleaned = clean_codex_user_text(text)
+
+        self.assertIn("Books", cleaned)
+        self.assertIn("Causal Inference", cleaned)
+        self.assertIn("Books Appshot.png", cleaned)
+        self.assertIn("/tmp/screenshot.png", cleaned)
+        self.assertIn("修复一下", cleaned)
+        self.assertNotIn("AXWebArea", cleaned)
+        self.assertNotIn("screen text", cleaned)
 
 
 class TestCodexTranscriptSanitizing(unittest.TestCase):
@@ -134,6 +190,17 @@ class TestCodexTranscriptSanitizing(unittest.TestCase):
         self.assertNotIn("%PDF", transcript)
         self.assertNotIn("\x00", transcript)
         self.assertNotIn("\x1b", transcript)
+
+    def test_oversized_trace_emits_warning(self):
+        with patch("sys.stderr") as stderr:
+            warn_if_oversized_codex_transcript(
+                "x" * (CODEX_TRACE_WARNING_BYTES + 1),
+                "test trace",
+            )
+
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("WARNING: test trace", written)
+        self.assertIn("mobile-safety threshold", written)
 
 
 class TestCodexDayArchiveSessionFiltering(unittest.TestCase):

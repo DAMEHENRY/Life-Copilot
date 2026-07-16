@@ -68,6 +68,14 @@ ANSI_ESCAPE_RE = re.compile(
     r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])"
 )
 UNSAFE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+CODEX_REQUEST_MARKER = "## My request for Codex:"
+CODEX_REFERENCED_CHATS_HEADER = "## Referenced chats with Codex:"
+CHATGPT_REFERENCED_CONVERSATION_HEADER = "## Referenced ChatGPT conversation:"
+CODEX_APPLICATIONS_HEADER = "# Applications mentioned by the user:"
+THREAD_URI_RE = re.compile(r"thread://([0-9a-f-]+)", re.IGNORECASE)
+APPSHOT_RE = re.compile(r"<appshot\b([^>]*)>.*?</appshot>", re.DOTALL | re.IGNORECASE)
+APPSHOT_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+CODEX_TRACE_WARNING_BYTES = 256 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +546,104 @@ def summarize_codex_contexts(text: str) -> str:
     return CODEX_CONTEXT_RE.sub(replace_context, text)
 
 
+def _split_codex_injected_request(text: str, header: str) -> Optional[Tuple[str, str]]:
+    """Split a Codex-injected context block from the user's actual request."""
+    if not text.startswith(header) or CODEX_REQUEST_MARKER not in text:
+        return None
+    payload, request = text[len(header):].split(CODEX_REQUEST_MARKER, 1)
+    return payload.strip(), request.strip()
+
+
+def _json_payload_after_context_notice(payload: str) -> object:
+    """Decode the JSON payload after Codex's untrusted-context notice."""
+    json_start_candidates = [i for i in (payload.find("["), payload.find("{")) if i >= 0]
+    if not json_start_candidates:
+        raise ValueError("No JSON payload found")
+    return json.loads(payload[min(json_start_candidates):])
+
+
+def summarize_codex_injected_contexts(text: str) -> str:
+    """Collapse referenced chats and app screenshots into mobile-safe markers."""
+    split = _split_codex_injected_request(text, CODEX_REFERENCED_CHATS_HEADER)
+    if split is not None:
+        payload, request = split
+        titles: List[str] = []
+        try:
+            decoded = _json_payload_after_context_notice(payload)
+            if isinstance(decoded, list):
+                titles = [
+                    item["title"]
+                    for item in decoded
+                    if isinstance(item, dict) and isinstance(item.get("title"), str)
+                ]
+        except (json.JSONDecodeError, ValueError):
+            pass
+        thread_ids = list(dict.fromkeys(THREAD_URI_RE.findall(request)))
+        detail_parts: List[str] = []
+        if titles:
+            detail_parts.append("titles: " + ", ".join(f'"{title}"' for title in titles))
+        if thread_ids:
+            detail_parts.append("threads: " + ", ".join(thread_ids))
+        details = f" ({'; '.join(detail_parts)})" if detail_parts else ""
+        marker = f"> Referenced Codex chat{details}; conversation content omitted from archive."
+        return f"{marker}\n\n{request}".strip()
+
+    split = _split_codex_injected_request(text, CHATGPT_REFERENCED_CONVERSATION_HEADER)
+    if split is not None:
+        payload, request = split
+        title = ""
+        conversation_id = ""
+        try:
+            decoded = _json_payload_after_context_notice(payload)
+            if isinstance(decoded, dict):
+                if isinstance(decoded.get("title"), str):
+                    title = decoded["title"]
+                if isinstance(decoded.get("conversationId"), str):
+                    conversation_id = decoded["conversationId"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+        detail_parts = []
+        if title:
+            detail_parts.append(f'title: "{title}"')
+        if conversation_id:
+            detail_parts.append(f"conversation: {conversation_id}")
+        details = f" ({'; '.join(detail_parts)})" if detail_parts else ""
+        marker = f"> Referenced ChatGPT conversation{details}; content omitted from archive."
+        return f"{marker}\n\n{request}".strip()
+
+    application_index = text.find(CODEX_APPLICATIONS_HEADER)
+    request_index = text.find(CODEX_REQUEST_MARKER, application_index)
+    if application_index >= 0 and request_index >= 0:
+        prefix = text[:application_index].strip()
+        payload = text[
+            application_index + len(CODEX_APPLICATIONS_HEADER):request_index
+        ].strip()
+        request = text[request_index + len(CODEX_REQUEST_MARKER):].strip()
+        markers: List[str] = []
+        seen: set[Tuple[str, str, str]] = set()
+        for match in APPSHOT_RE.finditer(payload):
+            attrs = dict(APPSHOT_ATTR_RE.findall(match.group(1)))
+            key = (
+                attrs.get("app", ""),
+                attrs.get("window-title", ""),
+                attrs.get("image", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            details = [value for value in key if value]
+            suffix = f": {' — '.join(details)}" if details else ""
+            markers.append(
+                f"> Application screenshot{suffix} (accessibility tree omitted from archive)."
+            )
+        if not markers:
+            markers.append("> Application screenshot context omitted from archive.")
+        parts = [part for part in (prefix, "\n".join(markers), request) if part]
+        return "\n\n".join(parts).strip()
+
+    return text
+
+
 def clean_codex_user_text(text: str) -> str:
     # Codex Desktop stores the AGENTS/env bootstrap inside the first user message.
     # For diary transcripts, keep the actual user request and drop the bootstrap.
@@ -546,6 +652,7 @@ def clean_codex_user_text(text: str) -> str:
         text = text.split(marker, 1)[1].strip()
     if text.startswith("<turn_aborted>"):
         return ""
+    text = summarize_codex_injected_contexts(text)
     text = summarize_codex_contexts(text)
     return sanitize_codex_transcript_text(text).strip()
 
@@ -554,6 +661,18 @@ def clean_codex_assistant_text(text: str, keep_memory_citation: bool = False) ->
     if not keep_memory_citation:
         text = MEMORY_CITATION_RE.sub("", text)
     return sanitize_codex_transcript_text(text).strip()
+
+
+def warn_if_oversized_codex_transcript(text: str, label: str) -> None:
+    """Emit a visible warning when a generated trace may be heavy on mobile."""
+    size = len(text.encode("utf-8"))
+    if size <= CODEX_TRACE_WARNING_BYTES:
+        return
+    print(
+        f"WARNING: {label} is {size} bytes, above the "
+        f"{CODEX_TRACE_WARNING_BYTES}-byte mobile-safety threshold.",
+        file=sys.stderr,
+    )
 
 
 def latest_codex_thread_id() -> str:
@@ -1901,6 +2020,10 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     jp = journal_path_for_date(target)
 
     codex_transcript = export_codex_day_transcript(target).strip()
+    if codex_transcript:
+        warn_if_oversized_codex_transcript(
+            codex_transcript, f"Codex trace for {target.isoformat()}"
+        )
     codex_msg_count = codex_transcript.count("\n[") + (1 if codex_transcript.startswith("[") else 0) if codex_transcript else 0
     codex_session_count = codex_transcript.count("### Codex Thread ") if codex_transcript else 0
 
@@ -1950,6 +2073,10 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Journal not found: {jp}")
 
     codex_transcript = export_codex_day_transcript(target).strip()
+    if codex_transcript:
+        warn_if_oversized_codex_transcript(
+            codex_transcript, f"Codex trace for {target.isoformat()}"
+        )
     renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
 
     if not codex_transcript and not renderer_transcript:
@@ -2125,6 +2252,9 @@ def cmd_export_codex_day(args: argparse.Namespace) -> None:
     )
     if not transcript.strip():
         raise ValueError(f"No Codex transcript messages found for date: {target.isoformat()}")
+    warn_if_oversized_codex_transcript(
+        transcript, f"Codex trace for {target.isoformat()}"
+    )
 
     if args.output_file:
         out_path = Path(args.output_file).expanduser()
