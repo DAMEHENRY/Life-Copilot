@@ -126,14 +126,22 @@ Seeds without all three stay in `seeds/`. They are not ignored — they are incu
 
 v4.2 routing: hard mode triggers (`#quant`, `#YYYY-MM-DD`, else Chat).
 
-v4.3 routing: soft routing based on context.
+v4.3 routing: soft context selection with an explicit gate for side-effectful workflows.
 
 1. Read `life-board.md` — what tracks are active?
 2. Read `journal/memory.md` — what hypotheses are hot?
 3. Read today's diary (if exists) — what is already in motion?
-4. Route based on the intersection, not the keyword.
+4. Use the intersection to select relevant context, not to infer permission for persistent analysis.
 
-The old mode prompts (`prompts/diary-mode.md`, `prompts/quant-mode.md`, `prompts/chat-mode.md`) are still read when the conversation clearly belongs to one mode. But the trigger is contextual, not keyword-based.
+The old mode prompts (`prompts/diary-mode.md`, `prompts/quant-mode.md`, `prompts/chat-mode.md`) are still read when the conversation clearly belongs to one mode. Context determines what is relevant, but it does not authorize side effects.
+
+Three operations are intentionally separate:
+
+1. **Chat** — respond naturally in the conversation. Mentioning today's experience, a major decision, or strong emotion remains Chat by default.
+2. **Capture** — persist a user-provided experience into `Thoughts & Reflections` with explicit Life Copilot transcription provenance. Capture does not change the mode.
+3. **Diary Analysis** — run the evidence-heavy analysis and Completion Contract. This requires an explicit `#YYYY-MM-DD`, a request to analyze/retrospect on a diary, or an already-established Diary Mode session receiving a correction.
+
+This asymmetry is deliberate: choosing context can be soft, while granting writeback authority must be explicit. A Chat response may become deeper when the situation warrants it, but `What Life Copilot Said`, Life Board audit, inbox audit, and Daily Suggestion remain unavailable until the Diary Analysis gate is crossed.
 
 ### Layer 5: Active Board
 
@@ -224,7 +232,7 @@ The old system is not broken. It is just not the default path anymore.
 v4.3 is working when:
 
 1. Henry can look at `life-board.md` and know what each track is doing in 30 seconds.
-2. Diary analysis routes based on context, not keywords.
+2. Context selection is flexible, while Diary Analysis starts only from explicit user intent and never from Capture alone.
 3. Schedule projection works without Quant Feedback.
 4. New projects enter through Seeds, not through XP task creation.
 5. The system feels lighter, not heavier.

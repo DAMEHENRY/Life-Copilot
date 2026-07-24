@@ -86,6 +86,15 @@ class TestWritebackThoughtWithoutDailyLog:
         assert "测试标题" in result
         assert "测试内容" in result
         assert "💭 Thoughts & Reflections" in result
+        assert "> [!info] 对话转写" in result
+        assert "不是 Henry 手写原文" in result
+        expected_block = (
+            "'测试标题'\n\n"
+            "> [!info] 对话转写\n"
+            "> 这段内容来自 Henry 与 Life Copilot 的直接对话，由 Life Copilot 整理转写；不是 Henry 手写原文。\n\n"
+            "测试内容"
+        )
+        assert expected_block in result
 
     def test_no_daily_log_section_required(self):
         """Should not raise even when Daily Log is absent."""
@@ -105,6 +114,29 @@ class TestWritebackThoughtWithoutDailyLog:
             assert False, "Should have raised ValueError"
         except ValueError as e:
             assert "Copilot analysis" in str(e)
+
+    def test_each_appended_thought_has_its_own_transcription_callout(self):
+        journal = _journal_with_sections("💭 Thoughts & Reflections")
+        first = append_thought_to_journal(journal, "第一段", "第一段内容")
+        second = append_thought_to_journal(first, "第二段", "第二段内容")
+        assert second.count("> [!info] 对话转写") == 2
+        assert second.count("不是 Henry 手写原文") == 2
+
+    def test_preserves_existing_handwritten_text(self):
+        journal = textwrap.dedent("""\
+            #diary
+            # 📅 2026-06-06
+            ## 💭 Thoughts & Reflections
+
+            这是 Henry 已经手写的内容。
+
+            ## What Life Copilot Said
+        """)
+        result = append_thought_to_journal(journal, "对话补记", "这是对话转写内容。")
+        assert "这是 Henry 已经手写的内容。" in result
+        assert result.count("> [!info] 对话转写") == 1
+        assert result.index("这是 Henry 已经手写的内容。") < result.index("'对话补记'")
+        assert result.index("'对话补记'") < result.index("## What Life Copilot Said")
 
 
 # ---------------------------------------------------------------------------

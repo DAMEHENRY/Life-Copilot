@@ -1598,6 +1598,12 @@ def looks_like_copilot_analysis(content: str) -> bool:
     return heuristic_score >= 3
 
 
+THOUGHT_TRANSCRIPTION_CALLOUT = "\n".join([
+    "> [!info] 对话转写",
+    "> 这段内容来自 Henry 与 Life Copilot 的直接对话，由 Life Copilot 整理转写；不是 Henry 手写原文。",
+])
+
+
 def append_thought_to_journal(journal_text: str, title: str, content: str) -> str:
     # Guardrail: this command is for writing user-side diary thoughts,
     # not for writing Copilot analysis into the journal body.
@@ -1616,7 +1622,7 @@ def append_thought_to_journal(journal_text: str, title: str, content: str) -> st
                 break
         return start, end or len(lines)
 
-    thought_block = f"\n'{title}'\n\n{content.strip()}\n"
+    thought_block = f"\n'{title}'\n\n{THOUGHT_TRANSCRIPTION_CALLOUT}\n\n{content.strip()}\n"
 
     tr_start, tr_end = section_bounds("Thoughts & Reflections")
     if tr_start is None:

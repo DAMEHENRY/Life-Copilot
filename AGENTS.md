@@ -28,7 +28,7 @@
 
 ## 模式路由
 
-> **v4.3 routing philosophy**: mode triggers are **soft suggestions**, not hard gates. The system reads `life-board.md` + `journal/memory.md` + today's diary to decide what matters. When a conversation blends tracks, route by context, not keyword. See [[life-copilot-v4.3-rfc]] §4.
+> **v4.3 routing philosophy**: context and track selection remain soft, but side-effectful Diary Mode has an explicit intent gate. The system reads `life-board.md` + `journal/memory.md` + today's diary to understand what matters; that context does not by itself authorize analysis writeback. See [[life-copilot-v4.3-rfc]] §4.
 
 ### Index-Guided Routing (v4.3)
 
@@ -36,11 +36,17 @@ Before routing to a specific mode, assess context:
 1. Read `life-board.md` — what tracks are active?
 2. Read `journal/memory.md` — what hypotheses are hot?
 3. Read today's diary (if exists) — what is already in motion?
-4. Route based on the intersection, not the keyword.
+4. Use the intersection to select relevant context, not to infer permission for a mode with writeback side effects.
+5. A conversation may stay in Chat Mode while independently capturing a user experience into `Thoughts & Reflections`.
 
 ### Diary Mode
 
-触发（软触发）：`#YYYY-MM-DD`，或对话明显围绕某天的日记 / 情绪复盘
+进入条件（明确意图 gate）：
+- 用户输入 `#YYYY-MM-DD`。
+- 用户明确要求“分析 / 复盘某天的日记”“进入 Diary Mode”或同等含义的完整日记分析。
+- 当前对话已经明确进入 Diary Mode，用户继续补充该次分析遗漏的事实。
+
+以下情况**不足以**进入 Diary Mode：用户只是说“今天发生了……”，分享当天经历，谈到重大决定，或表达强烈情绪。这些内容默认留在 Chat Mode；可以按 Capture 规则写入 `Thoughts & Reflections`，但 Capture 不改变模式，也不授权 `writeback-journal`、Life Board audit、inbox audit 或 `writeback-daily-suggestion`。若完整日记分析可能有价值，可以询问，但不得自行升级。
 
 0. 若目标日期日记文件已存在，先执行：
 ```bash
@@ -64,50 +70,16 @@ python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 11. 回复结尾默认做一次简短 memory audit：`无需写入` / `值得记录为验证` / `值得记录为新模式`
 12. 按 diary-mode.md 的规则回复
 
-**Diary Mode Completion Contract（默认收尾）**
-
-除非 Henry 明确说“只调查 / 不要写回 / dry run”，完成某天 diary analysis 后必须继续做五个收尾动作：
-
-1. **Analysis writeback**：把当天分析正文写入临时 markdown 文件，然后执行：
-```bash
-python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临时文件路径>
-```
-写入内容只包含对当天日记的分析、镜子、建议和 memory audit；不要包含工具日志、执行报告或 inbox audit；不要伪装成 Henry 的日记正文。
-
-2. **Life Board audit gate**：执行：
-```bash
-python3 scripts/copilot.py audit-life-board --date YYYY-MM-DD
-```
-若输出显示 `needs_audit`（例如超过 7 天未更新，或当天日记显式提到 Life Board / board 机制 / board 审计），最终回复必须包含 `Proposed Life Board Patch`，列出建议的 add/change/delete/pause/done、证据日期和 reason。未经 Henry 明确确认，不要修改 `life-board.md`。若 Henry 确认 patch，再把完整替换版 board 写入临时 markdown 文件并执行：
-```bash
-python3 scripts/copilot.py writeback-life-board --date YYYY-MM-DD --input-file <tmp-board-file>
-```
-
-3. **Inbox audit / inbox closure check**：读取 `inbox/00-readme.md`，列出 `inbox/` 中待处理文件（忽略 `.DS_Store`、`00-readme.md`、`flush-log.md`），对每个文件给出建议去向、confidence 和 reason。默认只提出建议，不移动或删除文件，除非 Henry 明确要求 flush/move。如果 inbox 为空或无需操作，在回复中简短说明。如果 inbox 有待处理文件且 Henry 明确要求 flush/move，执行后再进入下一步。
-
-4. **Daily Suggestion writeback**：基于 post-inbox-closure 状态产出次日建议，写入另一个临时 markdown 文件，然后执行：
-```bash
-python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <临时文件路径>
-```
-输入文件只写建议正文，不要手写 `Generated from ...` provenance；脚本会自动添加。若目标日记已有不同 provenance 或无 provenance 内容，不要自动 `--force`，先报告冲突。
-
-5. **Final response**。
-
-需要写回日记时，先写临时文件再执行：
-```bash
-python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <临时文件路径>
-```
-
 **Diary 写回语义（强制区分）**
 - 如果写回内容是 **对该篇日记的分析 / 镜子 / Copilot 建议**，一律使用 `writeback-journal`，写入 `## What Life Copilot Said`。
-- 如果写回内容是 **想作为“我自己的日记正文补充”保存的对话片段/想法/后续澄清**，才使用 `writeback-thought`，它会写进 `## 💭 Thoughts & Reflections`。
+- 如果写回内容是 **用户在直接对话中提供的经历、想法或后续澄清**，使用 `writeback-thought` 写入 `## 💭 Thoughts & Reflections`；每个条目必须带“对话转写”来源标记，说明它由 Life Copilot 整理、不是 Henry 手写原文。
 - 如果写回内容是 **基于前一天日记分析生成的次日执行建议**，使用 `writeback-daily-suggestion`，写入目标日日记的 `## 🧭 Daily Suggestion`。建议正文使用目标日语态（`今天` / `today`），应基于 inbox closure 后的状态。`What Life Copilot Said` 只保存对当前日记的分析、镜子和 memory audit，不再承载次日建议。
 - 如果内容是 **当天 Telegram 上与 Kai 的原始对话**，手动粘贴到 `## 💬 From Kai`；如果内容是 **当天 Codex 或 Life Claude Renderer conversations**，使用 `writeback-ai-day` 自动归档 trace 文件并在 `## 💬 From Kai` 追加 wikilink 索引。
 - **禁止** 用 `writeback-thought` 去写 Copilot 分析；**禁止** 用 `writeback-journal` 去伪装用户口吻续写正文。
 
-### Diary Mode Completion Contract（v4.3）
+### Diary Mode Completion Contract（v4.3，唯一规范）
 
-完成某天的 diary analysis 后，以下五步是**默认收尾动作**，除非 Henry 明确说"只调查 / 不要写回 / dry run"：
+仅在通过上述明确意图 gate、实际完成某天 diary analysis 后，以下五步才是**默认收尾动作**。普通 Chat 或 Capture 永远不触发本 Contract。除非 Henry 明确说"只调查 / 不要写回 / dry run"：
 
 **Step 1 — Analysis Writeback（默认执行）**
 1. 将分析正文（镜子、memory audit、历史锚点、微行动）写入临时 markdown 文件。
@@ -183,27 +155,27 @@ python3 scripts/copilot.py update-schedule --target-date YYYY-MM-DD
 
 ### Chat Mode
 
-触发：不属于 Diary / Quant / Study 的普通对话
+触发：不属于 Diary / Quant / Study 的普通对话。用户谈到“今天”或分享当天经历时仍默认属于 Chat Mode；自动 Capture 到日记不改变模式。
 
 1. 读 `prompts/chat-mode.md`
-2. 读 `journal/memory.md`（热记忆：Active Hypotheses + Canonical）
-3. 若需要历史证据，用 Grep 搜索 `journal/memory-archive.md` 或 `journal/` 目录
-4. 按 chat-mode.md 的规则回复
+2. 默认先基于当前对话自然回应，不为了显得深刻而强制调用历史。
+3. 只有需要作出历史模式、长期变化或“以前也这样”的判断时，才读 `journal/memory.md`，必要时继续搜索 `journal/memory-archive.md` 或 `journal/`。
+4. 按 chat-mode.md 的规则回复；纯聊天不强制给行动建议、标题或 wikilink。
 
 ## 通用护栏
 
 - **语言**：日记/聊天全部简体中文，Quant / Study 用英文
 - **Obsidian 兼容**：`[[YYYY-MM-DD]]` wikilink、Obsidian Callout（`> [!info]`）、无 HTML
-- **Wikilink 主动链接**：输出中应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap、life-board 等），目标是构建丰富的 Obsidian Graph View。不要凭空创造链接，只链接确实存在的文件。
+- **Wikilink 主动链接**：Diary / Quant / Study 输出以及包含历史判断的 Chat 输出，应主动使用 `[[文档名]]` 链接到已存在的文档（日记、XP 文件、roadmap、life-board 等）。纯聊天不为了形式强制添加链接。不要凭空创造链接，只链接确实存在的文件。
 - **Quant 问题链接协议**：Quant Q&A 中出现可复用学习问题时，必须先搜索 `quant/arsenal/` 和 `quant/roadmap.md` 已有文件，再决定是直接链接、扩展已有文件、还是新建笔记。遵循最小必要干预原则，优先用 `[[target#heading|question]]` 别名链接，避免笔记膨胀。用 `python3 scripts/copilot.py quant-question-link --question "..."` 检索候选链接。**注意：`quant-question-link` 只是候选检索，不是最终判断。** Claude/Claudian/Codex 必须打开候选文件读相关段落验证；如果候选不够好，要主动用 `rg` 换同义词、机制词、XP 上下文关键词继续搜。禁止因为候选排名低或列表为空就直接新建文件——排名低意味着需要更多搜索，不是需要更多笔记。
 - **Wikilink 解析（深度 1）**：读取任何文档时，若文档内包含 `[[...]]` wikilink，需额外读取这些被链接的文档（仅一层，不递归——即被链接文档中的 wikilink 不再跟进）。
 - **记忆存储**：热记忆在 `journal/memory.md`，冷归档在 `journal/memory-archive.md`，不使用系统级记忆工具
 - **洞察日志角色**：`journal/insights.jsonl` 是历史检索的索引层，不是最终面向用户的主要引用层；面向用户优先落到 `[[YYYY-MM-DD]]`
-- **证据标准**：结论必须有本地证据支撑，引用 `[[YYYY-MM-DD]]`；证据不足时明确说明
+- **证据标准**：关于历史模式、长期变化或既往事实的结论必须有本地证据支撑，引用 `[[YYYY-MM-DD]]`；普通 Chat 可以只基于当前轮用户提供的事实回应。证据不足时明确说明。
 - **联网搜索边界**：联网搜索只用于实效性外部事实校验，是辅助证据；不得用外部搜索替代日记、记忆、insights 或 `[[YYYY-MM-DD]]` 历史锚点
 - **安全协议**：涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析
-- **输出要求**：必须包含可执行下一步，不写空泛安慰
-- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）；用户正文补充写入 `Thoughts & Reflections`，Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex/Life Claude Renderer conversations 用 `writeback-ai-day` 自动归档 trace 文件并在 `💬 From Kai` 追加 wikilink 索引，Copilot 夜间分析写入 `What Life Copilot Said`，次日执行建议（目标日语态）写入 `Daily Suggestion`
+- **输出要求**：Diary 分析与任务型回应必须包含可执行下一步，不写空泛安慰；纯 Chat 不强制给行动，允许只是承接、回应或继续聊。
+- **写回护栏**：禁止使用 heredoc（`--input-file - <<EOF`）。Chat 中用户提供的当天经历默认通过 `writeback-thought` 自动 Capture 到 `Thoughts & Reflections`，每条自动添加“对话转写”来源标记；用户说“别记录 / 别写进日记”时跳过，用户说“只记录别分析”时只执行 Capture 并简短回应。Capture 不等于 Diary Mode，禁止由此触发 `writeback-journal`、Life Board audit、inbox audit 或 `writeback-daily-suggestion`。Telegram/Kai 原始对话手动粘贴到 `💬 From Kai`，Codex/Life Claude Renderer conversations 用 `writeback-ai-day` 自动归档 trace 文件并在 `💬 From Kai` 追加 wikilink 索引；正式日记分析写入 `What Life Copilot Said`，次日执行建议（目标日语态）写入 `Daily Suggestion`。
 - **命名规则**：新建文件夹和普通文档一律使用 lowercase kebab-case；不要使用 `01-xxx` 这类排序前缀。例外：`AGENTS.md`、`CLAUDE.md` 保持大写；`00-index.md`、`00-readme.md` 这类目录入口文件可保留 `00-` 前缀。
 
 ## Active Board（v4.3）
@@ -291,8 +263,14 @@ python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "<标题>
 ```
 
 适用范围：
-- 仅用于“把对话沉淀成用户自己的日记补充”
+- 用于把直接对话中用户提供的经历、想法或澄清沉淀成日记补充；这是 Capture 动作，不切换模式
 - 写入 `## 💭 Thoughts & Reflections`，不要求 `Daily Log` 存在
+- `writeback-thought` 会在每个新条目标题下自动加入：
+  ```markdown
+  > [!info] 对话转写
+  > 这段内容来自 Henry 与 Life Copilot 的直接对话，由 Life Copilot 整理转写；不是 Henry 手写原文。
+  ```
+- 用户说“别记录 / 别写进日记”时跳过；用户说“只记录别分析”时只执行本流程并简短回应
 - 不用于粘贴 AI 原始对话；Telegram/Kai 原始对话直接放入 `## 💬 From Kai`，Codex/Life Claude Renderer conversations 使用 `writeback-ai-day`
 - 不用于 `## What Life Copilot Said` 分析写回
 
