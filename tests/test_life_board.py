@@ -1,31 +1,33 @@
-"""Focused tests for Life Board audit/writeback helpers.
-
-Uses temporary directories — no real board or diary files are modified.
-"""
+"""Focused unittest coverage for Life Board audit/writeback helpers."""
 
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
+import unittest
 from datetime import date
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-# Add project root to path so we can import copilot
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.chdir(str(ROOT))
 
+from scripts import copilot as copilot_module
 from scripts.copilot import (
     audit_life_board,
     cmd_writeback_life_board,
     parse_life_board_last_updated,
     validate_life_board_text,
 )
-from scripts import copilot as copilot_module
 
 
-def _board_text(last_updated: str = "2026-06-04", status_line: str | None = "- **Status**: `active`") -> str:
+def _board_text(
+    last_updated: str = "2026-06-04",
+    status_line: str | None = "- **Status**: `active`",
+) -> str:
     lines = [
         "# Life Board",
         "",
@@ -57,101 +59,103 @@ def _board_text(last_updated: str = "2026-06-04", status_line: str | None = "- *
     return "\n".join(lines)
 
 
-def _patch_vault(monkeypatch, tmp_path: Path, board_text: str):
-    board_path = tmp_path / "life-board.md"
-    journal_dir = tmp_path / "journal"
-    board_path.write_text(board_text, encoding="utf-8")
-    monkeypatch.setattr(copilot_module, "LIFE_BOARD_FILE", board_path)
-    monkeypatch.setattr(copilot_module, "JOURNAL_DIR", journal_dir)
-    return board_path, journal_dir
+class TestLifeBoard(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.board_path = self.root / "life-board.md"
+        self.journal_dir = self.root / "journal"
+        self.patchers = [
+            patch.object(copilot_module, "LIFE_BOARD_FILE", self.board_path),
+            patch.object(copilot_module, "JOURNAL_DIR", self.journal_dir),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
 
+    def tearDown(self) -> None:
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temp.cleanup()
 
-def _write_journal(journal_dir: Path, target: date, content: str) -> Path:
-    jp = journal_dir / target.strftime("%Y") / target.strftime("%m") / f"{target.isoformat()}.md"
-    jp.parent.mkdir(parents=True)
-    jp.write_text(content, encoding="utf-8")
-    return jp
+    def set_board(self, text: str) -> None:
+        self.board_path.write_text(text, encoding="utf-8")
 
+    def write_journal(self, target: date, content: str) -> Path:
+        path = (
+            self.journal_dir
+            / target.strftime("%Y")
+            / target.strftime("%m")
+            / f"{target.isoformat()}.md"
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(content, encoding="utf-8")
+        return path
 
-def test_parse_last_updated_wikilink_date():
-    assert parse_life_board_last_updated(_board_text("2026-06-04")) == date(2026, 6, 4)
+    def test_parse_last_updated_wikilink_date(self):
+        self.assertEqual(
+            parse_life_board_last_updated(_board_text("2026-06-04")),
+            date(2026, 6, 4),
+        )
 
+    def test_audit_due_after_seven_days(self):
+        self.set_board(_board_text("2026-06-04"))
+        result = audit_life_board(date(2026, 6, 11))
+        self.assertTrue(result["needs_audit"])
+        self.assertTrue(result["due"])
+        self.assertEqual(result["last_updated"], "2026-06-04")
+        self.assertEqual(result["days_since_update"], 7)
+        self.assertIn("last_updated_older_than_7_days", result["reasons"])
 
-def test_audit_due_after_seven_days(monkeypatch, tmp_path):
-    _patch_vault(monkeypatch, tmp_path, _board_text("2026-06-04"))
+    def test_audit_triggers_on_explicit_diary_board_mention(self):
+        self.set_board(_board_text("2026-07-05"))
+        self.write_journal(
+            date(2026, 7, 7),
+            "#diary\n\nToday I need to discuss this board 机制 and review.\n",
+        )
+        result = audit_life_board(date(2026, 7, 7))
+        self.assertTrue(result["needs_audit"])
+        self.assertFalse(result["due"])
+        self.assertTrue(result["explicit_trigger"])
+        self.assertIn("journal_explicit_trigger", result["reasons"])
 
-    result = audit_life_board(date(2026, 6, 11))
+    def test_audit_noop_when_recent_and_no_trigger(self):
+        self.set_board(_board_text("2026-07-06"))
+        self.write_journal(
+            date(2026, 7, 7),
+            "#diary\n\n普通一天，没有项目审计。\n",
+        )
+        result = audit_life_board(date(2026, 7, 7))
+        self.assertFalse(result["needs_audit"])
+        self.assertFalse(result["due"])
+        self.assertFalse(result["explicit_trigger"])
+        self.assertEqual(result["reasons"], [])
 
-    assert result["needs_audit"] is True
-    assert result["due"] is True
-    assert result["last_updated"] == "2026-06-04"
-    assert result["days_since_update"] == 7
-    assert "last_updated_older_than_7_days" in result["reasons"]
+    def test_invalid_board_missing_status_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "missing field: Status"):
+            validate_life_board_text(_board_text(status_line=None))
 
+    def test_writeback_rejects_invalid_board_without_overwriting(self):
+        self.set_board(_board_text("2026-06-04"))
+        original = self.board_path.read_text(encoding="utf-8")
+        input_path = self.root / "replacement.md"
+        input_path.write_text(_board_text(status_line=None), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "missing field: Status"):
+            cmd_writeback_life_board(
+                SimpleNamespace(date="2026-07-07", input_file=str(input_path))
+            )
+        self.assertEqual(self.board_path.read_text(encoding="utf-8"), original)
 
-def test_audit_triggers_on_explicit_diary_board_mention(monkeypatch, tmp_path):
-    _, journal_dir = _patch_vault(monkeypatch, tmp_path, _board_text("2026-07-05"))
-    _write_journal(
-        journal_dir,
-        date(2026, 7, 7),
-        "#diary\n\nToday I need to discuss this board 机制 and review.\n",
-    )
-
-    result = audit_life_board(date(2026, 7, 7))
-
-    assert result["needs_audit"] is True
-    assert result["due"] is False
-    assert result["explicit_trigger"] is True
-    assert "journal_explicit_trigger" in result["reasons"]
-
-
-def test_audit_noop_when_recent_and_no_trigger(monkeypatch, tmp_path):
-    _, journal_dir = _patch_vault(monkeypatch, tmp_path, _board_text("2026-07-06"))
-    _write_journal(journal_dir, date(2026, 7, 7), "#diary\n\n普通一天，没有项目审计。\n")
-
-    result = audit_life_board(date(2026, 7, 7))
-
-    assert result["needs_audit"] is False
-    assert result["due"] is False
-    assert result["explicit_trigger"] is False
-    assert result["reasons"] == []
-
-
-def test_invalid_board_missing_status_is_rejected():
-    try:
-        validate_life_board_text(_board_text(status_line=None))
-        assert False, "Should have rejected missing status"
-    except ValueError as exc:
-        assert "missing field: Status" in str(exc)
-
-
-def test_writeback_rejects_invalid_board_without_overwriting(monkeypatch, tmp_path):
-    board_path, _ = _patch_vault(monkeypatch, tmp_path, _board_text("2026-06-04"))
-    original = board_path.read_text(encoding="utf-8")
-    input_path = tmp_path / "replacement.md"
-    input_path.write_text(_board_text(status_line=None), encoding="utf-8")
-
-    try:
-        cmd_writeback_life_board(SimpleNamespace(date="2026-07-07", input_file=str(input_path)))
-        assert False, "Should have rejected invalid board"
-    except ValueError as exc:
-        assert "missing field: Status" in str(exc)
-
-    assert board_path.read_text(encoding="utf-8") == original
-
-
-def test_writeback_valid_board_updates_last_updated(monkeypatch, tmp_path):
-    board_path, _ = _patch_vault(monkeypatch, tmp_path, _board_text("2026-06-04"))
-    input_path = tmp_path / "replacement.md"
-    input_path.write_text(_board_text("2026-06-04"), encoding="utf-8")
-
-    cmd_writeback_life_board(SimpleNamespace(date="2026-07-07", input_file=str(input_path)))
-
-    updated = board_path.read_text(encoding="utf-8")
-    assert "*Last updated: [[2026-07-07]]*" in updated
-    assert "*Last updated: [[2026-06-04]]*" not in updated
+    def test_writeback_valid_board_updates_last_updated(self):
+        self.set_board(_board_text("2026-06-04"))
+        input_path = self.root / "replacement.md"
+        input_path.write_text(_board_text("2026-06-04"), encoding="utf-8")
+        cmd_writeback_life_board(
+            SimpleNamespace(date="2026-07-07", input_file=str(input_path))
+        )
+        updated = self.board_path.read_text(encoding="utf-8")
+        self.assertIn("*Last updated: [[2026-07-07]]*", updated)
+        self.assertNotIn("*Last updated: [[2026-06-04]]*", updated)
 
 
 if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    unittest.main()

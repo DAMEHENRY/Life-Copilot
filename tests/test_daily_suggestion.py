@@ -9,6 +9,7 @@ import sys
 import os
 import tempfile
 import textwrap
+import unittest
 from datetime import date
 from pathlib import Path
 
@@ -73,7 +74,7 @@ def _journal_with_sections(*sections: str) -> str:
 # Tests: writeback-thought without Daily Log
 # ---------------------------------------------------------------------------
 
-class TestWritebackThoughtWithoutDailyLog:
+class TestWritebackThoughtWithoutDailyLog(unittest.TestCase):
     """writeback-thought should work when no Daily Log section exists."""
 
     def test_writes_to_thoughts_and_reflections(self):
@@ -86,6 +87,15 @@ class TestWritebackThoughtWithoutDailyLog:
         assert "测试标题" in result
         assert "测试内容" in result
         assert "💭 Thoughts & Reflections" in result
+        assert "> [!info] 对话转写" in result
+        assert "不是 Henry 手写原文" in result
+        expected_block = (
+            "'测试标题'\n\n"
+            "> [!info] 对话转写\n"
+            "> 这段内容来自 Henry 与 Life Copilot 的直接对话，由 Life Copilot 整理转写；不是 Henry 手写原文。\n\n"
+            "测试内容"
+        )
+        assert expected_block in result
 
     def test_no_daily_log_section_required(self):
         """Should not raise even when Daily Log is absent."""
@@ -106,12 +116,35 @@ class TestWritebackThoughtWithoutDailyLog:
         except ValueError as e:
             assert "Copilot analysis" in str(e)
 
+    def test_each_appended_thought_has_its_own_transcription_callout(self):
+        journal = _journal_with_sections("💭 Thoughts & Reflections")
+        first = append_thought_to_journal(journal, "第一段", "第一段内容")
+        second = append_thought_to_journal(first, "第二段", "第二段内容")
+        assert second.count("> [!info] 对话转写") == 2
+        assert second.count("不是 Henry 手写原文") == 2
+
+    def test_preserves_existing_handwritten_text(self):
+        journal = textwrap.dedent("""\
+            #diary
+            # 📅 2026-06-06
+            ## 💭 Thoughts & Reflections
+
+            这是 Henry 已经手写的内容。
+
+            ## What Life Copilot Said
+        """)
+        result = append_thought_to_journal(journal, "对话补记", "这是对话转写内容。")
+        assert "这是 Henry 已经手写的内容。" in result
+        assert result.count("> [!info] 对话转写") == 1
+        assert result.index("这是 Henry 已经手写的内容。") < result.index("'对话补记'")
+        assert result.index("'对话补记'") < result.index("## What Life Copilot Said")
+
 
 # ---------------------------------------------------------------------------
 # Tests: render_diary_from_template
 # ---------------------------------------------------------------------------
 
-class TestRenderDiaryFromTemplate:
+class TestRenderDiaryFromTemplate(unittest.TestCase):
 
     def test_renders_date_correctly(self):
         target = date(2026, 6, 7)
@@ -140,7 +173,7 @@ class TestRenderDiaryFromTemplate:
 # Tests: write_daily_suggestion
 # ---------------------------------------------------------------------------
 
-class TestWriteDailySuggestion:
+class TestWriteDailySuggestion(unittest.TestCase):
 
     def test_creates_section_in_new_diary(self):
         journal = _journal_with_sections(
@@ -249,7 +282,7 @@ class TestWriteDailySuggestion:
         assert "> Generated from [[2026-06-06]]" in result
 
 
-class TestWriteDailySuggestionCommand:
+class TestWriteDailySuggestionCommand(unittest.TestCase):
     """Exercise parser dispatch and filesystem creation in an isolated vault."""
 
     def test_creates_next_day_diary_via_command(self):
@@ -298,5 +331,4 @@ class TestWriteDailySuggestionCommand:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    unittest.main()
