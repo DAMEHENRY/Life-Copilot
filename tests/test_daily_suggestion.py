@@ -9,6 +9,7 @@ import sys
 import os
 import tempfile
 import textwrap
+import unittest
 from datetime import date
 from pathlib import Path
 
@@ -73,7 +74,7 @@ def _journal_with_sections(*sections: str) -> str:
 # Tests: writeback-thought without Daily Log
 # ---------------------------------------------------------------------------
 
-class TestWritebackThoughtWithoutDailyLog:
+class TestWritebackThoughtWithoutDailyLog(unittest.TestCase):
     """writeback-thought should work when no Daily Log section exists."""
 
     def test_writes_to_thoughts_and_reflections(self):
@@ -143,7 +144,7 @@ class TestWritebackThoughtWithoutDailyLog:
 # Tests: render_diary_from_template
 # ---------------------------------------------------------------------------
 
-class TestRenderDiaryFromTemplate:
+class TestRenderDiaryFromTemplate(unittest.TestCase):
 
     def test_renders_date_correctly(self):
         target = date(2026, 6, 7)
@@ -172,7 +173,7 @@ class TestRenderDiaryFromTemplate:
 # Tests: write_daily_suggestion
 # ---------------------------------------------------------------------------
 
-class TestWriteDailySuggestion:
+class TestWriteDailySuggestion(unittest.TestCase):
 
     def test_creates_section_in_new_diary(self):
         journal = _journal_with_sections(
@@ -281,7 +282,7 @@ class TestWriteDailySuggestion:
         assert "> Generated from [[2026-06-06]]" in result
 
 
-class TestWriteDailySuggestionCommand:
+class TestWriteDailySuggestionCommand(unittest.TestCase):
     """Exercise parser dispatch and filesystem creation in an isolated vault."""
 
     def test_creates_next_day_diary_via_command(self):
@@ -330,5 +331,4 @@ class TestWriteDailySuggestionCommand:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    unittest.main()

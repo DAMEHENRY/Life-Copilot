@@ -1,9 +1,9 @@
 # Life Copilot
 
-> Version: v4.3 (base: 2026-06-04; current protocol updated 2026-07-07)
+> Version: v4.4 (2026-07-25)
 > Runtime: Claude Code / Codex + Obsidian + local files
-> Design note: [[life-copilot-v4.3-rfc]]
-> Current update: Life Board audit gate + resources archive routing
+> Design note: [[life-copilot-v4.4-rfc]]
+> Current update: merged Chat capture + bedtime closure + constrained rule evolution
 
 Life Copilot is Henry's local personal operating system. It is not a task app, not a scheduler, and not a database. It is a small set of files and scripts that help an AI assistant read the right local evidence, preserve provenance, and suggest the smallest useful next step.
 
@@ -11,7 +11,7 @@ Life Copilot is Henry's local personal operating system. It is not a task app, n
 
 > **Do as much as needed, as little as possible.**
 
-This is the top-level rule for v4.3. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
+This remains the top-level rule in v4.4. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
 
 In practice:
 
@@ -48,7 +48,7 @@ The old Quant roadmap still exists, but it is no longer the life-wide source of 
 
 ## 2. Daily Operating Loop
 
-The normal v4.3 loop is intentionally small:
+The normal v4.4 loop is intentionally small:
 
 1. Read `life-board.md`.
 2. Read today's diary if it exists.
@@ -72,7 +72,7 @@ When Diary Mode analysis completes for a day, the following five steps are the *
 4. **Daily Suggestion Writeback** — write a short, actionable suggestion to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`. The suggestion body must use target-day voice (`today`, not `tomorrow`) and should reflect post-inbox-closure state — do not recommend inbox actions for files already moved during the audit.
 5. **Final Response**.
 
-Life Board audit runs before inbox/Daily Suggestion so stale board context is surfaced while keeping board patches out of `What Life Copilot Said` unless the board is the diary topic. Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush. Details: see `AGENTS.md` §Diary Mode Completion Contract and `prompts/diary-mode.md` §Completion Contract.
+Life Board audit runs before inbox/Daily Suggestion so stale board context is surfaced while keeping board patches out of `What Life Copilot Said` unless the board is the diary topic. Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush. The sole authoritative contract lives in `prompts/diary-mode.md` §Completion Contract.
 
 ---
 
@@ -105,7 +105,8 @@ The most important safety rule is that different kinds of text go to different p
 
 | Content | Destination | Command / method |
 |---|---|---|
-| Henry's own diary continuation | `Thoughts & Reflections` | `writeback-thought` |
+| Explicit Henry diary continuation (“记一下”) | `Thoughts & Reflections` | `writeback-thought` |
+| Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot analysis of a diary | `What Life Copilot Said` | `writeback-journal` |
 | Next-day execution suggestion | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
 | Codex / Life Claude Renderer daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
@@ -122,6 +123,8 @@ Common commands:
 ```bash
 python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
+python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file /tmp/capture.md
+python3 scripts/copilot.py finalize-ai-day --hook-input-file /tmp/hook.json
 python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file /tmp/analysis.md
 python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "标题" --input-file /tmp/thought.md
 python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file /tmp/suggestion.md
@@ -142,9 +145,32 @@ python3 scripts/copilot.py export-codex-day --date YYYY-MM-DD --output-file /tmp
 
 For normal diary analysis, prefer `writeback-ai-day`.
 
+Ordinary Chat no longer writes one entry per turn. The complete raw conversation
+belongs in the daily trace; Diary entry and an explicit bedtime close update one
+stable merged capture. The project hook uses `UserPromptSubmit` plus `Stop` so
+the final user request and one-line bedtime answer are included even when the
+underlying Codex rollout is still being flushed.
+
 ---
 
-## 5. Active Board And Seeds
+## 5. Constrained Rule Evolution
+
+`AGENTS.md` is the immutable L2 kernel. L0 runtime prompts and the L1 evolution
+policy may change only through evidence, shadow evaluation, an isolated commit,
+and a seven-day rollback window. See `prompts/evolution-policy.md`.
+
+```bash
+python3 scripts/copilot.py audit-system-rules --date YYYY-MM-DD --model MODEL
+python3 scripts/copilot.py promote-system-rule --candidate-file MANIFEST
+python3 scripts/copilot.py rollback-system-rule --candidate-id ID --reason henry-said-worse
+```
+
+The append-only ledger is `journal/system-evolution.jsonl`. Automated changes
+cannot target L2, scripts, tests, eval floors, hooks, or permissions.
+
+---
+
+## 6. Active Board And Seeds
 
 `life-board.md` is a slow-variable active context map, not a daily planner or todo list. Each track has:
 
@@ -177,7 +203,7 @@ The board should stay clean. Parked ideas belong in `seeds/00-index.md`, not on 
 
 ---
 
-## 6. Resources Archive Mechanism
+## 7. Resources Archive Mechanism
 
 `resources/` is a topical library, not a dumping ground. Inbox flushes should route reference material into the closest stable shelf instead of leaving ordinary files at the root:
 
@@ -194,9 +220,9 @@ The root of `resources/` should normally contain only `00-readme.md`, vault-leve
 
 ---
 
-## 7. Schedule Projection
+## 8. Schedule Projection
 
-v4.3 schedules are projections, not training-era generated plans.
+v4.4 schedules remain projections, not training-era generated plans.
 
 Default path:
 
@@ -231,7 +257,7 @@ templates/legacy-quant-feedback.md
 
 ---
 
-## 8. Quant Tools
+## 9. Quant Tools
 
 Quant Mode is now mostly a specialized study/project mode, not the default life loop.
 
@@ -253,7 +279,7 @@ Session notes and summaries are maintained manually in `quant/arsenal/`.
 
 ---
 
-## 9. File Rules
+## 10. File Rules
 
 Naming:
 
@@ -278,30 +304,30 @@ git diff --check
 
 ---
 
-## 10. What RFC Means
+## 11. What RFC Means
 
 `RFC` means **Request for Comments**.
 
-In this vault, [[life-copilot-v4.3-rfc]] is the design rationale and migration note for v4.3. It is not short for "refactor", although this version did involve a refactor of the operating philosophy.
+In this vault, [[life-copilot-v4.4-rfc]] is the current design rationale and migration note. It is not short for "refactor", although this version does refactor rule ownership.
 
 Use the RFC when you want to understand why the system changed. Use this README when you want to know how to operate it.
 
 ---
 
-## 11. Trial Week
+## 12. Trial Week
 
-v4.3 should now be tested in real use for one week.
+v4.4 enters a seven-day observation window after each promoted rule.
 
 Watch for:
 
-- whether diary analysis routes by context correctly
-- whether `life-board.md` helps or becomes clutter
-- whether `inbox/` flush feels natural
-- whether conversational schedule projection is enough
-- whether any legacy Quant script tries to become the default again
+- whether ordinary Chat stays free of fragmented writebacks
+- whether Diary entry and bedtime close merge the right user content
+- whether direct bedtime requests close reliably without meta-discussion false positives
+- whether each daily trace contains the final request and one-line reply
+- whether an evolved rule improves its target without regressing other golden cases
 
-If the system feels lighter and no critical workflow breaks, v4.3 is working.
+Hard-constraint failure, “变差了”, or two matching soft regressions trigger rollback.
 
 ---
 
-*Last updated: [[2026-07-07]]*
+*Last updated: [[2026-07-25]]*

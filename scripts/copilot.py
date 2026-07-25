@@ -2,19 +2,22 @@
 """
 Life Copilot — lean orchestration utilities.
 
-Only structural write commands that are unsafe for Claude to do freehand:
-writeback-journal, writeback-thought, writeback-daily-suggestion,
-writeback-life-board, writeback-memory, append-insight, compact-memory,
-quant-mission, quant-question-link, sync-quant-state, sync-roadmap-stats,
-update-schedule.
+Only structural write commands that are unsafe for the model to do freehand:
+writeback-journal, writeback-thought, writeback-chat-capture,
+writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
+finalize-ai-day, writeback-memory, append-insight, compact-memory,
+audit-system-rules, promote-system-rule, rollback-system-rule, quant-mission,
+quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -30,6 +33,8 @@ LIFE_BOARD_FILE = ROOT / "life-board.md"
 MEMORY_FILE = JOURNAL_DIR / "memory.md"
 MEMORY_ARCHIVE_FILE = JOURNAL_DIR / "memory-archive.md"
 INSIGHTS_FILE = JOURNAL_DIR / "insights.jsonl"
+SYSTEM_EVOLUTION_LEDGER = JOURNAL_DIR / "system-evolution.jsonl"
+SYSTEM_EVOLUTION_CANDIDATES_DIR = JOURNAL_DIR / "system-evolution-candidates"
 ROADMAP_FILE = ROOT / "quant" / "roadmap.md"
 QUANT_STATE_FILE = ROOT / "quant" / "state.md"
 QUANT_ARSENAL_DIR = ROOT / "quant" / "arsenal"
@@ -76,6 +81,40 @@ THREAD_URI_RE = re.compile(r"thread://([0-9a-f-]+)", re.IGNORECASE)
 APPSHOT_RE = re.compile(r"<appshot\b([^>]*)>.*?</appshot>", re.DOTALL | re.IGNORECASE)
 APPSHOT_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 CODEX_TRACE_WARNING_BYTES = 256 * 1024
+CHAT_CAPTURE_ID_PREFIX = "chat-capture"
+SYSTEM_EVOLUTION_SCHEMA_VERSION = "1.0"
+SYSTEM_EVOLUTION_PROBATION_DAYS = 7
+SYSTEM_EVOLUTION_REVIEW_DAYS = 90
+SYSTEM_EVOLUTION_GOLDEN_CASES = ROOT / "evals" / "life-copilot-golden-cases.jsonl"
+SYSTEM_EVOLUTION_EDITABLE_TARGETS: Dict[str, set[str]] = {
+    "L0": {
+        "prompts/chat-mode.md",
+        "prompts/diary-mode.md",
+        "prompts/quant-mode.md",
+        "prompts/study-mode.md",
+    },
+    "L1": {"prompts/evolution-policy.md"},
+}
+SYSTEM_EVOLUTION_REQUIRED_PHRASES: Dict[str, Tuple[str, ...]] = {
+    "prompts/chat-mode.md": (
+        "普通 Chat 不立即写入",
+        "writeback-chat-capture",
+        "Diary Mode",
+    ),
+    "prompts/diary-mode.md": (
+        "Entry Gate",
+        "Completion Contract",
+        "writeback-chat-capture",
+    ),
+    "prompts/quant-mode.md": ("Quant",),
+    "prompts/study-mode.md": ("Study",),
+    "prompts/evolution-policy.md": (
+        "L2",
+        "不可自动修改",
+        "7 天",
+        "回滚",
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +142,42 @@ def parse_date_str(value: str) -> date:
 
 def parse_date_or_today(value: Optional[str]) -> date:
     return parse_date_str(value) if value else date.today()
+
+
+def is_bedtime_close_prompt(prompt: str) -> bool:
+    """Conservatively recognize a direct request for the one-line bedtime close."""
+    text = re.sub(r"\s+", " ", prompt or "").strip().lower()
+    if not text or not re.search(r"晚安|good[\s-]*night", text, re.IGNORECASE):
+        return False
+    meta_cues = (
+        "晚安功能",
+        "晚安触发",
+        "触发条件",
+        "讨论晚安",
+        "测试晚安",
+        "引用别人",
+        "别人说晚安",
+        "他说晚安",
+        "她说晚安",
+        "whether",
+        "bedtime feature",
+        "good night feature",
+    )
+    if any(cue in text for cue in meta_cues):
+        return False
+    chinese_request = re.search(
+        r"(请|麻烦|帮我|给我|和我|向我|能不能|可不可以|可以|用|来)"
+        r".{0,45}(一句|一条|句话|话|方式|有趣|出乎意料)?.{0,35}晚安",
+        text,
+    )
+    chinese_say = re.search(r"(跟|和|向)?我?.{0,8}(说|道|祝).{0,12}晚安", text)
+    chinese_short = re.fullmatch(r"(那|那么|现在|今天|今晚|就|请|该睡了|睡觉了|睡啦|睡了|好啦|好了|嗯|吧|呀|啦|，|。|！|!|\s)*晚安(吧|啦|呀|了|。|！|!)?", text)
+    english_request = re.search(
+        r"\b(say|wish|tell|give|send).{0,40}\bgood[\s-]*night\b",
+        text,
+        re.IGNORECASE,
+    )
+    return bool(chinese_request or chinese_say or chinese_short or english_request)
 
 
 def journal_path_for_date(d: date) -> Path:
@@ -1604,6 +1679,97 @@ THOUGHT_TRANSCRIPTION_CALLOUT = "\n".join([
 ])
 
 
+def chat_capture_id(target: date) -> str:
+    return f"{CHAT_CAPTURE_ID_PREFIX}-{target.isoformat()}"
+
+
+def render_chat_capture_block(
+    target: date,
+    content: str,
+    title: str = "对话补记",
+) -> str:
+    capture_id = chat_capture_id(target)
+    return "\n".join([
+        f"### {title.strip() or '对话补记'}",
+        "",
+        "> [!info] 对话转写",
+        f"> capture-id: {capture_id}",
+        "> 这段内容来自 Henry 与 Life Copilot 的直接对话，由 Life Copilot 合并整理；不是 Henry 手写原文，也不是 AI 原始对话。",
+        "",
+        content.strip(),
+        "",
+        f"> capture-end: {capture_id}",
+    ])
+
+
+def upsert_chat_capture(
+    journal_text: str,
+    target: date,
+    content: str,
+    title: str = "对话补记",
+) -> str:
+    """Insert or replace the one generated Chat capture for *target*.
+
+    Only the block bounded by the stable capture-id/capture-end markers is
+    replaceable. Handwritten text and ordinary ``writeback-thought`` entries
+    are never treated as generated content.
+    """
+    content = content.strip()
+    if not content:
+        raise ValueError("Chat capture content is empty")
+    if looks_like_copilot_analysis(content):
+        raise ValueError(
+            "Input looks like Copilot analysis. Chat capture may contain only "
+            "Henry's experiences, thoughts, and clarifications."
+        )
+
+    marker = "## 💭 Thoughts & Reflections"
+    marker_idx = journal_text.find(marker)
+    if marker_idx == -1:
+        raise ValueError("Section '💭 Thoughts & Reflections' not found in journal")
+
+    body_start = marker_idx + len(marker)
+    next_h2 = re.search(r"(?m)^## ", journal_text[body_start:])
+    body_end = body_start + next_h2.start() if next_h2 else len(journal_text)
+    body = journal_text[body_start:body_end]
+    capture_id = chat_capture_id(target)
+    start_token = f"> capture-id: {capture_id}"
+    end_token = f"> capture-end: {capture_id}"
+    block = render_chat_capture_block(target, content, title)
+
+    token_idx = body.find(start_token)
+    if token_idx != -1:
+        block_start = body.rfind("\n### ", 0, token_idx)
+        if block_start == -1:
+            if body.lstrip().startswith("### "):
+                block_start = len(body) - len(body.lstrip())
+            else:
+                raise ValueError(
+                    f"Generated capture {capture_id} has no owning h3 heading"
+                )
+        else:
+            block_start += 1
+        end_idx = body.find(end_token, token_idx)
+        if end_idx == -1:
+            raise ValueError(
+                f"Generated capture {capture_id} is missing its capture-end marker"
+            )
+        block_end = end_idx + len(end_token)
+        while block_end < len(body) and body[block_end] in "\r\n":
+            block_end += 1
+        new_body = (
+            body[:block_start].rstrip()
+            + ("\n\n" if body[:block_start].strip() else "\n\n")
+            + block
+            + ("\n\n" + body[block_end:].lstrip() if body[block_end:].strip() else "\n")
+        )
+    else:
+        existing = body.strip()
+        new_body = "\n\n" + (existing + "\n\n" if existing else "") + block + "\n"
+
+    return journal_text[:body_start].rstrip() + new_body + journal_text[body_end:]
+
+
 def append_thought_to_journal(journal_text: str, title: str, content: str) -> str:
     # Guardrail: this command is for writing user-side diary thoughts,
     # not for writing Copilot analysis into the journal body.
@@ -1643,6 +1809,24 @@ def cmd_writeback_thought(args: argparse.Namespace) -> None:
     if not args.input_file:
         raise ValueError("--input-file is required")
     write_text(jp, append_thought_to_journal(read_text(jp), args.title, read_text(Path(args.input_file))))
+    print(str(jp))
+
+
+def cmd_writeback_chat_capture(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    jp = journal_path_for_date(target)
+    if not jp.exists():
+        raise FileNotFoundError(f"Journal not found: {jp}")
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    updated = upsert_chat_capture(
+        read_text(jp),
+        target,
+        read_text(input_path),
+        title=args.title,
+    )
+    write_text(jp, updated)
     print(str(jp))
 
 
@@ -2072,13 +2256,136 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
         print("\n  No AI conversations found for this date.")
 
 
-def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
-    target = parse_date_str(args.date)
+def render_hook_fallback_turn(
+    target: date,
+    payload: dict,
+    *,
+    include_prompt: bool = True,
+    include_assistant: bool = True,
+) -> str:
+    """Render the current hook turn when the Codex rollout is not flushed yet."""
+    prompt = clean_codex_user_text(str(payload.get("prompt") or "")).strip()
+    assistant = clean_codex_assistant_text(
+        str(payload.get("last_assistant_message") or "")
+    ).strip()
+    if not prompt or not assistant or not (include_prompt or include_assistant):
+        return ""
+    session_id = str(payload.get("session_id") or "unknown-session")
+    turn_id = str(payload.get("turn_id") or "unknown-turn")
+    timestamp = str(payload.get("timestamp") or datetime.now().astimezone().isoformat())
+    try:
+        display_ts = format_chat_timestamp(timestamp)
+    except ValueError:
+        display_ts = format_chat_timestamp(datetime.now().astimezone().isoformat())
+    lines = [
+        f"### Codex Thread {session_id}",
+        "",
+        f"> hook-fallback-turn: {turn_id}",
+        "",
+    ]
+    if include_prompt:
+        lines.extend([f"[{display_ts}] Henry: {prompt}", ""])
+    if include_assistant:
+        lines.append(f"[{display_ts}] Codex: {assistant}")
+    return "\n".join(lines).rstrip()
+
+
+def existing_hook_fallback_blocks(target: date) -> List[Tuple[str, List[str]]]:
+    """Return fallback blocks and their message bodies from the current trace."""
+    trace_path = ai_trace_path_for_date(target, "codex")
+    if not trace_path.exists():
+        return []
+    text = read_text(trace_path)
+    blocks = re.split(r"(?m)(?=^### Codex Thread )", text)
+    result: List[Tuple[str, List[str]]] = []
+    for block in blocks:
+        if "> hook-fallback-turn:" not in block:
+            continue
+        messages = [
+            match.group(1).strip()
+            for match in re.finditer(
+                r"(?ms)^\[[^\]]+\] (?:Henry|Codex): (.*?)(?=^\[[^\]]+\] (?:Henry|Codex): |\Z)",
+                block,
+            )
+            if match.group(1).strip()
+        ]
+        result.append((block.strip(), messages))
+    return result
+
+
+def ensure_single_from_kai_link(
+    journal_text: str,
+    link: str,
+    description: str,
+) -> str:
+    """Keep exactly one bullet for a generated trace wikilink."""
+    marker = "## 💬 From Kai"
+    idx = journal_text.find(marker)
+    if idx == -1:
+        raise ValueError(f"Section '{marker}' not found in journal")
+    body_start = idx + len(marker)
+    after = journal_text[body_start:]
+    next_h2 = re.search(r"(?m)^## ", after)
+    body_end = body_start + next_h2.start() if next_h2 else len(journal_text)
+    body_lines = journal_text[body_start:body_end].splitlines()
+    kept = [line for line in body_lines if link not in line]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    kept.extend(["", f"- {link}：{description}"])
+    body = "\n".join(kept).strip()
+    tail = journal_text[body_end:]
+    return (
+        journal_text[:body_start].rstrip()
+        + "\n\n"
+        + body
+        + ("\n\n" + tail.lstrip("\n") if tail else "\n")
+    )
+
+
+def writeback_ai_day(
+    target: date,
+    *,
+    create_journal: bool = False,
+    hook_payload: Optional[dict] = None,
+) -> dict:
+    """Refresh daily traces and journal links, optionally closing a hook turn."""
     jp = journal_path_for_date(target)
     if not jp.exists():
-        raise FileNotFoundError(f"Journal not found: {jp}")
+        if not create_journal:
+            raise FileNotFoundError(f"Journal not found: {jp}")
+        write_text(jp, render_diary_from_template(target))
 
     codex_transcript = export_codex_day_transcript(target).strip()
+    # Keep delayed turns from other concurrent finalizers. Once every message
+    # in a fallback block appears in the real rollout export, the block drops
+    # out automatically on the next refresh.
+    for old_block, messages in existing_hook_fallback_blocks(target):
+        if any(message not in codex_transcript for message in messages):
+            codex_transcript = (
+                codex_transcript.rstrip() + "\n\n" + old_block
+                if codex_transcript
+                else old_block
+            )
+    prompt = clean_codex_user_text(str((hook_payload or {}).get("prompt") or "")).strip()
+    assistant = clean_codex_assistant_text(
+        str((hook_payload or {}).get("last_assistant_message") or "")
+    ).strip()
+    prompt_missing = bool(prompt and prompt not in codex_transcript)
+    assistant_missing = bool(assistant and assistant not in codex_transcript)
+    fallback = render_hook_fallback_turn(
+        target,
+        hook_payload or {},
+        include_prompt=prompt_missing,
+        include_assistant=assistant_missing,
+    )
+    fallback_used = False
+    if fallback:
+        codex_transcript = (
+            codex_transcript.rstrip() + "\n\n" + fallback
+            if codex_transcript
+            else fallback
+        )
+        fallback_used = True
     if codex_transcript:
         warn_if_oversized_codex_transcript(
             codex_transcript, f"Codex trace for {target.isoformat()}"
@@ -2125,26 +2432,71 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         write_text(renderer_path, renderer_content)
         print(f"  wrote: {renderer_path.relative_to(ROOT)}")
 
-    # Append deduped wikilink bullets to journal
+    # Normalize generated wikilinks so retries and concurrent sessions cannot
+    # produce more than one bullet for a source/day.
     journal_text = read_text(jp)
-    from_kai_marker = "## 💬 From Kai"
-    if from_kai_marker not in journal_text:
-        raise ValueError(f"Section '{from_kai_marker}' not found in journal")
+    if codex_transcript:
+        journal_text = ensure_single_from_kai_link(
+            journal_text,
+            codex_link,
+            "Life Copilot / planning / reflection conversations.",
+        )
+    if renderer_transcript:
+        journal_text = ensure_single_from_kai_link(
+            journal_text,
+            renderer_link,
+            "Obsidian-rendered Claude Code conversations.",
+        )
+    write_text(jp, journal_text)
+    print(f"  updated: {jp.relative_to(ROOT)}")
 
-    links_to_add: List[str] = []
-    if codex_transcript and codex_link not in journal_text:
-        links_to_add.append(f"- {codex_link}：Life Copilot / planning / reflection conversations.")
-    if renderer_transcript and renderer_link not in journal_text:
-        links_to_add.append(f"- {renderer_link}：Obsidian-rendered Claude Code conversations.")
+    trace_text = read_text(codex_path) if codex_transcript else ""
+    if hook_payload:
+        missing: List[str] = []
+        if prompt and prompt not in trace_text:
+            missing.append("user prompt")
+        if assistant and assistant not in trace_text:
+            missing.append("assistant message")
+        turn_id = str(hook_payload.get("turn_id") or "")
+        if turn_id and turn_id not in trace_text and fallback_used:
+            missing.append("turn id")
+        if missing:
+            raise ValueError(
+                "Final trace verification failed: " + ", ".join(missing)
+            )
 
-    if links_to_add:
-        addition = "\n".join(links_to_add)
-        write_text(jp, append_journal_section(journal_text, from_kai_marker, addition))
-        print(f"  updated: {jp.relative_to(ROOT)}")
-    else:
-        print(f"  (wikilinks already present in {jp.relative_to(ROOT)})")
+    return {
+        "journal": str(jp),
+        "codex_trace": str(codex_path) if codex_transcript else "",
+        "renderer_trace": str(renderer_path) if renderer_transcript else "",
+        "fallback_used": fallback_used,
+    }
 
-    print(str(jp))
+
+def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    result = writeback_ai_day(
+        target,
+        create_journal=bool(getattr(args, "create_journal", False)),
+    )
+    print(result["journal"])
+
+
+def cmd_finalize_ai_day(args: argparse.Namespace) -> None:
+    input_path = Path(args.hook_input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Hook input file not found: {input_path}")
+    payload = json.loads(read_text(input_path))
+    if not isinstance(payload, dict):
+        raise ValueError("Hook input must be a JSON object")
+    target_raw = args.date or payload.get("date")
+    target = parse_date_str(str(target_raw)) if target_raw else date.today()
+    result = writeback_ai_day(
+        target,
+        create_journal=True,
+        hook_payload=payload,
+    )
+    print(json.dumps(result, ensure_ascii=False))
 
 
 # --- Memory commands ---
@@ -2358,6 +2710,462 @@ def cmd_compact_memory(_args: argparse.Namespace) -> None:
     print(f"compact done, archived {len(to_archive)} entries to memory-archive.md")
 
 
+def sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def append_system_evolution_event(event: dict) -> None:
+    record = {
+        "schema_version": SYSTEM_EVOLUTION_SCHEMA_VERSION,
+        "recorded_at": datetime.now().astimezone().isoformat(),
+        **event,
+    }
+    SYSTEM_EVOLUTION_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with SYSTEM_EVOLUTION_LEDGER.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def read_system_evolution_ledger() -> List[dict]:
+    if not SYSTEM_EVOLUTION_LEDGER.exists():
+        return []
+    records: List[dict] = []
+    for line in read_text(SYSTEM_EVOLUTION_LEDGER).splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def latest_candidate_states(records: List[dict]) -> Dict[str, dict]:
+    states: Dict[str, dict] = {}
+    for record in records:
+        candidate_id = record.get("candidate_id")
+        if isinstance(candidate_id, str) and candidate_id:
+            states[candidate_id] = record
+    return states
+
+
+def load_golden_case_ids() -> set[str]:
+    if not SYSTEM_EVOLUTION_GOLDEN_CASES.exists():
+        raise FileNotFoundError(
+            f"Golden cases not found: {SYSTEM_EVOLUTION_GOLDEN_CASES}"
+        )
+    case_ids: set[str] = set()
+    for line in read_text(SYSTEM_EVOLUTION_GOLDEN_CASES).splitlines():
+        if not line.strip():
+            continue
+        case = json.loads(line)
+        case_id = case.get("id")
+        if isinstance(case_id, str) and case.get("hard", True):
+            case_ids.add(case_id)
+    if not case_ids:
+        raise ValueError("Golden case suite has no hard cases")
+    return case_ids
+
+
+def candidate_manifest_path(candidate_file: Path) -> Path:
+    resolved = candidate_file.expanduser().resolve()
+    root = SYSTEM_EVOLUTION_CANDIDATES_DIR.resolve()
+    if root not in resolved.parents:
+        raise ValueError(
+            "Candidate manifest must live under journal/system-evolution-candidates"
+        )
+    return resolved
+
+
+def candidate_content(candidate: dict, manifest_path: Path) -> str:
+    raw_path = candidate.get("candidate_content_file")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("candidate_content_file is required")
+    path = (manifest_path.parent / raw_path).resolve()
+    candidate_root = SYSTEM_EVOLUTION_CANDIDATES_DIR.resolve()
+    if candidate_root not in path.parents:
+        raise ValueError("Candidate content must stay inside the candidate directory")
+    if not path.exists():
+        raise FileNotFoundError(f"Candidate content not found: {path}")
+    return read_text(path)
+
+
+def validate_system_rule_candidate(
+    candidate_file: Path,
+    *,
+    require_evaluation: bool = True,
+) -> Tuple[dict, Path, str]:
+    """Validate a bounded L0/L1 candidate against immutable L2 controls."""
+    manifest_path = candidate_manifest_path(candidate_file)
+    candidate = json.loads(read_text(manifest_path))
+    if not isinstance(candidate, dict):
+        raise ValueError("Candidate manifest must be a JSON object")
+    candidate_id = candidate.get("id")
+    if not isinstance(candidate_id, str) or not re.fullmatch(
+        r"[a-z0-9][a-z0-9-]{2,80}", candidate_id
+    ):
+        raise ValueError("Candidate id must be a lowercase kebab-case identifier")
+
+    layer = candidate.get("layer")
+    target_raw = candidate.get("target")
+    if layer not in SYSTEM_EVOLUTION_EDITABLE_TARGETS:
+        raise ValueError("Only L0 and L1 candidates may be automated; L2 is immutable")
+    if target_raw not in SYSTEM_EVOLUTION_EDITABLE_TARGETS[layer]:
+        raise ValueError(
+            f"Target '{target_raw}' is outside the {layer} editable whitelist"
+        )
+    target = (ROOT / str(target_raw)).resolve()
+    if ROOT.resolve() not in target.parents or not target.exists():
+        raise ValueError(f"Candidate target is invalid or missing: {target_raw}")
+
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, list):
+        raise ValueError("Candidate evidence must be a list")
+    dates = {
+        str(item.get("date"))
+        for item in evidence
+        if isinstance(item, dict)
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(item.get("date") or ""))
+    }
+    explicit = bool(candidate.get("explicit_system_design_request"))
+    if not explicit and len(dates) < 2:
+        raise ValueError(
+            "Candidate needs an explicit system-design request or evidence "
+            "from at least two different dates"
+        )
+
+    current = read_text(target)
+    before_hash = candidate.get("before_sha256")
+    if before_hash != sha256_text(current):
+        raise ValueError("Candidate base hash does not match the current target")
+    proposed = candidate_content(candidate, manifest_path)
+    if proposed == current:
+        raise ValueError("Candidate content is identical to the current rule")
+    for phrase in SYSTEM_EVOLUTION_REQUIRED_PHRASES.get(str(target_raw), ()):
+        if phrase not in proposed:
+            raise ValueError(
+                f"Candidate removes required L2-owned contract phrase: {phrase}"
+            )
+
+    if require_evaluation:
+        evaluation = candidate.get("evaluation")
+        if not isinstance(evaluation, dict):
+            raise ValueError("Candidate evaluation is required")
+        if evaluation.get("hard_constraints_passed") is not True:
+            raise ValueError("All hard constraints must pass")
+        if evaluation.get("target_improved") is not True:
+            raise ValueError("The target case must improve before promotion")
+        regressions = evaluation.get("regressions")
+        if not isinstance(regressions, list) or regressions:
+            raise ValueError("Non-target cases may not regress")
+        passed = set(evaluation.get("passed_golden_cases") or [])
+        missing = sorted(load_golden_case_ids() - passed)
+        if missing:
+            raise ValueError(
+                "Candidate has not passed every hard golden case: "
+                + ", ".join(missing)
+            )
+        trace_refs = evaluation.get("recent_trace_refs")
+        if not isinstance(trace_refs, list) or not trace_refs:
+            raise ValueError("Evaluation must include at least one recent trace")
+
+    return candidate, target, proposed
+
+
+def git_target_is_dirty(target: Path) -> bool:
+    relative = str(target.relative_to(ROOT))
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--", relative],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def run_system_rule_tests() -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test*.py"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+
+
+def cmd_audit_system_rules(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    model = args.model.strip()
+    records = read_system_evolution_ledger()
+    result: dict
+    if getattr(args, "complete_review", False):
+        if not args.review_evidence_file:
+            raise ValueError("--review-evidence-file is required with --complete-review")
+        evidence = json.loads(read_text(Path(args.review_evidence_file)))
+        if not isinstance(evidence, dict):
+            raise ValueError("Review evidence must be a JSON object")
+        if evidence.get("hard_constraints_passed") is not True:
+            raise ValueError("Compatibility review failed a hard constraint")
+        regressions = evidence.get("regressions")
+        if not isinstance(regressions, list) or regressions:
+            raise ValueError("Compatibility review contains regressions")
+        passed = set(evidence.get("passed_golden_cases") or [])
+        missing = sorted(load_golden_case_ids() - passed)
+        if missing:
+            raise ValueError(
+                "Compatibility review is missing hard golden cases: "
+                + ", ".join(missing)
+            )
+        traces = evidence.get("recent_trace_refs")
+        if not isinstance(traces, list) or not traces:
+            raise ValueError("Compatibility review needs at least one recent trace")
+        result = {
+            "status": "complete",
+            "model": model,
+            "passed_golden_cases": sorted(passed),
+            "recent_trace_refs": traces,
+        }
+        append_system_evolution_event({
+            "event": "compatibility_audit",
+            "date": target.isoformat(),
+            **result,
+        })
+    elif args.candidate_file:
+        candidate, rule_target, _ = validate_system_rule_candidate(
+            Path(args.candidate_file)
+        )
+        result = {
+            "status": "candidate_ready",
+            "candidate_id": candidate["id"],
+            "layer": candidate["layer"],
+            "target": str(rule_target.relative_to(ROOT)),
+        }
+        append_system_evolution_event({
+            "event": "candidate_audit",
+            "date": target.isoformat(),
+            "model": model,
+            **result,
+        })
+    else:
+        reviews = [
+            record for record in records
+            if record.get("event") == "compatibility_audit"
+            and record.get("status") == "complete"
+        ]
+        last = reviews[-1] if reviews else None
+        reasons: List[str] = []
+        if last is None:
+            reasons.append("no_previous_compatibility_audit")
+        else:
+            try:
+                last_date = parse_date_str(str(last.get("date")))
+                if (target - last_date).days >= SYSTEM_EVOLUTION_REVIEW_DAYS:
+                    reasons.append("ninety_day_review_due")
+            except ValueError:
+                reasons.append("invalid_previous_audit_date")
+            previous_model = str(last.get("model") or "")
+            if model and previous_model and model != previous_model:
+                reasons.append("model_slug_changed")
+        probation: List[dict] = []
+        for candidate_id, state in latest_candidate_states(records).items():
+            if state.get("status") != "probation":
+                continue
+            probation_until = str(state.get("probation_until") or "")
+            if probation_until >= target.isoformat():
+                probation.append(state)
+            elif probation_until:
+                append_system_evolution_event({
+                    "event": "probation_complete",
+                    "date": target.isoformat(),
+                    "candidate_id": candidate_id,
+                    "target": state.get("target", ""),
+                    "status": "stable",
+                    "commit": state.get("commit", ""),
+                })
+        result = {
+            "status": "review_due" if reasons else "no_op",
+            "reasons": reasons,
+            "active_probation": [
+                record.get("candidate_id") for record in probation
+            ],
+        }
+        if reasons or args.record_noop:
+            append_system_evolution_event({
+                "event": "compatibility_audit",
+                "date": target.isoformat(),
+                "model": model,
+                **result,
+            })
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        print(result["status"])
+        for reason in result.get("reasons", []):
+            print(f"- {reason}")
+
+
+def cmd_promote_system_rule(args: argparse.Namespace) -> None:
+    manifest_path = candidate_manifest_path(Path(args.candidate_file))
+    candidate, target, proposed = validate_system_rule_candidate(manifest_path)
+    today = date.today()
+    for record in read_system_evolution_ledger():
+        if record.get("event") != "promotion":
+            continue
+        record_date = str(record.get("date") or record.get("recorded_at") or "")[:10]
+        if record_date == today.isoformat():
+            raise ValueError(
+                "A rule family was already promoted today; wait until the next close"
+            )
+    if git_target_is_dirty(target):
+        append_system_evolution_event({
+            "event": "promotion_paused",
+            "candidate_id": candidate["id"],
+            "status": "dirty_target",
+            "target": str(target.relative_to(ROOT)),
+        })
+        raise ValueError("Target has uncommitted changes; promotion paused")
+
+    before = read_text(target)
+    before_snapshot = manifest_path.parent / f"{candidate['id']}-before.md"
+    write_text(before_snapshot, before)
+    write_text(target, proposed)
+    tests = run_system_rule_tests()
+    if tests.returncode != 0:
+        write_text(target, before)
+        append_system_evolution_event({
+            "event": "promotion_rejected",
+            "candidate_id": candidate["id"],
+            "status": "tests_failed",
+            "target": str(target.relative_to(ROOT)),
+        })
+        raise ValueError("Promotion tests failed; target restored\n" + tests.stdout[-2000:])
+
+    relative = str(target.relative_to(ROOT))
+    commit = subprocess.run(
+        [
+            "git",
+            "commit",
+            "--only",
+            "-m",
+            f"Promote Life Copilot rule {candidate['id']}",
+            "--",
+            relative,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if commit.returncode != 0:
+        write_text(target, before)
+        raise ValueError("Promotion commit failed; target restored: " + commit.stderr.strip())
+    commit_hash = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    candidate.update({
+        "status": "probation",
+        "promoted_at": today.isoformat(),
+        "probation_until": (
+            today + timedelta(days=SYSTEM_EVOLUTION_PROBATION_DAYS)
+        ).isoformat(),
+        "after_sha256": sha256_text(proposed),
+        "commit": commit_hash,
+        "before_snapshot": before_snapshot.name,
+    })
+    write_text(manifest_path, json.dumps(candidate, ensure_ascii=False, indent=2) + "\n")
+    append_system_evolution_event({
+        "event": "promotion",
+        "date": today.isoformat(),
+        "candidate_id": candidate["id"],
+        "layer": candidate["layer"],
+        "model": candidate.get("model", ""),
+        "target": relative,
+        "before_sha256": candidate["before_sha256"],
+        "after_sha256": candidate["after_sha256"],
+        "evaluation": candidate["evaluation"],
+        "status": "probation",
+        "commit": commit_hash,
+        "probation_until": candidate["probation_until"],
+    })
+    print(commit_hash)
+
+
+def cmd_rollback_system_rule(args: argparse.Namespace) -> None:
+    manifests = sorted(
+        SYSTEM_EVOLUTION_CANDIDATES_DIR.glob(f"**/{args.candidate_id}.json")
+    )
+    if len(manifests) != 1:
+        raise ValueError(
+            f"Expected exactly one manifest for candidate {args.candidate_id}"
+        )
+    manifest_path = manifests[0]
+    candidate = json.loads(read_text(manifest_path))
+    if candidate.get("status") != "probation":
+        raise ValueError("Only a rule currently in probation can auto-rollback")
+    target_raw = candidate.get("target")
+    layer = candidate.get("layer")
+    if target_raw not in SYSTEM_EVOLUTION_EDITABLE_TARGETS.get(str(layer), set()):
+        raise ValueError("Rollback target is outside the editable whitelist")
+    target = (ROOT / str(target_raw)).resolve()
+    if git_target_is_dirty(target):
+        raise ValueError("Target has uncommitted changes; rollback paused")
+    if sha256_text(read_text(target)) != candidate.get("after_sha256"):
+        raise ValueError("Target no longer matches the promoted version")
+    before_path = manifest_path.parent / str(candidate.get("before_snapshot") or "")
+    if not before_path.exists():
+        raise FileNotFoundError("Rollback snapshot is missing")
+    promoted = read_text(target)
+    write_text(target, read_text(before_path))
+    tests = run_system_rule_tests()
+    if tests.returncode != 0:
+        write_text(target, promoted)
+        raise ValueError("Rollback tests failed; promoted version restored")
+    relative = str(target.relative_to(ROOT))
+    commit = subprocess.run(
+        [
+            "git",
+            "commit",
+            "--only",
+            "-m",
+            f"Rollback Life Copilot rule {candidate['id']}",
+            "--",
+            relative,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if commit.returncode != 0:
+        write_text(target, promoted)
+        raise ValueError("Rollback commit failed; promoted version restored")
+    commit_hash = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    candidate["status"] = "rolled_back"
+    candidate["rollback_commit"] = commit_hash
+    candidate["rollback_reason"] = args.reason
+    write_text(manifest_path, json.dumps(candidate, ensure_ascii=False, indent=2) + "\n")
+    append_system_evolution_event({
+        "event": "rollback",
+        "candidate_id": candidate["id"],
+        "target": relative,
+        "status": "rolled_back",
+        "reason": args.reason,
+        "commit": commit_hash,
+    })
+    print(commit_hash)
+
+
 def cmd_sync_roadmap_stats(_args: argparse.Namespace) -> None:
     text = read_text(ROADMAP_FILE)
     lines = text.splitlines()
@@ -2455,6 +3263,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--input-file", required=True)
     s.set_defaults(func=cmd_writeback_thought)
 
+    s = sub.add_parser("writeback-chat-capture")
+    s.add_argument("--date", required=True)
+    s.add_argument("--title", default="对话补记")
+    s.add_argument("--input-file", required=True)
+    s.set_defaults(func=cmd_writeback_chat_capture)
+
     s = sub.add_parser("writeback-daily-suggestion")
     s.add_argument("--source-date", required=True, help="Date of the diary analysis that generated the suggestion (YYYY-MM-DD). Target diary is source-date + 1 day.")
     s.add_argument("--input-file", required=True, help="Path to file containing the suggestion content.")
@@ -2505,7 +3319,40 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("writeback-ai-day")
     s.add_argument("--date", required=True)
+    s.add_argument(
+        "--create-journal",
+        action="store_true",
+        help="Create a missing diary from the daily template before archiving.",
+    )
     s.set_defaults(func=cmd_writeback_ai_day)
+
+    s = sub.add_parser("finalize-ai-day")
+    s.add_argument("--hook-input-file", required=True)
+    s.add_argument("--date", help="Override the local date from the hook payload.")
+    s.set_defaults(func=cmd_finalize_ai_day)
+
+    s = sub.add_parser("audit-system-rules")
+    s.add_argument("--date", required=True)
+    s.add_argument("--model", default="")
+    s.add_argument("--candidate-file")
+    s.add_argument("--complete-review", action="store_true")
+    s.add_argument("--review-evidence-file")
+    s.add_argument("--record-noop", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_audit_system_rules)
+
+    s = sub.add_parser("promote-system-rule")
+    s.add_argument("--candidate-file", required=True)
+    s.set_defaults(func=cmd_promote_system_rule)
+
+    s = sub.add_parser("rollback-system-rule")
+    s.add_argument("--candidate-id", required=True)
+    s.add_argument(
+        "--reason",
+        required=True,
+        choices=["hard-constraint-failure", "henry-said-worse", "two-soft-regressions"],
+    )
+    s.set_defaults(func=cmd_rollback_system_rule)
 
     s = sub.add_parser("writeback-memory")
     s.add_argument("--date", required=True)

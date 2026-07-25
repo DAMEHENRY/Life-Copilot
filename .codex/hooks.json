@@ -1,0 +1,29 @@
+{
+  "description": "Life Copilot v4.4 bedtime close and final daily trace refresh.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/life_copilot_bedtime.py\"",
+            "timeout": 10,
+            "statusMessage": "Preparing the Life Copilot bedtime close"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/life_copilot_bedtime.py\"",
+            "timeout": 30,
+            "statusMessage": "Closing today’s Life Copilot trace"
+          }
+        ]
+      }
+    ]
+  }
+}
