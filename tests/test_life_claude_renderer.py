@@ -440,6 +440,11 @@ class TestAiTracePath(unittest.TestCase):
         path = ai_trace_path_for_date(d, "claudian")
         assert path.name == "2026-06-06-claudian-trace.md"
 
+    def test_openclaw_source(self):
+        d = date(2026, 6, 6)
+        path = ai_trace_path_for_date(d, "openclaw")
+        assert path.name == "2026-06-06-openclaw-trace.md"
+
     def test_unsupported_source_raises(self):
         d = date(2026, 6, 6)
         try:
@@ -509,6 +514,7 @@ class TestPreviewUsesRenderer(unittest.TestCase):
                  _patch.object(copilot_module, "AI_CONVERSATIONS_DIR", tmp_path / "journal" / "ai-conversations"), \
                  _patch.object(copilot_module, "LIFE_CLAUDE_RENDERER_HISTORY", history_path), \
                  _patch.object(copilot_module, "export_codex_day_transcript", return_value=""), \
+                 _patch.object(copilot_module, "export_openclaw_day_transcript", return_value=("", 0, 0)), \
                  redirect_stdout(io.StringIO()) as buf:
                 cmd_preview_ai_day(SimpleNamespace(date="2026-06-06"))
 
@@ -547,6 +553,7 @@ class TestWritebackPreservesClaudian(unittest.TestCase):
              _patch.object(copilot_module, "AI_CONVERSATIONS_DIR", tmp_path / "journal" / "ai-conversations"), \
              _patch.object(copilot_module, "LIFE_CLAUDE_RENDERER_HISTORY", history_path), \
              _patch.object(copilot_module, "export_codex_day_transcript", return_value=""), \
+             _patch.object(copilot_module, "export_openclaw_day_transcript", return_value=("", 0, 0)), \
              redirect_stdout(io.StringIO()):
             cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06"))
 

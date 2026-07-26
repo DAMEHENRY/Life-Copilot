@@ -109,7 +109,7 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot analysis of a diary | `What Life Copilot Said` | `writeback-journal` |
 | Next-day execution suggestion | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / Life Claude Renderer daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / Life Claude Renderer / OpenClaw-Kai daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `writeback-memory` |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |

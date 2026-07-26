@@ -23,7 +23,7 @@
 | 概念 | 路径 |
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,life-claude-renderer}-trace.md` |
+| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,life-claude-renderer,openclaw}-trace.md` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
@@ -60,6 +60,7 @@
   `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <file>`
 - 原始对话归档：
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
+  OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
 - Diary 分析：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：

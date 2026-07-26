@@ -58,6 +58,10 @@ AI_CONVERSATIONS_DIR = JOURNAL_DIR / "ai-conversations"
 CLAUDIAN_SESSIONS_DIR = ROOT / ".claudian" / "sessions"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects" / "-Users-henry-Library-Mobile-Documents-iCloud-md-obsidian-Documents-Life"
 LIFE_CLAUDE_RENDERER_HISTORY = ROOT / ".obsidian" / "plugins" / "life-claude-renderer" / "history.json"
+OPENCLAW_SSH_HOST = os.environ.get("LIFE_OPENCLAW_SSH_HOST", "mechrevo")
+OPENCLAW_WSL_DISTRO = os.environ.get("LIFE_OPENCLAW_WSL_DISTRO", "Ubuntu")
+OPENCLAW_WSL_USER = os.environ.get("LIFE_OPENCLAW_WSL_USER", "henry")
+OPENCLAW_SESSIONS_DIR = "/home/henry/.openclaw/agents/main/sessions"
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -270,8 +274,11 @@ def ai_conversation_dir_for_date(d: date) -> Path:
 
 
 def ai_trace_path_for_date(d: date, source: str) -> Path:
-    if source not in {"codex", "claudian", "life-claude-renderer"}:
-        raise ValueError(f"Unsupported source: {source}. Use 'codex', 'claudian', or 'life-claude-renderer'.")
+    if source not in {"codex", "claudian", "life-claude-renderer", "openclaw"}:
+        raise ValueError(
+            f"Unsupported source: {source}. "
+            "Use 'codex', 'claudian', 'life-claude-renderer', or 'openclaw'."
+        )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
 
@@ -1180,6 +1187,157 @@ def export_life_claude_renderer_day_transcript(
     session_blocks.sort(key=lambda x: x[0])
     blocks = [block for _, block in session_blocks]
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
+
+
+class OpenClawImportUnavailable(RuntimeError):
+    """Raised when the read-only Windows/OpenClaw source cannot be reached."""
+
+
+def read_openclaw_remote_text(remote_path: str, timeout: int = 12) -> str:
+    """Read one OpenClaw file from Windows/WSL over Tailscale SSH.
+
+    The operation is deliberately read-only: it invokes ``cat`` for a fixed
+    WSL path and never writes to the Windows host.
+    """
+    command = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=6",
+        OPENCLAW_SSH_HOST,
+        "wsl.exe",
+        "-d", OPENCLAW_WSL_DISTRO,
+        "-u", OPENCLAW_WSL_USER,
+        "--",
+        "cat",
+        remote_path,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OpenClawImportUnavailable(str(exc)) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"ssh exited {result.returncode}"
+        raise OpenClawImportUnavailable(detail)
+    return result.stdout
+
+
+def openclaw_message_text(content: object) -> str:
+    """Return visible message text while excluding thinking and tool payloads."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: List[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") not in {"text", "input_text"}:
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts).strip()
+
+
+def export_openclaw_session_transcript(
+    session_jsonl: str,
+    d: date,
+    user_name: str = "Henry",
+    assistant_name: str = "Kai",
+) -> Tuple[str, int]:
+    """Export visible user/assistant messages for one OpenClaw session and day."""
+    lines: List[str] = []
+    last_visible_message: Optional[Tuple[str, str]] = None
+    for raw in session_jsonl.splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") != "message":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        ts = str(record.get("timestamp") or "")
+        if not ts or timestamp_to_local_date(ts) != d:
+            continue
+        text = openclaw_message_text(message.get("content"))
+        if not text:
+            continue
+        visible_message = (role, text)
+        if visible_message == last_visible_message:
+            continue
+        last_visible_message = visible_message
+        speaker = user_name if role == "user" else assistant_name
+        lines.append(f"[{format_chat_timestamp(ts)}] {speaker}: {text}")
+    return "\n\n".join(lines).rstrip() + ("\n" if lines else ""), len(lines)
+
+
+def export_openclaw_day_transcript(
+    d: date,
+    user_name: str = "Henry",
+    assistant_name: str = "Kai",
+) -> Tuple[str, int, int]:
+    """Read direct Telegram sessions from Windows and build a daily Kai trace.
+
+    Group/heartbeat sessions and explicit test sessions are excluded by using
+    only ``agent:main:telegram:direct:*`` entries in OpenClaw's session index.
+    """
+    index_path = f"{OPENCLAW_SESSIONS_DIR}/sessions.json"
+    try:
+        index = json.loads(read_openclaw_remote_text(index_path))
+    except json.JSONDecodeError as exc:
+        raise OpenClawImportUnavailable("OpenClaw sessions.json is malformed") from exc
+    if not isinstance(index, dict):
+        raise OpenClawImportUnavailable("OpenClaw sessions.json is not an object")
+
+    session_ids: List[str] = []
+    for key, metadata in index.items():
+        if not isinstance(key, str) or not key.startswith("agent:main:telegram:direct:"):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        session_id = metadata.get("sessionId")
+        if isinstance(session_id, str) and session_id and session_id not in session_ids:
+            session_ids.append(session_id)
+
+    blocks: List[str] = []
+    message_count = 0
+    for session_id in session_ids:
+        session_path = f"{OPENCLAW_SESSIONS_DIR}/{session_id}.jsonl"
+        try:
+            raw = read_openclaw_remote_text(session_path)
+        except OpenClawImportUnavailable:
+            continue
+        transcript, count = export_openclaw_session_transcript(
+            raw,
+            d,
+            user_name=user_name,
+            assistant_name=assistant_name,
+        )
+        if not transcript:
+            continue
+        message_count += count
+        blocks.append(f"### Kai / Telegram Session {session_id}\n\n{transcript.strip()}")
+
+    return (
+        "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""),
+        message_count,
+        len(blocks),
+    )
 
 
 def split_markdown_sections(text: str) -> List[Tuple[str, str]]:
@@ -2218,11 +2376,19 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     codex_session_count = codex_transcript.count("### Codex Thread ") if codex_transcript else 0
 
     renderer_transcript, renderer_msg_count, renderer_session_count = export_life_claude_renderer_day_transcript(target)
+    openclaw_warning = ""
+    try:
+        openclaw_transcript, openclaw_msg_count, openclaw_session_count = export_openclaw_day_transcript(target)
+    except OpenClawImportUnavailable as exc:
+        openclaw_transcript, openclaw_msg_count, openclaw_session_count = "", 0, 0
+        openclaw_warning = str(exc)
 
     codex_path = ai_trace_path_for_date(target, "codex")
     renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
+    openclaw_path = ai_trace_path_for_date(target, "openclaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
+    openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
     print(f"=== AI Day Preview: {target.isoformat()} ===")
     print()
@@ -2247,12 +2413,24 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
 
     print()
 
+    if openclaw_transcript:
+        print(f"  OpenClaw trace file:             {openclaw_path.relative_to(ROOT)}")
+        print(f"  OpenClaw Telegram sessions:      {openclaw_session_count}")
+        print(f"  OpenClaw Telegram messages:      {openclaw_msg_count}")
+        print(f"  Journal wikilink:                - {openclaw_link}：Kai / Telegram conversations.")
+    elif openclaw_warning:
+        print(f"  OpenClaw:                        (unavailable — {openclaw_warning})")
+    else:
+        print("  OpenClaw:                        (no direct Telegram messages for this date)")
+
+    print()
+
     if jp.exists():
         print(f"  Journal file:                    {jp.relative_to(ROOT)} (exists)")
     else:
         print(f"  Journal file:                    {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
 
-    if not codex_transcript and not renderer_transcript:
+    if not codex_transcript and not renderer_transcript and not openclaw_transcript:
         print("\n  No AI conversations found for this date.")
 
 
@@ -2391,14 +2569,24 @@ def writeback_ai_day(
             codex_transcript, f"Codex trace for {target.isoformat()}"
         )
     renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
+    try:
+        openclaw_transcript, _, _ = export_openclaw_day_transcript(target)
+    except OpenClawImportUnavailable as exc:
+        openclaw_transcript = ""
+        print(f"  warning: OpenClaw unavailable; skipped Kai / Telegram trace ({exc})")
 
-    if not codex_transcript and not renderer_transcript:
-        raise ValueError(f"No AI conversations (Codex or Life Claude Renderer) found for date: {target.isoformat()}")
+    if not codex_transcript and not renderer_transcript and not openclaw_transcript:
+        raise ValueError(
+            "No AI conversations (Codex, Life Claude Renderer, or OpenClaw) "
+            f"found for date: {target.isoformat()}"
+        )
 
     codex_path = ai_trace_path_for_date(target, "codex")
     renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
+    openclaw_path = ai_trace_path_for_date(target, "openclaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
+    openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
     # Write Codex trace file
     if codex_transcript:
@@ -2432,6 +2620,22 @@ def writeback_ai_day(
         write_text(renderer_path, renderer_content)
         print(f"  wrote: {renderer_path.relative_to(ROOT)}")
 
+    if openclaw_transcript:
+        openclaw_content = "\n".join([
+            "---",
+            f"date: {target.isoformat()}",
+            "source: openclaw",
+            "channel: telegram",
+            "generated_by: scripts/copilot.py writeback-ai-day",
+            "---",
+            "",
+            f"# {target.isoformat()} Kai / Telegram Trace",
+            "",
+            openclaw_transcript,
+        ])
+        write_text(openclaw_path, openclaw_content)
+        print(f"  wrote: {openclaw_path.relative_to(ROOT)}")
+
     # Normalize generated wikilinks so retries and concurrent sessions cannot
     # produce more than one bullet for a source/day.
     journal_text = read_text(jp)
@@ -2446,6 +2650,12 @@ def writeback_ai_day(
             journal_text,
             renderer_link,
             "Obsidian-rendered Claude Code conversations.",
+        )
+    if openclaw_transcript:
+        journal_text = ensure_single_from_kai_link(
+            journal_text,
+            openclaw_link,
+            "Kai / Telegram conversations.",
         )
     write_text(jp, journal_text)
     print(f"  updated: {jp.relative_to(ROOT)}")
@@ -2469,6 +2679,7 @@ def writeback_ai_day(
         "journal": str(jp),
         "codex_trace": str(codex_path) if codex_transcript else "",
         "renderer_trace": str(renderer_path) if renderer_transcript else "",
+        "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
         "fallback_used": fallback_used,
     }
 

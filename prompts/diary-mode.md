@@ -29,7 +29,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 # Context & Evidence Rules
 
 **要读的文件（按顺序）：**
-0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex 和 Life Claude Renderer 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引；若日记文件不存在或当天无 AI conversations，说明后跳过。
+0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex、Life Claude Renderer，以及通过 Tailscale SSH 只读取得的 Windows OpenClaw/Kai Telegram 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引。OpenClaw/Kai 是必需证据源：不可达时先修复或重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。若日记文件不存在，说明后跳过；若当天确实没有 AI conversations，零消息是正常结果。
 0.5. 跟读当日 trace，提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
 2. `journal/memory.md`（长期记忆，`Active Hypotheses` 区块优先）
@@ -61,8 +61,8 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 - 不得把推断写成已证实事实；若有不确定性，要在语气中体现，或给出验证方向。
 
 **💬 From Kai 证据层：**
-- `## 💬 From Kai` 是当天 AI 原始对话流的索引层。它包含指向每日 AI trace 文件的 wikilink，例如 `[[2026-06-01-codex-trace]]` 和 `[[2026-06-01-life-claude-renderer-trace]]`。
-- 完整的 Codex 和 Life Claude Renderer 对话记录存放在 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件中，由 `writeback-ai-day` 自动归档。Telegram/Kai 对话仍可由用户手动粘贴到此 section。历史 `*-claudian-trace.md` 文件是旧版产物，保持不动。
+- `## 💬 From Kai` 是当天 AI 原始对话流的索引层。它包含指向每日 AI trace 文件的 wikilink，例如 `[[2026-06-01-codex-trace]]`、`[[2026-06-01-life-claude-renderer-trace]]` 和 `[[2026-06-01-openclaw-trace]]`。
+- 完整的 Codex、Life Claude Renderer 和 Windows OpenClaw/Kai Telegram 对话记录存放在 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件中，由 `writeback-ai-day` 自动归档。OpenClaw 导入只读取 Telegram 私聊中的 Henry/Kai 可见正文，过滤 thinking、tool logs、heartbeat 和测试会话。历史 `*-claudian-trace.md` 文件保持不动。
 - 分析时需跟读 wikilink 读取完整 trace 文件，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Life Claude Renderer 当场反照了什么、晚上日记正文又如何重构这一天。
 - 不要把 AI 的回答直接复述成夜间分析；夜间分析要做二阶工作：提炼主线、校验 AI 的判断、补本地历史证据、指出对话流里反复出现的结构。
 - 如果 AI 在 trace 文件里声称”找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
