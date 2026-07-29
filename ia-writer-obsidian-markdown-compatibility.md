@@ -21,7 +21,7 @@ Prefer these forms:
 | Inline and fenced code | Backticks and triple-backtick fences |
 | Tables | Pipe tables with one physical line per row |
 | Footnotes | `Text[^1]` plus a separate `[^1]: Note` definition |
-| Math | `$...$` and `$$...$$` |
+| Math | `$...$` and `$$...$$`, with delimiters touching their contents |
 | Tags | `#diary` or another no-space hashtag |
 | Metadata | Simple YAML frontmatter between `---` lines |
 | External links | `[label](https://example.com)` |
@@ -30,6 +30,32 @@ Prefer these forms:
 | Other local files | `[label](relative/path%20with%20spaces.ext)` |
 
 For nested lists, use four spaces. Use a blank line between structurally different blocks when it improves parser consistency.
+
+## Math Rules
+
+iA Writer uses KaTeX and requires dollar-sign math delimiters to touch their contents. Obsidian also accepts this form, so use:
+
+```markdown
+Inline: $x+y$
+
+Display: $$x+y$$
+```
+
+Do not use Obsidian's common delimiter-on-separate-lines form in new reader-facing files:
+
+```markdown
+$$
+x+y
+$$
+```
+
+For a display equation that should appear on multiple visual lines, keep the Markdown source on one physical line and express the breaks inside an `aligned` environment:
+
+```markdown
+$$\begin{aligned}\text{数据} &= \text{世界行为} \\ &+ \text{测量规则} \\ &+ \text{进入记录的资格}\end{aligned}$$
+```
+
+Keep LaTeX out of headings. CJK text may be placed inside `\text{...}`; its exact typeface comes from the system-font fallback used by the renderer.
 
 ## Wikilink Rules
 

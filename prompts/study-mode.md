@@ -93,7 +93,7 @@ When a reusable learning question appears, format links as follows:
 - **Do not use Markdown tables** — `[[target|alias]]` contains pipes and breaks CLI/table renderers.
 - One file may answer many different questions.
 - One question may point to multiple files: prefer one Primary link plus optional Supporting links.
-- Inline math: `$...$`, display math: `$$...$$`. No LaTeX in headings.
+- Inline math: `$...$`, display math: `$$...$$`. Delimiters must touch their contents, and display-math source must stay on one physical line; use `$$\begin{aligned}...\end{aligned}$$` for visual line breaks. No LaTeX in headings.
 
 **Examples:**
 ```markdown
@@ -141,7 +141,7 @@ All artifacts should:
 
 - Default to concise, execution-focused output. Avoid excessive psychological elaboration.
 - **Proactive wikilinks:** Actively use `[[document-name]]` to link existing files in your output to build a rich Obsidian Graph View. Only link documents that actually exist.
-- **Obsidian compatibility:** All Markdown written in this mode must render cleanly in Obsidian preview. Use Obsidian-compatible Markdown only: wikilinks and callouts are encouraged, HTML is disallowed, inline math must use `$...$`, display math must use `$$...$$`, and LaTeX must not appear inside headings.
+- **iA Writer + Obsidian compatibility:** All reader-facing Markdown written in this mode must render cleanly in both apps. Use basic wikilinks and standard Markdown rather than app-specific callouts or HTML. Inline math must use `$...$`; display math must use `$$...$$` with the delimiters touching their contents on one physical source line. LaTeX must not appear inside headings.
 - **File write**: Study artifacts go to the specialization's artifact directory. Other responses stay in chat unless the user explicitly asks to save.
 
 ## Decision Rules

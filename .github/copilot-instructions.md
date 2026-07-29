@@ -134,6 +134,7 @@ python3 scripts/life_copilot.py build-index
 - 日期引用统一使用 `[[YYYY-MM-DD]]` wikilink 格式；普通内部链接使用 `[[文档名]]` 或 `[[文档名|显示文字]]`
 - 重要提示/警告/建议使用小标题、粗体引导句或普通 blockquote，不新增 Obsidian Callout（`> [!info]`）
 - 图片使用标准 Markdown 格式 `![alt](relative/path%20with%20spaces.ext)`，不新增 `![[...]]` 或 iA Content Block
+- 数学公式的分隔符必须紧贴内容：使用 `$x$` 和 `$$x$$`，不要把 `$$` 放在单独的行上；需要多行视觉排版时，将 `$$\begin{aligned}...\end{aligned}$$` 保持在同一物理行
 - 不新增 block reference、`%%` comment、Dataview/plugin query、`{{TOC}}` 或 `+++` page break
 - 禁止使用任何 HTML 标签
 - 代码块使用标准三反引号格式并注明语言
