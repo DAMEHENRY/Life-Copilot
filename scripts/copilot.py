@@ -1193,7 +1193,11 @@ class OpenClawImportUnavailable(RuntimeError):
     """Raised when the read-only Windows/OpenClaw source cannot be reached."""
 
 
-def read_openclaw_remote_text(remote_path: str, timeout: int = 12) -> str:
+def read_openclaw_remote_text(
+    remote_path: str,
+    timeout: int = 15,
+    attempts: int = 3,
+) -> str:
     """Read one OpenClaw file from Windows/WSL over Tailscale SSH.
 
     The operation is deliberately read-only: it invokes ``cat`` for a fixed
@@ -1203,6 +1207,9 @@ def read_openclaw_remote_text(remote_path: str, timeout: int = 12) -> str:
         "ssh",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=6",
+        "-o", "ConnectionAttempts=2",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
         OPENCLAW_SSH_HOST,
         "wsl.exe",
         "-d", OPENCLAW_WSL_DISTRO,
@@ -1211,22 +1218,31 @@ def read_openclaw_remote_text(remote_path: str, timeout: int = 12) -> str:
         "cat",
         remote_path,
     ]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise OpenClawImportUnavailable(str(exc)) from exc
-    if result.returncode != 0:
-        detail = result.stderr.strip() or f"ssh exited {result.returncode}"
-        raise OpenClawImportUnavailable(detail)
-    return result.stdout
+    failures: List[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(str(exc))
+        else:
+            if result.returncode == 0:
+                return result.stdout
+            failures.append(result.stderr.strip() or f"ssh exited {result.returncode}")
+        if attempt < attempts:
+            time.sleep(attempt)
+    detail = failures[-1] if failures else "unknown SSH failure"
+    raise OpenClawImportUnavailable(
+        f"cannot read {remote_path} from {OPENCLAW_SSH_HOST} "
+        f"after {attempts} attempts: {detail}"
+    )
 
 
 def openclaw_message_text(content: object) -> str:
@@ -1318,10 +1334,7 @@ def export_openclaw_day_transcript(
     message_count = 0
     for session_id in session_ids:
         session_path = f"{OPENCLAW_SESSIONS_DIR}/{session_id}.jsonl"
-        try:
-            raw = read_openclaw_remote_text(session_path)
-        except OpenClawImportUnavailable:
-            continue
+        raw = read_openclaw_remote_text(session_path)
         transcript, count = export_openclaw_session_transcript(
             raw,
             d,
@@ -2380,6 +2393,13 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     try:
         openclaw_transcript, openclaw_msg_count, openclaw_session_count = export_openclaw_day_transcript(target)
     except OpenClawImportUnavailable as exc:
+        if not getattr(args, "allow_missing_openclaw", False):
+            raise OpenClawImportUnavailable(
+                "OpenClaw/Kai is required for AI-day import. Restore the "
+                "Tailscale/SSH link, or explicitly pass --allow-missing-openclaw "
+                "for an intentionally incomplete preview. "
+                f"Cause: {exc}"
+            ) from exc
         openclaw_transcript, openclaw_msg_count, openclaw_session_count = "", 0, 0
         openclaw_warning = str(exc)
 
@@ -2525,6 +2545,7 @@ def writeback_ai_day(
     *,
     create_journal: bool = False,
     hook_payload: Optional[dict] = None,
+    allow_missing_openclaw: bool = False,
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn."""
     jp = journal_path_for_date(target)
@@ -2572,8 +2593,19 @@ def writeback_ai_day(
     try:
         openclaw_transcript, _, _ = export_openclaw_day_transcript(target)
     except OpenClawImportUnavailable as exc:
+        if not allow_missing_openclaw:
+            raise OpenClawImportUnavailable(
+                "OpenClaw/Kai is required for AI-day writeback; no partial "
+                "writeback was performed. Restore the Tailscale/SSH link, or "
+                "explicitly pass --allow-missing-openclaw if the incomplete "
+                "archive is intentional. "
+                f"Cause: {exc}"
+            ) from exc
         openclaw_transcript = ""
-        print(f"  warning: OpenClaw unavailable; skipped Kai / Telegram trace ({exc})")
+        print(
+            "  warning: OpenClaw unavailable; intentionally skipped Kai / "
+            f"Telegram trace because --allow-missing-openclaw was set ({exc})"
+        )
 
     if not codex_transcript and not renderer_transcript and not openclaw_transcript:
         raise ValueError(
@@ -2689,6 +2721,9 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
     result = writeback_ai_day(
         target,
         create_journal=bool(getattr(args, "create_journal", False)),
+        allow_missing_openclaw=bool(
+            getattr(args, "allow_missing_openclaw", False)
+        ),
     )
     print(result["journal"])
 
@@ -3526,6 +3561,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("preview-ai-day")
     s.add_argument("--date", required=True)
+    s.add_argument(
+        "--allow-missing-openclaw",
+        action="store_true",
+        help="Allow an intentionally incomplete preview when OpenClaw/Kai is unreachable.",
+    )
     s.set_defaults(func=cmd_preview_ai_day)
 
     s = sub.add_parser("writeback-ai-day")
@@ -3534,6 +3574,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--create-journal",
         action="store_true",
         help="Create a missing diary from the daily template before archiving.",
+    )
+    s.add_argument(
+        "--allow-missing-openclaw",
+        action="store_true",
+        help="Allow an intentionally incomplete writeback when OpenClaw/Kai is unreachable.",
     )
     s.set_defaults(func=cmd_writeback_ai_day)
 

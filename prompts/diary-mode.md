@@ -29,7 +29,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 # Context & Evidence Rules
 
 **要读的文件（按顺序）：**
-0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex、Life Claude Renderer，以及通过 Tailscale SSH 只读取得的 Windows OpenClaw/Kai Telegram 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引。OpenClaw/Kai 是必需证据源：不可达时先修复或重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。若日记文件不存在，说明后跳过；若当天确实没有 AI conversations，零消息是正常结果。
+0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex、Life Claude Renderer，以及通过 Tailscale SSH 只读取得的 Windows OpenClaw/Kai Telegram 对话归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引。OpenClaw/Kai 是必需证据源：若 Windows/OpenClaw 暂时不可达，停止分析并修复或重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。若日记文件不存在，说明后跳过；若当天确实没有 OpenClaw 私聊消息，零消息是正常结果。
 0.5. 跟读当日 trace，提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
 2. `journal/memory.md`（长期记忆，`Active Hypotheses` 区块优先）

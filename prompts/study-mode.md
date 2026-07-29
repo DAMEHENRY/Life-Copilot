@@ -89,7 +89,7 @@ Use `python3 scripts/copilot.py quant-question-link --question "..." [--xp XP-XX
 
 When a reusable learning question appears, format links as follows:
 
-- Use bullets, callouts (`> [!tip]`), or definition lists for question links.
+- Use bullets or plain blockquotes for question links. Do not add Obsidian callouts.
 - **Do not use Markdown tables** — `[[target|alias]]` contains pipes and breaks CLI/table renderers.
 - One file may answer many different questions.
 - One question may point to multiple files: prefer one Primary link plus optional Supporting links.

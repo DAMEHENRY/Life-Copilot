@@ -1,5 +1,5 @@
 ## ⚡️ Legacy Quant Schedule: {{weekday}}, {{date}}
-> [!note] Legacy Template
+> **Legacy Template**
 > Used only by `scripts/copilot.py update-schedule`. v4.3 default schedule is a conversational projection (read `life-board.md` → pick next artifact). This template is for legacy Quant training or explicit `--target-date` manual override. Placeholders `{{xp-targets}}`, `{{xp-morning}}`, `{{xp-afternoon}}` are legacy Quant XP placeholders.
 *Focus: {{xp-targets}}*
 

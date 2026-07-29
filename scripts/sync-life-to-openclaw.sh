@@ -6,11 +6,20 @@ readonly REMOTE_HOST="mechrevo"
 readonly REMOTE_DIR="/home/henry/.life-sync-staging/"
 readonly LOCK_DIR="/tmp/openclaw-life-sync.lock"
 readonly STATUS_FILE="/tmp/openclaw-life-last-sync.txt"
+readonly DURABLE_STATUS_FILE="/Users/henry/Library/Logs/openclaw-life-sync.status"
+readonly SSH_COMMAND="/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=3 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   exit 0
 fi
 trap 'rm -f "$STATUS_FILE"; rmdir "$LOCK_DIR"' EXIT
+
+record_failure() {
+  local exit_code=$?
+  /bin/date -u '+failed %Y-%m-%dT%H:%M:%SZ' > "$DURABLE_STATUS_FILE"
+  exit "$exit_code"
+}
+trap record_failure ZERR
 
 /usr/bin/rsync \
   -az \
@@ -37,6 +46,7 @@ trap 'rm -f "$STATUS_FILE"; rmdir "$LOCK_DIR"' EXIT
   --include='*.jsonl' \
   --include='*.txt' \
   --exclude='*' \
+  -e "$SSH_COMMAND" \
   --rsync-path='wsl -d Ubuntu -u henry -- rsync' \
   "$SOURCE_DIR" \
   "$REMOTE_HOST:$REMOTE_DIR"
@@ -46,6 +56,9 @@ trap 'rm -f "$STATUS_FILE"; rmdir "$LOCK_DIR"' EXIT
 /usr/bin/rsync \
   -az \
   --timeout=60 \
+  -e "$SSH_COMMAND" \
   --rsync-path='wsl -d Ubuntu -u henry -- rsync' \
   "$STATUS_FILE" \
   "$REMOTE_HOST:${REMOTE_DIR}.last-sync"
+
+/bin/date -u '+ok %Y-%m-%dT%H:%M:%SZ' > "$DURABLE_STATUS_FILE"

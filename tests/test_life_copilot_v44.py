@@ -115,6 +115,11 @@ class TestFinalDailyArchive(unittest.TestCase):
                 "export_life_claude_renderer_day_transcript",
                 return_value=("", 0, 0),
             ),
+            patch.object(
+                copilot,
+                "export_openclaw_day_transcript",
+                return_value=("", 0, 0),
+            ),
         ]
         for patcher in self.patchers:
             patcher.start()

@@ -132,6 +132,11 @@ python3 scripts/copilot.py writeback-memory --date YYYY-MM-DD --kind "pattern" -
 python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --content "..."
 ```
 
+`writeback-ai-day` and `preview-ai-day` require the Windows OpenClaw/Kai
+source to be reachable over Tailscale SSH. They fail before writing a partial
+archive if that source cannot be read. Use `--allow-missing-openclaw` only when
+an intentionally incomplete archive has been explicitly accepted.
+
 `append-insight` only writes `journal/insights.jsonl`. If the same idea should also become durable memory, run `writeback-memory` separately.
 
 Low-level Codex transcript commands exist for manual recovery or precise control:
