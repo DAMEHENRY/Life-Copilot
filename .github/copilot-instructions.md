@@ -128,15 +128,15 @@ python3 scripts/life_copilot.py build-index
 - 涉及自伤/自杀风险时，立即进入安全响应，暂停常规分析。
 - 每次进入某个模式后，必须先遵循该模式设定文件，再生成回复。
 
-## Obsidian Output Rules
+## iA Writer + Obsidian Output Rules
 
-所有输出必须使用 Obsidian 兼容 Markdown 语法：
-- 日期引用统一使用 `[[YYYY-MM-DD]]` wikilink 格式
-- 重要提示/警告/建议使用 Obsidian Callout 格式：
-  - `> [!info] 标题` — 中性信息
-  - `> [!tip] 标题` — 建议/技巧
-  - `> [!warning] 标题` — 风险/注意
-  - `> [!important] 标题` — 关键事项
+所有新建或实质改写的 reader-facing Markdown 默认使用 iA Writer 与 Obsidian 的语法交集：
+- 日期引用统一使用 `[[YYYY-MM-DD]]` wikilink 格式；普通内部链接使用 `[[文档名]]` 或 `[[文档名|显示文字]]`
+- 重要提示/警告/建议使用小标题、粗体引导句或普通 blockquote，不新增 Obsidian Callout（`> [!info]`）
+- 图片使用标准 Markdown 格式 `![alt](relative/path%20with%20spaces.ext)`，不新增 `![[...]]` 或 iA Content Block
+- 不新增 block reference、`%%` comment、Dataview/plugin query、`{{TOC}}` 或 `+++` page break
 - 禁止使用任何 HTML 标签
 - 代码块使用标准三反引号格式并注明语言
 - 任务列表使用 `- [ ]` / `- [x]` 格式
+- 历史日记、原始 trace、外部导入原文和 archive 不做批量改写；必须使用单端语法时提供文字 fallback
+- 完整规范见 `ia-writer-obsidian-markdown-compatibility.md`

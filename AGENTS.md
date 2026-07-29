@@ -23,7 +23,7 @@
 | 概念 | 路径 |
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,life-claude-renderer}-trace.md` |
+| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,life-claude-renderer,openclaw}-trace.md` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
@@ -46,7 +46,10 @@
 ## 通用运行护栏
 
 - 日记 / Chat 用简体中文；Quant / Study 默认英文。
-- Obsidian 文本使用 wikilink、callout 和 Markdown；不写 HTML。只链接确实存在的文件。
+- 新建或实质改写的 reader-facing Markdown 默认使用 iA Writer 与 Obsidian 的交集；完整规范见 [[ia-writer-obsidian-markdown-compatibility]]。
+- 优先使用 ATX 标题、空行分段、普通强调、列表、任务框、普通 blockquote、fenced code、pipe table、reference-style footnote、`$...$` / `$$...$$`、`#tag`、简单 YAML metadata、标准 Markdown 图片及 `[[note]]` / `[[note|label]]`。
+- 默认不新增 Obsidian callout、`![[...]]` embed、block reference、`%%` comment、Dataview/plugin query、iA Content Block、`{{TOC}}`、`+++` page break或 HTML。必须使用单端语法时提供文字 fallback。
+- 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
 - `journal/insights.jsonl` 是检索索引，不是主要用户可见引用；历史结论优先引用 `[[YYYY-MM-DD]]`。
 - 外部搜索只校验时效性事实；明确区分事实、他方主张、传言与推断。
@@ -60,6 +63,7 @@
   `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <file>`
 - 原始对话归档：
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
+  OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
 - Diary 分析：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：

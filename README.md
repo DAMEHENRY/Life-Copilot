@@ -109,7 +109,7 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot analysis of a diary | `What Life Copilot Said` | `writeback-journal` |
 | Next-day execution suggestion | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / Life Claude Renderer daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / Life Claude Renderer / OpenClaw-Kai daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `writeback-memory` |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
@@ -131,6 +131,11 @@ python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD -
 python3 scripts/copilot.py writeback-memory --date YYYY-MM-DD --kind "pattern" --content "..."
 python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --content "..."
 ```
+
+`writeback-ai-day` and `preview-ai-day` require the Windows OpenClaw/Kai
+source to be reachable over Tailscale SSH. They fail before writing a partial
+archive if that source cannot be read. Use `--allow-missing-openclaw` only when
+an intentionally incomplete archive has been explicitly accepted.
 
 `append-insight` only writes `journal/insights.jsonl`. If the same idea should also become durable memory, run `writeback-memory` separately.
 

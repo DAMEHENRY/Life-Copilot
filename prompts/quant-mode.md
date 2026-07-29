@@ -74,7 +74,7 @@ When a reusable Quant learning question appears, **search existing quant files b
    → Create a new small note only then, preferably under `quant/arsenal/` using the existing naming style (`xp-XX-topic.md`).
 
 **Link format rules:**
-- Use bullets, callouts (`> [!tip]`), or definition lists for question links.
+- Use bullets or plain blockquotes for question links. Do not add Obsidian callouts.
 - **Do not use Markdown tables** — `[[target|alias]]` contains pipes and breaks CLI/table renderers.
 - One file may answer many different questions.
 - One question may point to multiple files: prefer one Primary link plus optional Supporting links.
