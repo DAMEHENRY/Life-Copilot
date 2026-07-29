@@ -47,7 +47,7 @@
 
 - 日记 / Chat 用简体中文；Quant / Study 默认英文。
 - 新建或实质改写的 reader-facing Markdown 默认使用 iA Writer 与 Obsidian 的交集；完整规范见 [[ia-writer-obsidian-markdown-compatibility]]。
-- 优先使用 ATX 标题、空行分段、普通强调、列表、任务框、普通 blockquote、fenced code、pipe table、reference-style footnote、`$...$` / `$$...$$`、`#tag`、简单 YAML metadata、标准 Markdown 图片及 `[[note]]` / `[[note|label]]`。
+- 优先使用 ATX 标题、空行分段、普通强调、列表、任务框、普通 blockquote、fenced code、pipe table、reference-style footnote、`$...$` / `$$...$$`、`#tag`、简单 YAML metadata、标准 Markdown 图片及 `[[note]]` / `[[note|label]]`。数学分隔符必须紧贴内容：行内写成 `$x$`，块级写成 `$$x$$`，不要让 `$$` 单独占行；需要视觉换行时，在同一物理行内使用 `$$\begin{aligned}...\end{aligned}$$`。
 - 默认不新增 Obsidian callout、`![[...]]` embed、block reference、`%%` comment、Dataview/plugin query、iA Content Block、`{{TOC}}`、`+++` page break或 HTML。必须使用单端语法时提供文字 fallback。
 - 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
