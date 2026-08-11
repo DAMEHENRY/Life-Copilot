@@ -5,7 +5,7 @@ Life Copilot — lean orchestration utilities.
 Only structural write commands that are unsafe for the model to do freehand:
 writeback-journal, writeback-thought, writeback-chat-capture,
 writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
-finalize-ai-day, writeback-memory, append-insight, compact-memory,
+finalize-ai-day, writeback-memory, maintain-memory, append-insight, compact-memory,
 audit-system-rules, promote-system-rule, rollback-system-rule, quant-mission,
 quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
 """
@@ -2797,6 +2797,229 @@ def cmd_writeback_memory(args: argparse.Namespace) -> None:
     print(str(MEMORY_FILE))
 
 
+def _memory_section_bounds(text: str, section: str) -> Tuple[int, int]:
+    pattern = re.compile(rf"(?m)^## {re.escape(section)}\s*$")
+    match = pattern.search(text)
+    if not match:
+        raise ValueError(f"Memory section not found: {section}")
+    body_start = match.end()
+    next_heading = re.search(r"(?m)^## ", text[body_start:])
+    body_end = body_start + next_heading.start() if next_heading else len(text)
+    return body_start, body_end
+
+
+def _replace_memory_section_body(text: str, section: str, body: str) -> str:
+    start, end = _memory_section_bounds(text, section)
+    normalized = "\n" + body.strip() + "\n\n"
+    return text[:start] + normalized + text[end:].lstrip("\n")
+
+
+def _find_memory_entry_block(body: str, match_entry: str) -> Optional[Tuple[int, int, List[str]]]:
+    """Find one top-level memory bullet and its continuation lines."""
+    lines = body.splitlines()
+    expected = match_entry.strip()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped not in {f"- {expected}", f"* {expected}"}:
+            continue
+        end = index + 1
+        while end < len(lines):
+            candidate = lines[end]
+            if re.match(r"^[-*]\s+\[\d{4}-\d{2}-\d{2}\]", candidate.strip()):
+                break
+            end += 1
+        return index, end, lines[index:end]
+    return None
+
+
+def _remove_memory_entry(body: str, match_entry: str) -> Tuple[str, List[str]]:
+    found = _find_memory_entry_block(body, match_entry)
+    if not found:
+        raise ValueError(f"Memory entry not found: {match_entry}")
+    start, end, block = found
+    lines = body.splitlines()
+    remaining = lines[:start] + lines[end:]
+    return "\n".join(remaining).strip(), block
+
+
+def _append_memory_entry(body: str, entry: str) -> Tuple[str, bool]:
+    if _find_memory_entry_block(body, entry):
+        return body.strip(), False
+    addition = f"- {entry.strip()}"
+    return (body.rstrip() + "\n" + addition).strip(), True
+
+
+def _archive_memory_block(
+    archive_text: str,
+    block: List[str],
+    target_date: str,
+    action: str,
+    reason: str,
+) -> Tuple[str, bool]:
+    first = block[0].strip()
+    if first.startswith(("- ", "* ")):
+        first = first[2:].strip()
+    marker = f"Archived: [[{target_date}]]; action={action}; reason={reason.strip()}"
+    archived_lines = [f"- {first} ({marker})", *block[1:]]
+    archived_block = "\n".join(archived_lines).strip()
+    if archived_block in archive_text:
+        return archive_text, False
+    base = archive_text.rstrip()
+    if not base:
+        base = "## Legacy Stream (Pre-v2)"
+    return (base + "\n" + archived_block + "\n"), True
+
+
+def _archive_contains_memory_entry(archive_text: str, match_entry: str, action: str) -> bool:
+    expected = match_entry.strip()
+    return any(expected in line and f"action={action}" in line for line in archive_text.splitlines())
+
+
+def _validated_memory_entry(operation: dict, target_date: str) -> str:
+    kind = str(operation.get("kind", "")).strip()
+    content = str(operation.get("content", "")).strip()
+    if not kind or not content:
+        raise ValueError("Memory add/replace/promote operations require kind and content")
+    if "\n" in kind or "\n" in content:
+        raise ValueError("Automatic memory entries must be single-line")
+    if not re.search(r"\[\[\d{4}-\d{2}-\d{2}\]\]", content):
+        raise ValueError("Automatic memory entries require at least one dated wikilink")
+    return f"[{target_date}] {kind}: {content}"
+
+
+def maintain_memory_text(
+    memory_text: str,
+    archive_text: str,
+    manifest: dict,
+    target_date: str,
+) -> Tuple[str, str, List[dict]]:
+    """Apply a validated, compare-and-swap memory maintenance transaction."""
+    original_memory_text = memory_text
+    original_archive_text = archive_text
+    operations = manifest.get("operations") if isinstance(manifest, dict) else None
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("Memory maintenance manifest requires a non-empty operations list")
+
+    memory_text = ensure_memory_sections(memory_text)
+    active_section = "Active Hypotheses (Last 30 Days)"
+    canonical_section = "Canonical Memories"
+    active_start, active_end = _memory_section_bounds(memory_text, active_section)
+    canonical_start, canonical_end = _memory_section_bounds(memory_text, canonical_section)
+    active_body = memory_text[active_start:active_end].strip()
+    canonical_body = memory_text[canonical_start:canonical_end].strip()
+    changes: List[dict] = []
+
+    allowed = {"no-op", "add-active", "replace-active", "promote-canonical", "archive-active"}
+    for raw_operation in operations:
+        if not isinstance(raw_operation, dict):
+            raise ValueError("Each memory maintenance operation must be an object")
+        operation = dict(raw_operation)
+        action = str(operation.get("action", "")).strip()
+        if action not in allowed:
+            raise ValueError(f"Unsupported memory maintenance action: {action}")
+
+        reason = str(operation.get("reason", "")).strip()
+        if action == "no-op":
+            changes.append({"action": action, "changed": False, "reason": reason})
+            continue
+
+        if action == "add-active":
+            entry = _validated_memory_entry(operation, target_date)
+            active_body, changed = _append_memory_entry(active_body, entry)
+            changes.append({"action": action, "changed": changed, "entry": entry})
+            continue
+
+        match_entry = str(operation.get("match", "")).strip()
+        if not match_entry:
+            raise ValueError(f"{action} requires an exact match entry")
+        if not reason:
+            raise ValueError(f"{action} requires a reason")
+
+        replacement = ""
+        destination_body = active_body
+        if action in {"replace-active", "promote-canonical"}:
+            replacement = _validated_memory_entry(operation, target_date)
+            destination_body = canonical_body if action == "promote-canonical" else active_body
+
+        found = _find_memory_entry_block(active_body, match_entry)
+        already_applied = bool(replacement and _find_memory_entry_block(destination_body, replacement))
+        if not found:
+            if already_applied:
+                changes.append({"action": action, "changed": False, "entry": replacement})
+                continue
+            if action == "archive-active" and _archive_contains_memory_entry(
+                archive_text, match_entry, action
+            ):
+                changes.append({"action": action, "changed": False, "entry": match_entry})
+                continue
+            raise ValueError(f"Memory entry not found for {action}: {match_entry}")
+
+        active_body, removed_block = _remove_memory_entry(active_body, match_entry)
+        archive_text, _ = _archive_memory_block(
+            archive_text,
+            removed_block,
+            target_date,
+            action,
+            reason,
+        )
+
+        if action == "replace-active":
+            active_body, _ = _append_memory_entry(active_body, replacement)
+        elif action == "promote-canonical":
+            canonical_body, _ = _append_memory_entry(canonical_body, replacement)
+
+        changes.append({
+            "action": action,
+            "changed": True,
+            "entry": replacement or match_entry,
+        })
+
+    if not any(item.get("changed") for item in changes):
+        return original_memory_text, original_archive_text, changes
+    memory_text = _replace_memory_section_body(memory_text, active_section, active_body)
+    memory_text = _replace_memory_section_body(memory_text, canonical_section, canonical_body)
+    return memory_text, archive_text, changes
+
+
+def cmd_maintain_memory(args: argparse.Namespace) -> None:
+    if not MEMORY_FILE.exists():
+        raise FileNotFoundError(f"Memory file not found: {MEMORY_FILE}")
+    parse_date_str(args.date)
+    manifest_path = Path(args.input_file).expanduser()
+    manifest = json.loads(read_text(manifest_path))
+    original_memory = read_text(MEMORY_FILE)
+    original_archive = read_text(MEMORY_ARCHIVE_FILE) if MEMORY_ARCHIVE_FILE.exists() else ""
+    updated_memory, updated_archive, changes = maintain_memory_text(
+        original_memory,
+        original_archive,
+        manifest,
+        args.date,
+    )
+    result = {
+        "date": args.date,
+        "dry_run": bool(args.dry_run),
+        "changed_operations": sum(1 for item in changes if item.get("changed")),
+        "operations": changes,
+    }
+    if not args.dry_run:
+        memory_changed = updated_memory != original_memory
+        archive_changed = updated_archive != original_archive
+        try:
+            if memory_changed:
+                write_text(MEMORY_FILE, updated_memory)
+            if archive_changed:
+                write_text(MEMORY_ARCHIVE_FILE, updated_archive)
+        except Exception:
+            # Best-effort rollback keeps a failed multi-file transaction from
+            # leaving hot memory and the cold archive out of sync.
+            if memory_changed:
+                write_text(MEMORY_FILE, original_memory)
+            if archive_changed:
+                write_text(MEMORY_ARCHIVE_FILE, original_archive)
+            raise
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_append_insight(args: argparse.Namespace) -> None:
     INSIGHTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not INSIGHTS_FILE.exists():
@@ -3616,6 +3839,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--content", required=True)
     s.add_argument("--section", default="Active Hypotheses (Last 30 Days)")
     s.set_defaults(func=cmd_writeback_memory)
+
+    s = sub.add_parser("maintain-memory")
+    s.add_argument("--date", required=True)
+    s.add_argument("--input-file", required=True)
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_maintain_memory)
 
     s = sub.add_parser("append-insight")
     s.add_argument("--date", required=True)

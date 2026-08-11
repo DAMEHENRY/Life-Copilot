@@ -107,16 +107,16 @@ The most important safety rule is that different kinds of text go to different p
 |---|---|---|
 | Explicit Henry diary continuation (“记一下”) | `Thoughts & Reflections` | `writeback-thought` |
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
-| Copilot analysis of a diary | `What Life Copilot Said` | `writeback-journal` |
-| Next-day execution suggestion | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
+| Copilot's relational response to Henry | `What Life Copilot Said` | `writeback-journal` |
+| Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
 | Codex / Life Claude Renderer / OpenClaw-Kai daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
-| Durable memory | `journal/memory.md` | `writeback-memory` |
+| Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
 
-Do not use `writeback-thought` for Copilot analysis. Do not use `writeback-journal` to imitate Henry's diary voice. Analysis and next-day suggestions must go through separate input files.
+Do not use `writeback-thought` for the Copilot response. Do not use `writeback-journal` to imitate Henry's diary voice. The relational response, memory transaction, and target-day direction use separate input files.
 
-For Diary Mode, these closing steps are default unless Henry explicitly says `dry run`, `only investigate`, or `do not write back`: write today's analysis with `writeback-journal`, audit `inbox/` and propose destinations without moving files, then write the target-day suggestion with `writeback-daily-suggestion` using target-day voice (`today`, not `tomorrow`). The Daily Suggestion input file should contain only the suggestion body; `writeback-daily-suggestion` adds the provenance line itself. Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush.
+For Diary Mode, these closing steps are default unless Henry explicitly says `dry run`, `only investigate`, or `do not write back`: write the person-first response with `writeback-journal`; run autonomous memory maintenance backstage; audit the Life Board and `inbox/`; then write the target-day direction with `writeback-daily-suggestion` using target-day voice (`today`, not `tomorrow`). Memory, Board, inbox, and tool status stay outside `What Life Copilot Said`. The Daily Suggestion input file contains only its body; `writeback-daily-suggestion` adds provenance. Inbox audit runs before Daily Suggestion so completed closure work is not recommended again.
 
 Common commands:
 
@@ -128,6 +128,8 @@ python3 scripts/copilot.py finalize-ai-day --hook-input-file /tmp/hook.json
 python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file /tmp/analysis.md
 python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "标题" --input-file /tmp/thought.md
 python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file /tmp/suggestion.md
+python3 scripts/copilot.py maintain-memory --date YYYY-MM-DD --input-file /tmp/memory-operations.json --dry-run
+python3 scripts/copilot.py maintain-memory --date YYYY-MM-DD --input-file /tmp/memory-operations.json
 python3 scripts/copilot.py writeback-memory --date YYYY-MM-DD --kind "pattern" --content "..."
 python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --content "..."
 ```
@@ -137,7 +139,11 @@ source to be reachable over Tailscale SSH. They fail before writing a partial
 archive if that source cannot be read. Use `--allow-missing-openclaw` only when
 an intentionally incomplete archive has been explicitly accepted.
 
-`append-insight` only writes `journal/insights.jsonl`. If the same idea should also become durable memory, run `writeback-memory` separately.
+Life Copilot maintains durable memory autonomously. Diary closeout always performs a backstage memory audit; Chat, Study, and Quant trigger it only when a clear durable signal appears. A no-op is silent. Actual changes are applied through `maintain-memory`, reread for verification, and reported outside the relational response without asking for line-by-line approval.
+
+`maintain-memory` accepts a JSON object with a non-empty `operations` array. Supported actions are `no-op`, `add-active`, `replace-active`, `promote-canonical`, and `archive-active`. Add/replace/promote entries require a dated evidence wikilink; replace/promote/archive use an exact `match` entry and a `reason`, providing compare-and-swap protection. Always run `--dry-run` before the real transaction. `writeback-memory` remains a low-level manual append command, not the default autonomous path.
+
+`append-insight` only writes `journal/insights.jsonl`. Durable memory and the searchable insight index remain distinct surfaces; do not mirror every memory entry into insights automatically.
 
 Low-level Codex transcript commands exist for manual recovery or precise control:
 
