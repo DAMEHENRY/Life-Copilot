@@ -10,7 +10,6 @@
 ## 💬 From Kai
 
 ## 🧭 Tomorrow Projection Input
-*Low-friction input surface for tomorrow's conversational projection. Not a task list or script gate.*
 - **Tomorrow anchor**:
 - **Context / track**:
 - **Known limits**:

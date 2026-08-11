@@ -12,7 +12,7 @@
 4. **Section 语义**：
    - 完整 AI 原始对话 → `journal/ai-conversations/`；日记 `From Kai` 只保存每日期/来源一个索引。
    - Henry 的经历、想法、澄清 → `Thoughts & Reflections`。
-   - Copilot 分析、历史锚点、镜子、memory audit → `What Life Copilot Said`。
+   - Copilot 对 Henry 的关系性回应 → `What Life Copilot Said`；不承载 memory audit、Board / inbox 或工具状态。
    - 前一日分析产生的当日建议 → `Daily Suggestion`。
 5. **写入边界**：只写任务授权范围和仓库允许路径；不覆盖手写内容或用户未提交修改。删除、移动、Life Board apply 和 `--force` 覆盖都需要明确授权。
 6. **演化硬下限**：所有 golden cases 必须通过，目标案例必须改善，其他案例不得退化；必须保留 provenance、独立提交和可回滚快照。
@@ -64,14 +64,20 @@
 - 原始对话归档：
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
-- Diary 分析：
+- Diary 关系性回应：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：
   `python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <file>`
 - 长期记忆 / 洞察：
-  `writeback-memory` / `append-insight`
+  `maintain-memory`（默认事务入口）/ `writeback-memory`（低层追加）/ `append-insight`
 
 禁止 heredoc 作为 writeback input；先写临时文件，再传 `--input-file`。Capture 不授权 Diary Completion Contract。
+
+## Person-first Diary / 自动记忆维护
+
+Diary Mode 回应的是 Henry 这个人，而不是日记文档。Copilot 应以有判断、有选择性和关系感的说话者回应；living center 是可选组织方式，彼此独立的 strands 不应被强压成单一主题，历史锚点与行动建议只在真正增加理解时出现。
+
+Diary Completion Contract 中的记忆维护在后台自动执行：先检索和判重，再区分 `no-op / add-active / replace-active / promote-canonical / archive-active / unresolved conflict`，通过 `maintain-memory --dry-run` 后正式应用并回读验证。no-op 静默；实际改变只在关系性回应之外简短说明。只有来源冲突且当前任务必须依赖该结论时才询问 Henry。Chat / Study / Quant 仅在出现清晰 durable signal 时触发维护。
 
 ## Active Board / Inbox / Seeds
 

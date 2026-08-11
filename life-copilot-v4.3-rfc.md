@@ -40,9 +40,9 @@ Before changing anything, classify every existing component:
 
 - **Evidence layer**: diary, memory.md, memory-archive.md, insights.jsonl, AI conversation traces. This is the provenance backbone. No change.
 - **Capture layer**: inbox/, Telegram → diary flow, From Kai trace architecture. Still the lowest-friction input path.
-- **Memory governance**: Active Hypotheses → Canonical → Archive lifecycle. Still the right shape.
+- **Memory governance**: Active Hypotheses → Canonical → Archive remains the right shape. The 2026-08-10 calibration makes maintenance autonomous by default: semantic no-op/add/replace/promote/archive decisions happen backstage, actual changes are verified, and relational responses do not carry audit tails.
 - **Writeback semantics**: diary writeback boundaries (user text vs Copilot analysis vs AI trace). Still correct.
-- **Scripts**: `copilot.py` core commands (writeback, append-insight, compact-memory, quant-mission, quant-question-link, legacy schedule/state utilities). Retirement candidates below.
+- **Scripts**: `copilot.py` core commands (writeback, transactional `maintain-memory`, append-insight, compact-memory, quant-mission, quant-question-link, legacy schedule/state utilities). Retirement candidates below.
 - **AI trace architecture**: Codex/Claudian trace files with wikilink index in diary. Proven and stable.
 
 ### 3.2 Necessary / Not Exists — Build
@@ -103,6 +103,8 @@ No change from v4.2. This is the foundation.
 - `journal/memory-archive.md` — cold archive
 - `journal/insights.jsonl` — append-only insight log
 - `journal/ai-conversations/` — AI trace files
+
+Memory lifecycle behavior is autonomous but conservative. Diary closeout always audits backstage; other modes trigger maintenance only on a clear durable signal. New evidence should reinforce or correct an existing Active entry rather than create a near-duplicate. Canonical promotion requires repeated independent support; stale entries are archived, never silently deleted; unresolved source conflicts do not overwrite Canonical. `maintain-memory` is the transactional default, while legacy `writeback-memory` remains available for deliberate low-level appends.
 
 ### Layer 2: Capture
 
@@ -236,6 +238,8 @@ v4.3 is working when:
 3. Schedule projection works without Quant Feedback.
 4. New projects enter through Seeds, not through XP task creation.
 5. The system feels lighter, not heavier.
+6. Henry is not asked to approve routine durable-memory writes, and `What Life Copilot Said` contains no memory-audit or maintenance language.
+7. Re-running the same closeout is idempotent: it does not create duplicate memory, and conflicts fail without partial mutation.
 
 ---
 
