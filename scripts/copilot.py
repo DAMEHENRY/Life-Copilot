@@ -62,6 +62,20 @@ OPENCLAW_SSH_HOST = os.environ.get("LIFE_OPENCLAW_SSH_HOST", "mechrevo")
 OPENCLAW_WSL_DISTRO = os.environ.get("LIFE_OPENCLAW_WSL_DISTRO", "Ubuntu")
 OPENCLAW_WSL_USER = os.environ.get("LIFE_OPENCLAW_WSL_USER", "henry")
 OPENCLAW_SESSIONS_DIR = "/home/henry/.openclaw/agents/main/sessions"
+OPENCLAW_DIRECT_CHANNEL_LABELS = {
+    "telegram": "Telegram",
+    "openclaw-weixin": "WeChat",
+}
+OPENCLAW_SESSION_FILE_RE = re.compile(
+    r"^(?P<session_id>[0-9a-f-]{36})\.jsonl(?:\.(?:reset|deleted)\..+)?$",
+    re.IGNORECASE,
+)
+OPENCLAW_MANUAL_BLOCK_RE = re.compile(
+    r"<!-- openclaw-manual-begin channel=(?P<channel>[a-z0-9-]+) "
+    r"source=(?P<source>[^ ]+) -->\n(?P<body>.*?)\n"
+    r"<!-- openclaw-manual-end -->",
+    re.DOTALL,
+)
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -1245,6 +1259,70 @@ def read_openclaw_remote_text(
     )
 
 
+def list_openclaw_remote_direct_session_paths(
+    timeout: int = 20,
+    attempts: int = 3,
+) -> List[str]:
+    """List retained OpenClaw session files that contain channel metadata.
+
+    ``sessions.json`` is only the active-session index. Reset, retention, or a
+    state-database rebuild can remove an old direct chat from that index while
+    leaving its immutable JSONL transcript in place. This read-only discovery
+    step keeps daily provenance complete across those lifecycle events.
+    """
+    command = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=6",
+        "-o", "ConnectionAttempts=2",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
+        OPENCLAW_SSH_HOST,
+        "wsl.exe",
+        "-d", OPENCLAW_WSL_DISTRO,
+        "-u", OPENCLAW_WSL_USER,
+        "--",
+        "find",
+        OPENCLAW_SESSIONS_DIR,
+        "-maxdepth", "1",
+        "-type", "f",
+        "-exec", "grep", "-Il", "sourceChannel", "{}", "+",
+    ]
+    failures: List[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(str(exc))
+        else:
+            if result.returncode == 0:
+                paths: List[str] = []
+                for raw_path in result.stdout.splitlines():
+                    path = raw_path.strip()
+                    if not path:
+                        continue
+                    name = Path(path).name
+                    if OPENCLAW_SESSION_FILE_RE.fullmatch(name):
+                        paths.append(path)
+                return sorted(set(paths))
+            failures.append(result.stderr.strip() or f"ssh exited {result.returncode}")
+        if attempt < attempts:
+            time.sleep(attempt)
+    detail = failures[-1] if failures else "unknown SSH failure"
+    raise OpenClawImportUnavailable(
+        "cannot discover retained OpenClaw direct sessions from "
+        f"{OPENCLAW_SSH_HOST} after {attempts} attempts: {detail}"
+    )
+
+
 def openclaw_message_text(content: object) -> str:
     """Return visible message text while excluding thinking and tool payloads."""
     if isinstance(content, str):
@@ -1270,7 +1348,20 @@ def export_openclaw_session_transcript(
     assistant_name: str = "Kai",
 ) -> Tuple[str, int]:
     """Export visible user/assistant messages for one OpenClaw session and day."""
+    messages = openclaw_session_visible_messages(session_jsonl, d)
     lines: List[str] = []
+    for ts, role, text in messages:
+        speaker = user_name if role == "user" else assistant_name
+        lines.append(f"[{format_chat_timestamp(ts)}] {speaker}: {text}")
+    return "\n\n".join(lines).rstrip() + ("\n" if lines else ""), len(lines)
+
+
+def openclaw_session_visible_messages(
+    session_jsonl: str,
+    d: date,
+) -> List[Tuple[str, str, str]]:
+    """Return timestamped visible messages, excluding tools and delivery mirrors."""
+    messages: List[Tuple[str, str, str]] = []
     last_visible_message: Optional[Tuple[str, str]] = None
     for raw in session_jsonl.splitlines():
         if not raw.strip():
@@ -1287,6 +1378,12 @@ def export_openclaw_session_transcript(
         role = message.get("role")
         if role not in {"user", "assistant"}:
             continue
+        if (
+            role == "assistant"
+            and message.get("provider") == "openclaw"
+            and message.get("model") == "delivery-mirror"
+        ):
+            continue
         ts = str(record.get("timestamp") or "")
         if not ts or timestamp_to_local_date(ts) != d:
             continue
@@ -1297,9 +1394,26 @@ def export_openclaw_session_transcript(
         if visible_message == last_visible_message:
             continue
         last_visible_message = visible_message
-        speaker = user_name if role == "user" else assistant_name
-        lines.append(f"[{format_chat_timestamp(ts)}] {speaker}: {text}")
-    return "\n\n".join(lines).rstrip() + ("\n" if lines else ""), len(lines)
+        messages.append((ts, role, text))
+    return messages
+
+
+def openclaw_session_direct_channel(session_jsonl: str) -> Optional[str]:
+    """Return the supported direct-message channel declared by a session."""
+    for raw in session_jsonl.splitlines():
+        if "sourceChannel" not in raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        channel = message.get("sourceChannel")
+        if channel in OPENCLAW_DIRECT_CHANNEL_LABELS:
+            return str(channel)
+    return None
 
 
 def export_openclaw_day_transcript(
@@ -1307,10 +1421,12 @@ def export_openclaw_day_transcript(
     user_name: str = "Henry",
     assistant_name: str = "Kai",
 ) -> Tuple[str, int, int]:
-    """Read direct Telegram sessions from Windows and build a daily Kai trace.
+    """Read retained Telegram/WeChat direct sessions and build a daily Kai trace.
 
-    Group/heartbeat sessions and explicit test sessions are excluded by using
-    only ``agent:main:telegram:direct:*`` entries in OpenClaw's session index.
+    Active direct chats are discovered from ``sessions.json``. Retained JSONL
+    files are also scanned because lifecycle resets and database rebuilds can
+    remove historical chats from the active index without deleting transcripts.
+    Group/heartbeat, cron, explicit test, and trajectory files remain excluded.
     """
     index_path = f"{OPENCLAW_SESSIONS_DIR}/sessions.json"
     try:
@@ -1320,37 +1436,102 @@ def export_openclaw_day_transcript(
     if not isinstance(index, dict):
         raise OpenClawImportUnavailable("OpenClaw sessions.json is not an object")
 
-    session_ids: List[str] = []
+    candidates: Dict[str, Tuple[str, str]] = {}
     for key, metadata in index.items():
-        if not isinstance(key, str) or not key.startswith("agent:main:telegram:direct:"):
+        if not isinstance(key, str):
+            continue
+        channel = next(
+            (
+                channel_id
+                for channel_id in OPENCLAW_DIRECT_CHANNEL_LABELS
+                if key.startswith(f"agent:main:{channel_id}:direct:")
+            ),
+            None,
+        )
+        if channel is None:
             continue
         if not isinstance(metadata, dict):
             continue
         session_id = metadata.get("sessionId")
-        if isinstance(session_id, str) and session_id and session_id not in session_ids:
-            session_ids.append(session_id)
+        if isinstance(session_id, str) and session_id:
+            path = f"{OPENCLAW_SESSIONS_DIR}/{session_id}.jsonl"
+            candidates[path] = (session_id, channel)
 
+    for path in list_openclaw_remote_direct_session_paths():
+        match = OPENCLAW_SESSION_FILE_RE.fullmatch(Path(path).name)
+        if match and path not in candidates:
+            candidates[path] = (match.group("session_id"), "")
+
+    grouped: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
+    seen_messages: set[Tuple[str, str, str, str, str]] = set()
+    for session_path, (session_id, indexed_channel) in sorted(candidates.items()):
+        raw = read_openclaw_remote_text(session_path)
+        channel = indexed_channel or openclaw_session_direct_channel(raw)
+        if channel not in OPENCLAW_DIRECT_CHANNEL_LABELS:
+            continue
+        group_key = (channel, session_id)
+        for ts, role, text in openclaw_session_visible_messages(raw, d):
+            message_key = (channel, session_id, ts, role, text)
+            if message_key in seen_messages:
+                continue
+            seen_messages.add(message_key)
+            grouped.setdefault(group_key, []).append((ts, role, text))
+
+    ordered_groups = sorted(
+        ((min(messages)[0], key, sorted(messages)) for key, messages in grouped.items()),
+        key=lambda item: item[0],
+    )
     blocks: List[str] = []
     message_count = 0
-    for session_id in session_ids:
-        session_path = f"{OPENCLAW_SESSIONS_DIR}/{session_id}.jsonl"
-        raw = read_openclaw_remote_text(session_path)
-        transcript, count = export_openclaw_session_transcript(
-            raw,
-            d,
-            user_name=user_name,
-            assistant_name=assistant_name,
+    for _, (channel, session_id), messages in ordered_groups:
+        label = OPENCLAW_DIRECT_CHANNEL_LABELS[channel]
+        lines = []
+        for ts, role, text in messages:
+            speaker = user_name if role == "user" else assistant_name
+            lines.append(f"[{format_chat_timestamp(ts)}] {speaker}: {text}")
+        message_count += len(lines)
+        blocks.append(
+            f"### Kai / {label} Session {session_id}\n\n"
+            + "\n\n".join(lines)
         )
-        if not transcript:
-            continue
-        message_count += count
-        blocks.append(f"### Kai / Telegram Session {session_id}\n\n{transcript.strip()}")
 
     return (
         "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""),
         message_count,
         len(blocks),
     )
+
+
+def preserve_manual_openclaw_blocks(
+    generated_transcript: str,
+    existing_trace: str,
+) -> str:
+    """Replace generated channel sections with Henry-supplied transcript blocks.
+
+    A remote retention/reset can leave only a fragment of a channel transcript.
+    Explicitly supplied source text is therefore preserved inside the generated
+    trace and remains authoritative for that channel on later writeback retries.
+    """
+    matches = list(OPENCLAW_MANUAL_BLOCK_RE.finditer(existing_trace))
+    if not matches:
+        return generated_transcript
+
+    transcript = generated_transcript.strip()
+    for match in matches:
+        channel = match.group("channel")
+        label = OPENCLAW_DIRECT_CHANNEL_LABELS.get(channel)
+        if label:
+            transcript = re.sub(
+                rf"(?:^|\n\n)### Kai / {re.escape(label)} Session .*?"
+                rf"(?=\n\n### Kai /|\Z)",
+                "",
+                transcript,
+                flags=re.DOTALL,
+            ).strip()
+
+    manual_blocks = [match.group(0).strip() for match in matches]
+    parts = [part for part in [*manual_blocks, transcript] if part]
+    return "\n\n".join(parts).rstrip() + ("\n" if parts else "")
 
 
 def split_markdown_sections(text: str) -> List[Tuple[str, str]]:
@@ -2410,6 +2591,12 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     renderer_link = obsidian_wikilink_for_path(renderer_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
+    if openclaw_transcript and openclaw_path.exists():
+        openclaw_transcript = preserve_manual_openclaw_blocks(
+            openclaw_transcript,
+            read_text(openclaw_path),
+        )
+
     print(f"=== AI Day Preview: {target.isoformat()} ===")
     print()
 
@@ -2435,13 +2622,13 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
 
     if openclaw_transcript:
         print(f"  OpenClaw trace file:             {openclaw_path.relative_to(ROOT)}")
-        print(f"  OpenClaw Telegram sessions:      {openclaw_session_count}")
-        print(f"  OpenClaw Telegram messages:      {openclaw_msg_count}")
-        print(f"  Journal wikilink:                - {openclaw_link}：Kai / Telegram conversations.")
+        print(f"  OpenClaw direct sessions:        {openclaw_session_count}")
+        print(f"  OpenClaw direct messages:        {openclaw_msg_count}")
+        print(f"  Journal wikilink:                - {openclaw_link}：Kai / OpenClaw direct conversations.")
     elif openclaw_warning:
         print(f"  OpenClaw:                        (unavailable — {openclaw_warning})")
     else:
-        print("  OpenClaw:                        (no direct Telegram messages for this date)")
+        print("  OpenClaw:                        (no direct Telegram/WeChat messages for this date)")
 
     print()
 
@@ -2604,7 +2791,7 @@ def writeback_ai_day(
         openclaw_transcript = ""
         print(
             "  warning: OpenClaw unavailable; intentionally skipped Kai / "
-            f"Telegram trace because --allow-missing-openclaw was set ({exc})"
+            f"direct-message trace because --allow-missing-openclaw was set ({exc})"
         )
 
     if not codex_transcript and not renderer_transcript and not openclaw_transcript:
@@ -2619,6 +2806,12 @@ def writeback_ai_day(
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
+
+    if openclaw_transcript and openclaw_path.exists():
+        openclaw_transcript = preserve_manual_openclaw_blocks(
+            openclaw_transcript,
+            read_text(openclaw_path),
+        )
 
     # Write Codex trace file
     if codex_transcript:
@@ -2657,11 +2850,11 @@ def writeback_ai_day(
             "---",
             f"date: {target.isoformat()}",
             "source: openclaw",
-            "channel: telegram",
+            "channels: telegram, openclaw-weixin",
             "generated_by: scripts/copilot.py writeback-ai-day",
             "---",
             "",
-            f"# {target.isoformat()} Kai / Telegram Trace",
+            f"# {target.isoformat()} Kai / OpenClaw Direct-Message Trace",
             "",
             openclaw_transcript,
         ])
@@ -2687,7 +2880,7 @@ def writeback_ai_day(
         journal_text = ensure_single_from_kai_link(
             journal_text,
             openclaw_link,
-            "Kai / Telegram conversations.",
+            "Kai / OpenClaw direct conversations.",
         )
     write_text(jp, journal_text)
     print(f"  updated: {jp.relative_to(ROOT)}")
