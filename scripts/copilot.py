@@ -56,7 +56,11 @@ PHASE_PROTOCOLS: Dict[str, str] = {
 
 AI_CONVERSATIONS_DIR = JOURNAL_DIR / "ai-conversations"
 CLAUDIAN_SESSIONS_DIR = ROOT / ".claudian" / "sessions"
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects" / "-Users-henry-Library-Mobile-Documents-iCloud-md-obsidian-Documents-Life"
+CLAUDE_PROJECT_SLUG = re.sub(r"[^A-Za-z0-9]", "-", str(ROOT))
+CLAUDE_PROJECTS_DIR = Path(os.environ.get(
+    "LIFE_CLAUDE_PROJECTS_DIR",
+    str(Path.home() / ".claude" / "projects" / CLAUDE_PROJECT_SLUG),
+))
 LIFE_CLAUDE_RENDERER_HISTORY = ROOT / ".obsidian" / "plugins" / "life-claude-renderer" / "history.json"
 OPENCLAW_SSH_HOST = os.environ.get("LIFE_OPENCLAW_SSH_HOST", "mechrevo")
 OPENCLAW_WSL_DISTRO = os.environ.get("LIFE_OPENCLAW_WSL_DISTRO", "Ubuntu")
@@ -288,10 +292,10 @@ def ai_conversation_dir_for_date(d: date) -> Path:
 
 
 def ai_trace_path_for_date(d: date, source: str) -> Path:
-    if source not in {"codex", "claudian", "life-claude-renderer", "openclaw"}:
+    if source not in {"codex", "claude-code", "claudian", "life-claude-renderer", "openclaw"}:
         raise ValueError(
             f"Unsupported source: {source}. "
-            "Use 'codex', 'claudian', 'life-claude-renderer', or 'openclaw'."
+            "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', or 'openclaw'."
         )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
@@ -1081,6 +1085,137 @@ def export_claudian_day_transcript(d: date, user_name: str = "Henry", assistant_
         if lines:
             total_messages += len(lines)
             blocks.append(f"### Claudian Session {provider_id} - {title}\n\n" + "\n\n".join(lines))
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
+
+
+def claude_code_excluded_session_ids(
+    renderer_history_path: Optional[Path] = None,
+) -> set[str]:
+    """Return provider sessions already represented by legacy/plugin sources."""
+    excluded: set[str] = set()
+    if renderer_history_path is None:
+        renderer_history_path = LIFE_CLAUDE_RENDERER_HISTORY
+    for conv in load_life_claude_renderer_history(renderer_history_path):
+        session_id = conv.get("sessionId")
+        if isinstance(session_id, str) and session_id:
+            excluded.add(session_id)
+        provider_id = conv.get("providerState", {}).get("providerSessionId")
+        if isinstance(provider_id, str) and provider_id:
+            excluded.add(provider_id)
+    for meta_file in claudian_meta_files():
+        try:
+            meta = json.loads(read_text(meta_file))
+        except (json.JSONDecodeError, OSError):
+            continue
+        provider_id = meta.get("providerState", {}).get("providerSessionId")
+        if isinstance(provider_id, str) and provider_id:
+            excluded.add(provider_id)
+    return excluded
+
+
+def claude_code_visible_message(record: dict) -> Optional[Tuple[str, str]]:
+    """Extract one human-visible Claude Code message, excluding tools/thinking."""
+    rec_type = record.get("type")
+    if rec_type not in {"user", "assistant"} or record.get("isSidechain") is True:
+        return None
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if rec_type == "user":
+        if not isinstance(content, str):
+            return None
+        text = content.strip()
+        # Claude Code records slash commands and their local output as synthetic
+        # user messages. They are runtime metadata, not dialogue evidence.
+        if not text or text.startswith((
+            "<local-command-caveat>",
+            "<command-name>",
+            "<command-message>",
+            "<command-args>",
+            "<local-command-stdout>",
+        )):
+            return None
+        return "user", text
+    if not isinstance(content, list):
+        return None
+    parts = [
+        part.get("text", "").strip()
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+        and part.get("text", "").strip()
+    ]
+    text = "\n\n".join(parts).strip()
+    return ("assistant", text) if text else None
+
+
+def export_claude_code_day_transcript(
+    d: date,
+    projects_dir: Optional[Path] = None,
+    renderer_history_path: Optional[Path] = None,
+    user_name: str = "Henry",
+    assistant_name: str = "Claude",
+) -> Tuple[str, int, int]:
+    """Build the visible transcript from native Claude Code project sessions.
+
+    Tool results, tool calls, thinking, sidechains, abandoned user-only sessions,
+    and sessions already represented by Claudian/Renderer are excluded.
+    """
+    if projects_dir is None:
+        projects_dir = CLAUDE_PROJECTS_DIR
+    if not projects_dir.exists():
+        return "", 0, 0
+    excluded = claude_code_excluded_session_ids(renderer_history_path)
+    session_blocks: List[Tuple[str, str]] = []
+    total_messages = 0
+
+    for jsonl_path in sorted(projects_dir.glob("*.jsonl")):
+        session_id = jsonl_path.stem
+        if session_id in excluded:
+            continue
+        title = ""
+        lines: List[Tuple[str, str, str]] = []
+        has_visible_assistant = False
+        for raw in read_text(jsonl_path).splitlines():
+            if not raw.strip():
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if record.get("type") == "custom-title":
+                candidate = record.get("customTitle")
+                if isinstance(candidate, str) and candidate.strip():
+                    title = candidate.strip()
+                continue
+            ts = str(record.get("timestamp") or "")
+            if not ts or timestamp_to_local_date(ts) != d:
+                continue
+            visible = claude_code_visible_message(record)
+            if visible is None:
+                continue
+            role, message_text = visible
+            speaker = user_name if role == "user" else assistant_name
+            has_visible_assistant = has_visible_assistant or role == "assistant"
+            lines.append((ts, speaker, message_text))
+            if not title and role == "user":
+                title = re.sub(r"\s+", " ", message_text)[:80]
+        if not lines or not has_visible_assistant:
+            continue
+        rendered = [
+            f"[{format_chat_timestamp(ts)}] {speaker}: {message_text}"
+            for ts, speaker, message_text in lines
+        ]
+        total_messages += len(rendered)
+        heading = f"### Claude Code Session {session_id}"
+        if title:
+            heading += f" - {title}"
+        session_blocks.append((lines[0][0], heading + "\n\n" + "\n\n".join(rendered)))
+
+    session_blocks.sort(key=lambda item: item[0])
+    blocks = [block for _, block in session_blocks]
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
 
 
@@ -2570,6 +2705,7 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     codex_session_count = codex_transcript.count("### Codex Thread ") if codex_transcript else 0
 
     renderer_transcript, renderer_msg_count, renderer_session_count = export_life_claude_renderer_day_transcript(target)
+    claude_code_transcript, claude_code_msg_count, claude_code_session_count = export_claude_code_day_transcript(target)
     openclaw_warning = ""
     try:
         openclaw_transcript, openclaw_msg_count, openclaw_session_count = export_openclaw_day_transcript(target)
@@ -2586,9 +2722,11 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
 
     codex_path = ai_trace_path_for_date(target, "codex")
     renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
+    claude_code_path = ai_trace_path_for_date(target, "claude-code")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
+    claude_code_link = obsidian_wikilink_for_path(claude_code_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
     if openclaw_transcript and openclaw_path.exists():
@@ -2620,6 +2758,16 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
 
     print()
 
+    if claude_code_transcript:
+        print(f"  Claude Code trace file:          {claude_code_path.relative_to(ROOT)}")
+        print(f"  Claude Code sessions:            {claude_code_session_count}")
+        print(f"  Claude Code messages:            {claude_code_msg_count}")
+        print(f"  Journal wikilink:                - {claude_code_link}：Native Claude Code conversations.")
+    else:
+        print("  Claude Code:                     (no native sessions for this date)")
+
+    print()
+
     if openclaw_transcript:
         print(f"  OpenClaw trace file:             {openclaw_path.relative_to(ROOT)}")
         print(f"  OpenClaw direct sessions:        {openclaw_session_count}")
@@ -2637,7 +2785,7 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     else:
         print(f"  Journal file:                    {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
 
-    if not codex_transcript and not renderer_transcript and not openclaw_transcript:
+    if not codex_transcript and not renderer_transcript and not claude_code_transcript and not openclaw_transcript:
         print("\n  No AI conversations found for this date.")
 
 
@@ -2777,6 +2925,7 @@ def writeback_ai_day(
             codex_transcript, f"Codex trace for {target.isoformat()}"
         )
     renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
+    claude_code_transcript, _, _ = export_claude_code_day_transcript(target)
     try:
         openclaw_transcript, _, _ = export_openclaw_day_transcript(target)
     except OpenClawImportUnavailable as exc:
@@ -2794,17 +2943,19 @@ def writeback_ai_day(
             f"direct-message trace because --allow-missing-openclaw was set ({exc})"
         )
 
-    if not codex_transcript and not renderer_transcript and not openclaw_transcript:
+    if not codex_transcript and not renderer_transcript and not claude_code_transcript and not openclaw_transcript:
         raise ValueError(
-            "No AI conversations (Codex, Life Claude Renderer, or OpenClaw) "
+            "No AI conversations (Codex, Claude Code, Life Claude Renderer, or OpenClaw) "
             f"found for date: {target.isoformat()}"
         )
 
     codex_path = ai_trace_path_for_date(target, "codex")
     renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
+    claude_code_path = ai_trace_path_for_date(target, "claude-code")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
+    claude_code_link = obsidian_wikilink_for_path(claude_code_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
     if openclaw_transcript and openclaw_path.exists():
@@ -2845,6 +2996,22 @@ def writeback_ai_day(
         write_text(renderer_path, renderer_content)
         print(f"  wrote: {renderer_path.relative_to(ROOT)}")
 
+    # Write native Claude Code trace file
+    if claude_code_transcript:
+        claude_code_content = "\n".join([
+            "---",
+            f"date: {target.isoformat()}",
+            "source: claude-code",
+            "generated_by: scripts/copilot.py writeback-ai-day",
+            "---",
+            "",
+            f"# {target.isoformat()} Claude Code Trace",
+            "",
+            claude_code_transcript,
+        ])
+        write_text(claude_code_path, claude_code_content)
+        print(f"  wrote: {claude_code_path.relative_to(ROOT)}")
+
     if openclaw_transcript:
         openclaw_content = "\n".join([
             "---",
@@ -2876,6 +3043,12 @@ def writeback_ai_day(
             renderer_link,
             "Obsidian-rendered Claude Code conversations.",
         )
+    if claude_code_transcript:
+        journal_text = ensure_single_from_kai_link(
+            journal_text,
+            claude_code_link,
+            "Native Claude Code conversations.",
+        )
     if openclaw_transcript:
         journal_text = ensure_single_from_kai_link(
             journal_text,
@@ -2899,10 +3072,10 @@ def writeback_ai_day(
             raise ValueError(
                 "Final trace verification failed: " + ", ".join(missing)
             )
-
     return {
         "journal": str(jp),
         "codex_trace": str(codex_path) if codex_transcript else "",
+        "claude_code_trace": str(claude_code_path) if claude_code_transcript else "",
         "renderer_trace": str(renderer_path) if renderer_transcript else "",
         "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
         "fallback_used": fallback_used,

@@ -109,7 +109,7 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot's relational response to Henry | `What Life Copilot Said` | `writeback-journal` |
 | Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / Life Claude Renderer / OpenClaw-Kai daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
@@ -155,6 +155,8 @@ python3 scripts/copilot.py export-codex-day --date YYYY-MM-DD --output-file /tmp
 ```
 
 For normal diary analysis, prefer `writeback-ai-day`.
+
+The daily importer reads native Claude Code sessions for this vault from its local project history and writes a separate `YYYY-MM-DD-claude-code-trace.md`. It keeps only visible user/assistant text, filters tool/thinking/sidechain/runtime records, and avoids sessions already represented by Claudian or Life Claude Renderer.
 
 Ordinary Chat no longer writes one entry per turn. The complete raw conversation
 belongs in the daily trace; Diary entry and an explicit bedtime close update one

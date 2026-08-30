@@ -23,7 +23,7 @@
 | 概念 | 路径 |
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,life-claude-renderer,openclaw}-trace.md` |
+| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw}-trace.md` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
@@ -63,6 +63,7 @@
   `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <file>`
 - 原始对话归档：
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
+  同时归档 Codex、原生 Claude Code CLI、Life Claude Renderer 与 OpenClaw/Kai；Claude Code 仅保留可见正文并过滤 thinking、工具记录、sidechain 和本地斜杠命令。
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
 - Diary 关系性回应：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`

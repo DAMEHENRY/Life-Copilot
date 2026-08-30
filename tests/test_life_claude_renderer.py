@@ -435,6 +435,11 @@ class TestAiTracePath(unittest.TestCase):
         path = ai_trace_path_for_date(d, "codex")
         assert path.name == "2026-06-06-codex-trace.md"
 
+    def test_claude_code_source(self):
+        d = date(2026, 6, 6)
+        path = ai_trace_path_for_date(d, "claude-code")
+        assert path.name == "2026-06-06-claude-code-trace.md"
+
     def test_claudian_source_still_works(self):
         d = date(2026, 6, 6)
         path = ai_trace_path_for_date(d, "claudian")
