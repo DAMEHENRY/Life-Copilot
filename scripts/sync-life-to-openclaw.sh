@@ -2,7 +2,7 @@
 set -eu
 
 readonly SOURCE_DIR="/Users/henry/Library/Mobile Documents/iCloud~md~obsidian/Documents/Life/"
-readonly REMOTE_HOST="mechrevo"
+readonly REMOTE_HOST="mechrevo-wsl"
 readonly REMOTE_DIR="/home/henry/.life-sync-staging/"
 readonly LOCK_DIR="/tmp/openclaw-life-sync.lock"
 readonly STATUS_FILE="/tmp/openclaw-life-last-sync.txt"
@@ -47,7 +47,7 @@ trap record_failure ZERR
   --include='*.txt' \
   --exclude='*' \
   -e "$SSH_COMMAND" \
-  --rsync-path='wsl -d Ubuntu -u henry -- rsync' \
+  --rsync-path='/usr/bin/rsync' \
   "$SOURCE_DIR" \
   "$REMOTE_HOST:$REMOTE_DIR"
 
@@ -57,7 +57,7 @@ trap record_failure ZERR
   -az \
   --timeout=60 \
   -e "$SSH_COMMAND" \
-  --rsync-path='wsl -d Ubuntu -u henry -- rsync' \
+  --rsync-path='/usr/bin/rsync' \
   "$STATUS_FILE" \
   "$REMOTE_HOST:${REMOTE_DIR}.last-sync"
 
