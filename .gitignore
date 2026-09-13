@@ -56,3 +56,6 @@ GEMINI.md
 .claude/
 .claudian/
 quant/notes/
+
+# 8. 本地语义检索索引（私密日记的切块原文与向量）
+tools/recall/data/

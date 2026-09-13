@@ -54,7 +54,7 @@ Diary Mode 开始与晚安闭合前，从当日 trace 提取尚未进入正文�
 ## Evidence
 
 - 普通 Chat 可只依据当前对话，不为显得深刻而强制搜索历史。
-- 作出“以前也这样”、长期变化或既往事实判断时，先查 `journal/memory.md`，必要时查 archive、insights 和原始日记，并引用真实 `[[YYYY-MM-DD]]`。
+- 作出“以前也这样”、长期变化或既往事实判断时，先查 `journal/memory.md`，必要时查 archive、insights 和原始日记，并引用真实 `[[YYYY-MM-DD]]`。找原始日记时可用本地语义检索，规则同 `prompts/diary-mode.md` 的历史检索瀑布：结果只是候选，引用前读原文。
 - 不得编造历史；证据不足就明确说明。
 - 联网搜索只校验时效性外部事实，不能替代本地生命记录。
 

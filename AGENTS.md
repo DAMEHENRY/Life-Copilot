@@ -31,6 +31,7 @@
 | 模式 prompts | `prompts/{chat,diary,quant,study}-mode.md` |
 | 演化规则 | `prompts/evolution-policy.md` |
 | 结构化命令 | `scripts/copilot.py` |
+| 本地语义检索 | `tools/recall/recall.py`（索引在 `tools/recall/data/`，不进 git） |
 
 禁止假设“已记住所有历史”；需要历史判断时先读本地文件。
 
@@ -52,6 +53,7 @@
 - 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
 - `journal/insights.jsonl` 是检索索引，不是主要用户可见引用；历史结论优先引用 `[[YYYY-MM-DD]]`。
+- 找原始日记可用本地语义检索 `python3 tools/recall/recall.py search`：用当时的具体细节、中英文各查一次；结果只是候选，引用前读原文；命中转写、分析或 trace 时按日期回到原始日记；分析某天时加 `--before` 该日。它不是必需证据源，不可用时继续用关键词检索并在执行说明里注明。关键词检索用 `rg --no-ignore` 或 `command grep`，默认工具可能按 `.gitignore` 静默跳过 `journal/`。
 - 外部搜索只校验时效性事实；明确区分事实、他方主张、传言与推断。
 - 新文件夹和普通文档用 lowercase kebab-case；保留 `AGENTS.md`、`CLAUDE.md`、`00-index.md`、`00-readme.md` 例外。
 

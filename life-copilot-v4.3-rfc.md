@@ -67,6 +67,7 @@ These are candidates for the negative backlog. They were necessary during the ro
 ### 3.4 Unnecessary / Not Exists — Ignore
 
 - Embedding / vector index systems. Already rejected. No revisit.
+  - Revised 2026-09-13 at Henry's explicit request: a local, candidate-only recall index over diaries and AI traces (`tools/recall/`) was added to Diary and Chat history retrieval. Reason: keyword and agent search missed an original entry written in English when the question was asked in Chinese and in later wording; journals are mostly English while conversation with the Copilot is mostly Chinese. The boundary is unchanged: hits are candidates, originals must be read before citing, and no external database or hosted embedding service is used.
 - External database. Local-first stays.
 - Auto-apply for internships. Manual-first stays.
 

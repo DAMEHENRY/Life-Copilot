@@ -107,7 +107,7 @@ After running it, the agent **must**:
    - **XP/context words** — project or domain anchors (e.g., `XP-78`, `Markowitz`, `optimizer`, `sample covariance`, `GMV`)
 3. **Do not create or extend notes** just because the candidate list was empty or low-scoring. A weak retrieval result means "search more," not "write new."
 4. Final decision still follows the 4-case protocol above: link (full/broad), extend (partial), or create (no owner).
-5. Do not restore embedding or vector index systems unless the user explicitly asks.
+5. Do not add embedding or vector index systems for Quant retrieval unless the user explicitly asks. The local journal recall index (`tools/recall/`, added 2026-09-13 at Henry's request) serves Diary and Chat history retrieval only; it does not replace `quant-question-link` or the manual `rg` checks above.
 
 ## Primary Inputs
 

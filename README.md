@@ -25,7 +25,7 @@ In practice:
 
 ## 1. Current Shape
 
-The current system is organized around five surfaces:
+The current system is organized around six surfaces:
 
 | Surface | Path | Role |
 |---|---|---|
@@ -34,6 +34,7 @@ The current system is organized around five surfaces:
 | Diary + memory | `journal/` | Evidence, traces, memory, and daily analysis |
 | Seeds | `seeds/` | Valuable ideas that are not active projects yet |
 | Scripts | `scripts/copilot.py` | Structural writeback and legacy helpers |
+| Recall | `tools/recall/recall.py` | Local semantic search over diaries and AI traces; hits are candidates, not evidence |
 
 The old Quant roadmap still exists, but it is no longer the life-wide source of truth:
 
@@ -323,12 +324,13 @@ Privacy:
 - `journal/` is private and gitignored.
 - Personal Quant content such as resumes, schedules, projects, and career notes is gitignored.
 - `inbox/`, `resources/`, `archives/`, and Obsidian local config are gitignored.
+- `tools/recall/data/` holds chunk text and vectors of the private journal and is gitignored.
 
 Before pushing:
 
 ```bash
 git status --short
-python3 -m py_compile scripts/copilot.py
+python3 -m py_compile scripts/copilot.py tools/recall/recall.py
 git diff --check
 ```
 
