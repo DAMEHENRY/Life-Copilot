@@ -109,7 +109,7 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot's relational response to Henry | `What Life Copilot Said` | `writeback-journal` |
 | Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai / Claude web / ChatGPT web (incl. Health) daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
@@ -138,6 +138,23 @@ python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --c
 source to be reachable over Tailscale SSH. They fail before writing a partial
 archive if that source cannot be read. Use `--allow-missing-openclaw` only when
 an intentionally incomplete archive has been explicitly accepted.
+
+`writeback-ai-day` also syncs Claude web (claude.ai) and ChatGPT web
+conversations, including ChatGPT Health, before writing
+`YYYY-MM-DD-claude-web-trace.md` and `YYYY-MM-DD-chatgpt-web-trace.md`. The
+sync runs through the Chrome extension in `tools/web-chat-archiver/` using the
+existing browser login; if Chrome is closed it is started in the background and
+quit afterwards. A failed sync (for example an expired login) stops the
+writeback; `--allow-missing-web-chats` falls back to the last local archive.
+`preview-ai-day` reads that archive without syncing, and `finalize-ai-day`
+never touches the browser. Setup and troubleshooting:
+[tools/web-chat-archiver/00-readme.md](tools/web-chat-archiver/00-readme.md).
+
+```bash
+python3 scripts/copilot.py install-web-chats
+python3 scripts/copilot.py sync-web-chats
+python3 scripts/copilot.py web-chats-status
+```
 
 Life Copilot maintains durable memory autonomously. Diary closeout always performs a backstage memory audit; Chat, Study, and Quant trigger it only when a clear durable signal appears. A no-op is silent. Actual changes are applied through `maintain-memory`, reread for verification, and reported outside the relational response without asking for line-by-line approval.
 

@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Life Copilot Web Chat Archiver",
+  "version": "1.1.0",
+  "description": "Archives Claude and ChatGPT web conversations into the local Life Copilot store.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0xFIShAXTuqOmFZxoclVeWUOb/ibyH9QVui2/iqw5riPKKLO0fs5Gis5tBUIl6intH8V3IuwkHdWr2TEuTzZVKkghW0m+pW84O63C62g2iFtRanbx/3VnL0de2g7TSlcg3gdHLcXwJqaoBTOzDpbXq3hNU/wQj5vrHMBE7iLImscd1TQlg5Qq9lGLRX43pmPpS6X56XLFcjPE2tEOk6wDGw5KEnttSFSbjpNBBnxS1lf2GaUUnV56VnCNKUcIATKtLMhBOAH8R6dwtgKG9NBBKztcBIe0uUJfjP4dJfvVynVfJhClCOD3Ew4EPHA39v1TZr5uD7FojMZ45xFLs8c5wIDAQAB",
+  "permissions": ["nativeMessaging", "scripting", "tabs", "alarms"],
+  "host_permissions": ["https://claude.ai/*", "https://chatgpt.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Life Copilot: sync Claude / ChatGPT web chats"
+  }
+}

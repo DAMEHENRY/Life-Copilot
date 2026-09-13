@@ -5,7 +5,8 @@ Life Copilot — lean orchestration utilities.
 Only structural write commands that are unsafe for the model to do freehand:
 writeback-journal, writeback-thought, writeback-chat-capture,
 writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
-finalize-ai-day, writeback-memory, maintain-memory, append-insight, compact-memory,
+finalize-ai-day, sync-web-chats, web-chats-status, install-web-chats,
+writeback-memory, maintain-memory, append-insight, compact-memory,
 audit-system-rules, promote-system-rule, rollback-system-rule, quant-mission,
 quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
 """
@@ -17,10 +18,13 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -80,6 +84,32 @@ OPENCLAW_MANUAL_BLOCK_RE = re.compile(
     r"<!-- openclaw-manual-end -->",
     re.DOTALL,
 )
+# Claude / ChatGPT web chats: the Chrome extension + native host in
+# tools/web-chat-archiver keep a raw local archive that writeback-ai-day reads.
+WEB_CHATS_DIR = Path(os.environ.get(
+    "LIFE_WEB_CHATS_DIR",
+    str(Path.home() / ".local" / "share" / "life-copilot" / "web-chats"),
+))
+WEB_CHATS_INSTALL_DIR = Path(os.environ.get(
+    "LIFE_WEB_CHATS_INSTALL_DIR",
+    str(Path.home() / ".local" / "share" / "life-copilot" / "web-chat-archiver"),
+))
+WEB_CHATS_SOURCE_DIR = ROOT / "tools" / "web-chat-archiver"
+WEB_CHATS_HOST_NAME = "com.lifecopilot.web_chats"
+WEB_CHATS_EXTENSION_ID = "kpdjiedddebakkcgmhldmldeboicgoja"
+WEB_CHATS_CHROME_APP = os.environ.get("LIFE_WEB_CHATS_CHROME_APP", "Google Chrome")
+WEB_CHATS_CHROME_PROFILE = os.environ.get("LIFE_WEB_CHATS_CHROME_PROFILE", "Default")
+CHROME_NATIVE_MESSAGING_HOSTS_DIR = (
+    Path.home() / "Library" / "Application Support" / "Google" / "Chrome" / "NativeMessagingHosts"
+)
+# provider -> (trace source, assistant speaker, trace label, From Kai description)
+WEB_CHAT_SOURCES: Dict[str, Tuple[str, str, str, str]] = {
+    "claude": ("claude-web", "Claude", "Claude Web", "Claude web (claude.ai) conversations."),
+    "chatgpt": ("chatgpt-web", "ChatGPT", "ChatGPT Web", "ChatGPT web conversations, including Health."),
+}
+WEB_CHAT_TAG_LABELS = {"health": "Health", "voice": "Voice", "archived": "Archived"}
+CHATGPT_CITATION_RE = re.compile("[^]*")
+CHATGPT_PRIVATE_MARKER_RE = re.compile("[-]")
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -292,10 +322,15 @@ def ai_conversation_dir_for_date(d: date) -> Path:
 
 
 def ai_trace_path_for_date(d: date, source: str) -> Path:
-    if source not in {"codex", "claude-code", "claudian", "life-claude-renderer", "openclaw"}:
+    sources = {
+        "codex", "claude-code", "claudian", "life-claude-renderer", "openclaw",
+        "claude-web", "chatgpt-web",
+    }
+    if source not in sources:
         raise ValueError(
             f"Unsupported source: {source}. "
-            "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', or 'openclaw'."
+            "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', 'openclaw', "
+            "'claude-web', or 'chatgpt-web'."
         )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
@@ -1669,6 +1704,516 @@ def preserve_manual_openclaw_blocks(
     return "\n\n".join(parts).rstrip() + ("\n" if parts else "")
 
 
+# ---------------------------------------------------------------------------
+# Claude / ChatGPT web chats
+# ---------------------------------------------------------------------------
+class WebChatsUnavailable(RuntimeError):
+    """The browser-backed web chat archive could not be refreshed."""
+
+
+def web_chats_socket_path() -> Path:
+    return WEB_CHATS_DIR / "host.sock"
+
+
+def web_chats_host_request(payload: dict, timeout: float) -> dict:
+    """Send one newline-delimited JSON command to the native host."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        client.connect(str(web_chats_socket_path()))
+        client.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        raw = b""
+        while not raw.endswith(b"\n"):
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            raw += chunk
+    if not raw.strip():
+        raise WebChatsUnavailable(
+            "web chat host closed the connection without a reply "
+            "(the Chrome extension disconnected mid-request)"
+        )
+    response = json.loads(raw.decode("utf-8"))
+    if not isinstance(response, dict):
+        raise WebChatsUnavailable("web chat host returned a non-object reply")
+    return response
+
+
+def web_chats_host_alive() -> bool:
+    try:
+        return bool(web_chats_host_request({"cmd": "ping"}, timeout=5).get("ok"))
+    except (OSError, ValueError, WebChatsUnavailable):
+        return False
+
+
+def wait_for_web_chats_host(timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if web_chats_host_alive():
+            return True
+        time.sleep(1)
+    return web_chats_host_alive()
+
+
+def chrome_is_running() -> bool:
+    return subprocess.run(["pgrep", "-x", WEB_CHATS_CHROME_APP], capture_output=True).returncode == 0
+
+
+def quit_chrome() -> None:
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "{WEB_CHATS_CHROME_APP}" to quit'],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def connect_web_chats_host(connect_timeout: float = 60) -> bool:
+    """Make sure the extension's native host is reachable.
+
+    Launches Chrome in the background without a window when it is not running
+    and returns True in that case, so the caller can quit it afterwards.
+    """
+    if web_chats_host_alive():
+        return False
+    if chrome_is_running():
+        # The extension service worker may still be reconnecting.
+        if wait_for_web_chats_host(15):
+            return False
+        raise WebChatsUnavailable(
+            f"{WEB_CHATS_CHROME_APP} is running but the Life Copilot Web Chat Archiver "
+            "extension is not connected; check that it is loaded and enabled "
+            "(`python3 scripts/copilot.py install-web-chats` prints the steps)"
+        )
+    try:
+        subprocess.run(
+            [
+                "open", "-g", "-j", "-a", WEB_CHATS_CHROME_APP, "--args",
+                "--no-startup-window", f"--profile-directory={WEB_CHATS_CHROME_PROFILE}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise WebChatsUnavailable(f"could not launch {WEB_CHATS_CHROME_APP}: {exc}") from exc
+    if not wait_for_web_chats_host(connect_timeout):
+        quit_chrome()
+        raise WebChatsUnavailable(
+            f"launched {WEB_CHATS_CHROME_APP} but the web chat extension did not connect "
+            f"within {int(connect_timeout)}s; check that it is loaded and enabled"
+        )
+    return True
+
+
+def sync_web_chats(
+    providers: Optional[List[str]] = None,
+    *,
+    needed_since: Optional[datetime] = None,
+    connect_timeout: float = 60,
+    sync_timeout: float = 600,
+) -> dict:
+    """Refresh the local web chat archive through the Chrome extension.
+
+    When Chrome is not running it is launched in the background without a
+    window and quit again afterwards, so the diary flow never needs Henry to
+    open the browser first. Login problems surface as WebChatsUnavailable.
+
+    A rate-limited provider leaves its oldest changed conversations for the
+    next sync. That only fails when one of them may hold messages at or after
+    `needed_since`; without it, leftovers are reported as warnings.
+    """
+    wanted = providers or list(WEB_CHAT_SOURCES)
+    launched = connect_web_chats_host(connect_timeout)
+    try:
+        response = web_chats_host_request(
+            {"cmd": "sync", "providers": wanted, "timeout": sync_timeout},
+            timeout=sync_timeout + 30,
+        )
+    except (OSError, ValueError) as exc:
+        raise WebChatsUnavailable(f"web chat sync failed: {exc}") from exc
+    finally:
+        if launched:
+            quit_chrome()
+
+    outcomes = response.get("providers") or {}
+    failures: List[str] = []
+    warnings: List[str] = []
+    for provider in wanted:
+        outcome = outcomes.get(provider)
+        if not isinstance(outcome, dict):
+            failures.append(f"{provider}: no result")
+            continue
+        if not outcome.get("ok"):
+            hint = " (log in again in Chrome)" if outcome.get("code") == "auth_required" else ""
+            failures.append(f"{provider}: {outcome.get('message') or outcome.get('code')}{hint}")
+            continue
+        if outcome.get("errors"):
+            errors = outcome["errors"]
+            failures.append(f"{provider}: {len(errors)} conversation(s) failed, e.g. {errors[0]}")
+        pending = int(outcome.get("pending") or 0)
+        if pending:
+            newest = str(outcome.get("pending_newest_update_time") or "")
+            try:
+                newest_at: Optional[datetime] = datetime.fromisoformat(newest.replace("Z", "+00:00"))
+            except ValueError:
+                newest_at = None
+            note = (
+                f"{provider}: rate limited; {pending} older conversation(s) left for the next "
+                f"sync (newest updated {newest or 'unknown'})"
+            )
+            if needed_since is not None and (newest_at is None or newest_at >= needed_since):
+                failures.append(note + f", which may include {needed_since.date().isoformat()}; retry later")
+            else:
+                warnings.append(note)
+    if response.get("error"):
+        # A host-side error (e.g. timeout) explains the missing provider results.
+        failures.insert(0, str(response["error"]))
+    if failures or not response.get("ok"):
+        raise WebChatsUnavailable("; ".join(failures) or "web chat sync failed")
+    response["warnings"] = warnings
+    return response
+
+
+def load_web_chats_index(store_dir: Path) -> dict:
+    try:
+        index = json.loads(read_text(store_dir / "index.json"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return index if isinstance(index, dict) else {}
+
+
+def _message_chain(nodes: Dict[str, dict], leaf: object, parent_key: str) -> List[dict]:
+    """Walk from the selected leaf to the root; edited-away branches drop out."""
+    chain: List[dict] = []
+    seen: set[str] = set()
+    current = leaf
+    while isinstance(current, str) and current in nodes and current not in seen:
+        seen.add(current)
+        chain.append(nodes[current])
+        current = nodes[current].get(parent_key)
+    chain.reverse()
+    return chain
+
+
+def claude_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str]]:
+    """Return (timestamp, role, text) for the visible Claude web branch.
+
+    Keeps text blocks only: thinking, tool use and tool results are dropped;
+    uploaded files become short placeholders.
+    """
+    messages = [m for m in conversation.get("chat_messages") or [] if isinstance(m, dict)]
+    by_id = {m["uuid"]: m for m in messages if isinstance(m.get("uuid"), str)}
+    chain = _message_chain(by_id, conversation.get("current_leaf_message_uuid"), "parent_message_uuid")
+    if not chain:
+        chain = sorted(messages, key=lambda m: m.get("index") or 0)
+    visible: List[Tuple[str, str, str]] = []
+    for message in chain:
+        role = {"human": "user", "assistant": "assistant"}.get(message.get("sender"))
+        ts = message.get("created_at")
+        if role is None or not isinstance(ts, str):
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and content:
+            parts = [
+                block["text"].strip()
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+                and block["text"].strip()
+            ]
+        else:
+            legacy = message.get("text")
+            parts = [legacy.strip()] if isinstance(legacy, str) and legacy.strip() else []
+        if role == "user":
+            for item in message.get("files") or []:
+                if isinstance(item, dict) and item.get("file_name"):
+                    kind = "Image" if item.get("file_kind") == "image" else "File"
+                    parts.append(f"[{kind}: {item['file_name']}]")
+            for item in message.get("attachments") or []:
+                if isinstance(item, dict):
+                    parts.append(f"[Attachment: {item.get('file_name') or 'untitled'}]")
+        text = "\n\n".join(parts).strip()
+        if text:
+            visible.append((ts, role, text))
+    return visible
+
+
+def chatgpt_timestamp(value: object) -> Optional[str]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+    if isinstance(value, str) and timestamp_to_local_date(value):
+        return value
+    return None
+
+
+def chatgpt_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str]]:
+    """Return (timestamp, role, text) for the visible ChatGPT branch.
+
+    Drops system/tool messages, hidden context, thinking and reasoning recaps,
+    tool calls (assistant messages addressed to a tool), and citation markers.
+    """
+    mapping = conversation.get("mapping")
+    if not isinstance(mapping, dict):
+        return []
+    nodes = {key: node for key, node in mapping.items() if isinstance(node, dict)}
+    last_ts = chatgpt_timestamp(conversation.get("create_time"))
+    visible: List[Tuple[str, str, str]] = []
+    for node in _message_chain(nodes, conversation.get("current_node"), "parent"):
+        message = node.get("message")
+        if not isinstance(message, dict):
+            continue
+        last_ts = chatgpt_timestamp(message.get("create_time")) or last_ts
+        role = (message.get("author") or {}).get("role")
+        metadata = message.get("metadata") or {}
+        content = message.get("content") or {}
+        if role not in {"user", "assistant"}:
+            continue
+        if metadata.get("is_visually_hidden_from_conversation") or metadata.get("is_thinking_preamble_message"):
+            continue
+        if role == "assistant" and message.get("recipient") not in (None, "all"):
+            continue
+        if content.get("content_type") not in {"text", "multimodal_text"}:
+            continue
+        attachments = [a for a in metadata.get("attachments") or [] if isinstance(a, dict)]
+        image_names = [
+            str(a.get("name")) for a in attachments
+            if str(a.get("mime_type") or "").startswith("image/") and a.get("name")
+        ]
+        parts: List[str] = []
+        for part in content.get("parts") or []:
+            if isinstance(part, str):
+                text = CHATGPT_PRIVATE_MARKER_RE.sub("", CHATGPT_CITATION_RE.sub("", part)).strip()
+                if text:
+                    parts.append(text)
+            elif isinstance(part, dict):
+                part_type = part.get("content_type")
+                if part_type == "audio_transcription" and str(part.get("text") or "").strip():
+                    parts.append(str(part["text"]).strip())
+                elif part_type == "image_asset_pointer":
+                    parts.append(f"[Image: {image_names.pop(0)}]" if image_names else "[Image]")
+        if role == "user":
+            for attachment in attachments:
+                if not str(attachment.get("mime_type") or "").startswith("image/"):
+                    parts.append(f"[Attachment: {attachment.get('name') or 'untitled'}]")
+        text = "\n\n".join(parts).strip()
+        if text and last_ts:
+            visible.append((last_ts, role, text))
+    return visible
+
+
+def merge_consecutive_web_messages(messages: List[Tuple[str, str, str]]) -> List[Tuple[str, str, str]]:
+    """Join split assistant turns (e.g. text around a tool call) into one line."""
+    merged: List[Tuple[str, str, str]] = []
+    for ts, role, text in messages:
+        if merged and merged[-1][1] == role:
+            merged[-1] = (merged[-1][0], role, merged[-1][2] + "\n\n" + text)
+        else:
+            merged.append((ts, role, text))
+    return merged
+
+
+def web_chat_tag_label(tags: List[str]) -> str:
+    labels: List[str] = []
+    for tag in sorted(set(tags)):
+        if tag in WEB_CHAT_TAG_LABELS:
+            labels.append(WEB_CHAT_TAG_LABELS[tag])
+        elif tag.startswith("project:"):
+            labels.append("Project: " + tag.split(":", 1)[1])
+    return " ".join(f"[{label}]" for label in labels)
+
+
+def export_web_chat_day_transcript(
+    provider: str,
+    d: date,
+    store_dir: Optional[Path] = None,
+    user_name: str = "Henry",
+) -> Tuple[str, int, int]:
+    """Build one day's visible transcript for a web chat provider.
+
+    Messages are assigned to days by their own timestamps, so a conversation
+    that spans midnight appears in both days' traces.
+    """
+    if store_dir is None:
+        store_dir = WEB_CHATS_DIR
+    provider_dir = store_dir / provider
+    if not provider_dir.is_dir():
+        return "", 0, 0
+    _, assistant_name, label, _ = WEB_CHAT_SOURCES[provider]
+    listed = (
+        load_web_chats_index(store_dir).get("providers", {}).get(provider, {}).get("listed", {})
+    )
+    extract = claude_web_visible_messages if provider == "claude" else chatgpt_web_visible_messages
+    blocks: List[Tuple[datetime, str]] = []
+    total_messages = 0
+    for path in sorted(provider_dir.glob("*.json")):
+        try:
+            record = json.loads(read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        conversation = record.get("conversation") if isinstance(record, dict) else None
+        if not isinstance(conversation, dict):
+            continue
+        lines = [
+            item for item in merge_consecutive_web_messages(extract(conversation))
+            if timestamp_to_local_date(item[0]) == d
+        ]
+        if not lines:
+            continue
+        conv_id = str(record.get("id") or path.stem)
+        listing = listed.get(conv_id) if isinstance(listed.get(conv_id), dict) else {}
+        tags = [t for t in [*(record.get("tags") or []), *(listing.get("tags") or [])] if isinstance(t, str)]
+        title = str(
+            conversation.get("name" if provider == "claude" else "title")
+            or record.get("title")
+            or listing.get("title")
+            or ""
+        ).strip()
+        heading = f"### {label} Conversation {conv_id}"
+        tag_label = web_chat_tag_label(tags)
+        if tag_label:
+            heading += f" {tag_label}"
+        if title:
+            heading += f" - {title}"
+        url = (
+            f"https://claude.ai/chat/{conv_id}" if provider == "claude" else f"https://chatgpt.com/c/{conv_id}"
+        )
+        rendered = [
+            f"[{format_chat_timestamp(ts)}] {user_name if role == 'user' else assistant_name}: {text}"
+            for ts, role, text in lines
+        ]
+        total_messages += len(rendered)
+        first = datetime.fromisoformat(lines[0][0].replace("Z", "+00:00"))
+        blocks.append((first, "\n\n".join([heading, f"Source: <{url}>", *rendered])))
+    blocks.sort(key=lambda item: item[0])
+    text_blocks = [block for _, block in blocks]
+    return "\n\n".join(text_blocks).rstrip() + ("\n" if text_blocks else ""), total_messages, len(text_blocks)
+
+
+def refresh_web_chats_for_writeback(target: date, allow_missing: bool) -> None:
+    day_start = datetime(target.year, target.month, target.day).astimezone()
+    try:
+        result = sync_web_chats(needed_since=day_start)
+    except WebChatsUnavailable as exc:
+        if not allow_missing:
+            raise WebChatsUnavailable(
+                "Claude/ChatGPT web chats are required for AI-day writeback; no partial "
+                "writeback was performed. Fix the browser sync (log in again in Chrome if "
+                "asked), or explicitly pass --allow-missing-web-chats if the incomplete "
+                f"archive is intentional. Cause: {exc}"
+            ) from exc
+        print(
+            "  warning: web chat sync failed; using the last local archive because "
+            f"--allow-missing-web-chats was set ({exc})"
+        )
+        return
+    for provider, outcome in (result.get("providers") or {}).items():
+        print(
+            f"  web chats: {provider} listed {outcome.get('listed', 0)}, "
+            f"fetched {outcome.get('fetched', 0)}"
+        )
+    for warning in result.get("warnings") or []:
+        print(f"  note: {warning}")
+
+
+def install_web_chats(python_executable: Optional[str] = None) -> dict:
+    """Copy the extension + native host out of iCloud and register the host.
+
+    Chrome loads the extension and launches the host from a plain local
+    directory, which avoids iCloud eviction and file-provider prompts.
+    """
+    python_executable = python_executable or sys.executable
+    source_extension = WEB_CHATS_SOURCE_DIR / "extension"
+    source_host = WEB_CHATS_SOURCE_DIR / "host" / "web_chat_host.py"
+    if not (source_extension / "manifest.json").exists() or not source_host.exists():
+        raise FileNotFoundError(f"Web chat archiver sources not found under {WEB_CHATS_SOURCE_DIR}")
+    extension_dir = WEB_CHATS_INSTALL_DIR / "extension"
+    host_dir = WEB_CHATS_INSTALL_DIR / "host"
+    shutil.copytree(source_extension, extension_dir, dirs_exist_ok=True)
+    host_dir.mkdir(parents=True, exist_ok=True)
+    host_script = host_dir / "web_chat_host.py"
+    shutil.copy2(source_host, host_script)
+    launcher = host_dir / "run-host.sh"
+    launcher.write_text(
+        "\n".join([
+            "#!/bin/sh",
+            "# Generated by scripts/copilot.py install-web-chats; Chrome starts this host.",
+            f"export LIFE_WEB_CHATS_DIR={shlex.quote(str(WEB_CHATS_DIR))}",
+            f'exec {shlex.quote(python_executable)} {shlex.quote(str(host_script))} "$@"',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    manifest_path = CHROME_NATIVE_MESSAGING_HOSTS_DIR / f"{WEB_CHATS_HOST_NAME}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "name": WEB_CHATS_HOST_NAME,
+                "description": "Life Copilot web chat archiver host",
+                "path": str(launcher),
+                "type": "stdio",
+                "allowed_origins": [f"chrome-extension://{WEB_CHATS_EXTENSION_ID}/"],
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    WEB_CHATS_DIR.mkdir(parents=True, exist_ok=True)
+    return {
+        "extension_dir": str(extension_dir),
+        "extension_version": json.loads(read_text(source_extension / "manifest.json"))["version"],
+        "extension_id": WEB_CHATS_EXTENSION_ID,
+        "native_host_manifest": str(manifest_path),
+        "archive_dir": str(WEB_CHATS_DIR),
+    }
+
+
+def web_chats_extension_registered() -> bool:
+    """Whether the Chrome profile already has the unpacked extension loaded."""
+    prefs_path = CHROME_NATIVE_MESSAGING_HOSTS_DIR.parent / WEB_CHATS_CHROME_PROFILE / "Secure Preferences"
+    try:
+        prefs = json.loads(read_text(prefs_path))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return WEB_CHATS_EXTENSION_ID in prefs.get("extensions", {}).get("settings", {})
+
+
+def reload_web_chats_extension(expected_version: str, timeout: float = 30) -> str:
+    """Ask the loaded extension to reload and wait until the new code reports in.
+
+    Returns 'not-loaded', 'reloaded', or 'stale'. Chrome keeps the registered
+    worker script for an unpacked extension across restarts, even after its
+    version changes, so copying files alone does not update it. Chrome is
+    started in the background for this when needed and quit afterwards.
+    """
+    if not web_chats_host_alive() and not web_chats_extension_registered():
+        return "not-loaded"
+    try:
+        launched = connect_web_chats_host()
+    except WebChatsUnavailable:
+        return "stale"
+    try:
+        web_chats_host_request({"cmd": "reload_extension"}, timeout=5)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            try:
+                version = web_chats_host_request({"cmd": "ping"}, timeout=5).get("extension_version")
+            except (OSError, ValueError, WebChatsUnavailable):
+                continue
+            if version == expected_version:
+                return "reloaded"
+        return "stale"
+    except (OSError, ValueError, WebChatsUnavailable):
+        return "stale"
+    finally:
+        if launched:
+            quit_chrome()
+
+
 def split_markdown_sections(text: str) -> List[Tuple[str, str]]:
     lines = text.splitlines()
     sections: List[Tuple[str, str]] = []
@@ -2780,12 +3325,40 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
 
     print()
 
+    web_found = False
+    if getattr(args, "web_chats", False):
+        # Preview reads the local archive only; writeback-ai-day syncs first.
+        web_index = load_web_chats_index(WEB_CHATS_DIR)
+        for provider, (source, _, label, description) in WEB_CHAT_SOURCES.items():
+            transcript, msg_count, conv_count = export_web_chat_day_transcript(provider, target)
+            last_sync = (
+                web_index.get("providers", {}).get(provider, {}).get("last_success_at") or "never"
+            )
+            name = f"{label}:"
+            if transcript:
+                web_found = True
+                web_path = ai_trace_path_for_date(target, source)
+                print(f"  {label} trace file:".ljust(35) + f"{web_path.relative_to(ROOT)}")
+                print(f"  {label} conversations:".ljust(35) + f"{conv_count}")
+                print(f"  {label} messages:".ljust(35) + f"{msg_count}")
+                print("  Journal wikilink:".ljust(35) + f"- {obsidian_wikilink_for_path(web_path)}：{description}")
+            else:
+                print(f"  {name}".ljust(35) + "(no messages for this date in the local archive)")
+            print("  Last web sync:".ljust(35) + last_sync)
+            print()
+
     if jp.exists():
         print(f"  Journal file:                    {jp.relative_to(ROOT)} (exists)")
     else:
         print(f"  Journal file:                    {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
 
-    if not codex_transcript and not renderer_transcript and not claude_code_transcript and not openclaw_transcript:
+    if (
+        not codex_transcript
+        and not renderer_transcript
+        and not claude_code_transcript
+        and not openclaw_transcript
+        and not web_found
+    ):
         print("\n  No AI conversations found for this date.")
 
 
@@ -2881,12 +3454,20 @@ def writeback_ai_day(
     create_journal: bool = False,
     hook_payload: Optional[dict] = None,
     allow_missing_openclaw: bool = False,
+    web_chats: bool = False,
+    allow_missing_web_chats: bool = False,
 ) -> dict:
-    """Refresh daily traces and journal links, optionally closing a hook turn."""
+    """Refresh daily traces and journal links, optionally closing a hook turn.
+
+    `web_chats` first syncs Claude/ChatGPT web conversations through Chrome.
+    Hooks leave it off so finishing a turn never launches the browser.
+    """
     jp = journal_path_for_date(target)
+    if not jp.exists() and not create_journal:
+        raise FileNotFoundError(f"Journal not found: {jp}")
+    if web_chats:
+        refresh_web_chats_for_writeback(target, allow_missing_web_chats)
     if not jp.exists():
-        if not create_journal:
-            raise FileNotFoundError(f"Journal not found: {jp}")
         write_text(jp, render_diary_from_template(target))
 
     codex_transcript = export_codex_day_transcript(target).strip()
@@ -2942,11 +3523,21 @@ def writeback_ai_day(
             "  warning: OpenClaw unavailable; intentionally skipped Kai / "
             f"direct-message trace because --allow-missing-openclaw was set ({exc})"
         )
+    web_transcripts: Dict[str, str] = {}
+    if web_chats:
+        for provider in WEB_CHAT_SOURCES:
+            web_transcripts[provider], _, _ = export_web_chat_day_transcript(provider, target)
 
-    if not codex_transcript and not renderer_transcript and not claude_code_transcript and not openclaw_transcript:
+    if (
+        not codex_transcript
+        and not renderer_transcript
+        and not claude_code_transcript
+        and not openclaw_transcript
+        and not any(web_transcripts.values())
+    ):
         raise ValueError(
-            "No AI conversations (Codex, Claude Code, Life Claude Renderer, or OpenClaw) "
-            f"found for date: {target.isoformat()}"
+            "No AI conversations (Codex, Claude Code, Life Claude Renderer, OpenClaw, "
+            f"or Claude/ChatGPT web) found for date: {target.isoformat()}"
         )
 
     codex_path = ai_trace_path_for_date(target, "codex")
@@ -3028,6 +3619,25 @@ def writeback_ai_day(
         write_text(openclaw_path, openclaw_content)
         print(f"  wrote: {openclaw_path.relative_to(ROOT)}")
 
+    web_paths: Dict[str, Path] = {}
+    for provider, (source, _, label, _) in WEB_CHAT_SOURCES.items():
+        if not web_transcripts.get(provider):
+            continue
+        web_path = ai_trace_path_for_date(target, source)
+        write_text(web_path, "\n".join([
+            "---",
+            f"date: {target.isoformat()}",
+            f"source: {source}",
+            "generated_by: scripts/copilot.py writeback-ai-day",
+            "---",
+            "",
+            f"# {target.isoformat()} {label} Trace",
+            "",
+            web_transcripts[provider],
+        ]))
+        web_paths[provider] = web_path
+        print(f"  wrote: {web_path.relative_to(ROOT)}")
+
     # Normalize generated wikilinks so retries and concurrent sessions cannot
     # produce more than one bullet for a source/day.
     journal_text = read_text(jp)
@@ -3055,6 +3665,12 @@ def writeback_ai_day(
             openclaw_link,
             "Kai / OpenClaw direct conversations.",
         )
+    for provider, web_path in web_paths.items():
+        journal_text = ensure_single_from_kai_link(
+            journal_text,
+            obsidian_wikilink_for_path(web_path),
+            WEB_CHAT_SOURCES[provider][3],
+        )
     write_text(jp, journal_text)
     print(f"  updated: {jp.relative_to(ROOT)}")
 
@@ -3078,6 +3694,8 @@ def writeback_ai_day(
         "claude_code_trace": str(claude_code_path) if claude_code_transcript else "",
         "renderer_trace": str(renderer_path) if renderer_transcript else "",
         "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
+        "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
+        "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
         "fallback_used": fallback_used,
     }
 
@@ -3090,8 +3708,61 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         allow_missing_openclaw=bool(
             getattr(args, "allow_missing_openclaw", False)
         ),
+        # The CLI parser turns web chats on; programmatic callers opt in.
+        web_chats=bool(getattr(args, "web_chats", False)),
+        allow_missing_web_chats=bool(
+            getattr(args, "allow_missing_web_chats", False)
+        ),
     )
     print(result["journal"])
+
+
+def cmd_sync_web_chats(args: argparse.Namespace) -> None:
+    result = sync_web_chats(args.provider or None)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_web_chats_status(_args: argparse.Namespace) -> None:
+    manifest_path = CHROME_NATIVE_MESSAGING_HOSTS_DIR / f"{WEB_CHATS_HOST_NAME}.json"
+    status: Dict[str, object] = {
+        "archive_dir": str(WEB_CHATS_DIR),
+        "native_host_registered": manifest_path.exists(),
+        "installed_extension_dir": str(WEB_CHATS_INSTALL_DIR / "extension"),
+        "host_connected": web_chats_host_alive(),
+    }
+    index = load_web_chats_index(WEB_CHATS_DIR)
+    for provider in WEB_CHAT_SOURCES:
+        entry = index.get("providers", {}).get(provider, {})
+        status[provider] = {
+            "stored": len(entry.get("stored", {})),
+            "listed": len(entry.get("listed", {})),
+            "last_success_at": entry.get("last_success_at", ""),
+            "last_result": entry.get("last_result", {}),
+        }
+    print(json.dumps(status, ensure_ascii=False, indent=2))
+
+
+def cmd_install_web_chats(_args: argparse.Namespace) -> None:
+    result = install_web_chats()
+    print("Installed Life Copilot web chat archiver.")
+    print(f"  extension folder: {result['extension_dir']}")
+    print(f"  extension:        v{result['extension_version']} ({result['extension_id']})")
+    print(f"  native host:      {result['native_host_manifest']}")
+    print(f"  archive:          {result['archive_dir']}")
+    print()
+    reload_state = reload_web_chats_extension(result["extension_version"])
+    if reload_state == "reloaded":
+        print(f"The Chrome extension reloaded and now runs v{result['extension_version']}.")
+    elif reload_state == "stale":
+        print(
+            f"The Chrome extension did not switch to v{result['extension_version']}. Open "
+            "chrome://extensions and press reload on its card once."
+        )
+    else:
+        print("One-time Chrome step:")
+        print("  1. Open chrome://extensions and turn on Developer mode.")
+        print("  2. Click 'Load unpacked' and choose the extension folder above")
+        print("     (press Cmd+Shift+G in the file picker to paste the path).")
 
 
 def cmd_finalize_ai_day(args: argparse.Namespace) -> None:
@@ -4155,7 +4826,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow an intentionally incomplete preview when OpenClaw/Kai is unreachable.",
     )
-    s.set_defaults(func=cmd_preview_ai_day)
+    s.set_defaults(func=cmd_preview_ai_day, web_chats=True)
 
     s = sub.add_parser("writeback-ai-day")
     s.add_argument("--date", required=True)
@@ -4169,7 +4840,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow an intentionally incomplete writeback when OpenClaw/Kai is unreachable.",
     )
-    s.set_defaults(func=cmd_writeback_ai_day)
+    s.add_argument(
+        "--allow-missing-web-chats",
+        action="store_true",
+        help="Use the last local Claude/ChatGPT web archive when the browser sync fails.",
+    )
+    s.set_defaults(func=cmd_writeback_ai_day, web_chats=True)
+
+    s = sub.add_parser("sync-web-chats")
+    s.add_argument(
+        "--provider",
+        action="append",
+        choices=sorted(WEB_CHAT_SOURCES),
+        help="Limit the sync to one provider; repeat for several. Defaults to all.",
+    )
+    s.set_defaults(func=cmd_sync_web_chats)
+
+    s = sub.add_parser("web-chats-status")
+    s.set_defaults(func=cmd_web_chats_status)
+
+    s = sub.add_parser("install-web-chats")
+    s.set_defaults(func=cmd_install_web_chats)
 
     s = sub.add_parser("finalize-ai-day")
     s.add_argument("--hook-input-file", required=True)
