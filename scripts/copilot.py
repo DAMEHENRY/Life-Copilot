@@ -1377,6 +1377,10 @@ class OpenClawImportUnavailable(RuntimeError):
     """Raised when the read-only Windows/OpenClaw source cannot be reached."""
 
 
+class OpenClawRemoteFileMissing(OpenClawImportUnavailable):
+    """Raised when the Windows/OpenClaw host answers but the file does not exist."""
+
+
 def read_openclaw_remote_text(
     remote_path: str,
     timeout: int = 15,
@@ -1419,6 +1423,11 @@ def read_openclaw_remote_text(
         else:
             if result.returncode == 0:
                 return result.stdout
+            if f"cat: {remote_path}: No such file or directory" in result.stderr:
+                # The host answered, so retrying cannot make the file appear.
+                raise OpenClawRemoteFileMissing(
+                    f"{remote_path} does not exist on {OPENCLAW_SSH_HOST}"
+                )
             failures.append(result.stderr.strip() or f"ssh exited {result.returncode}")
         if attempt < attempts:
             time.sleep(attempt)
@@ -1635,7 +1644,19 @@ def export_openclaw_day_transcript(
     grouped: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
     seen_messages: set[Tuple[str, str, str, str, str]] = set()
     for session_path, (session_id, indexed_channel) in sorted(candidates.items()):
-        raw = read_openclaw_remote_text(session_path)
+        try:
+            raw = read_openclaw_remote_text(session_path)
+        except OpenClawRemoteFileMissing:
+            if not indexed_channel:
+                raise
+            # A reset indexes the new session before its first message creates
+            # the transcript; the previous transcript stays retained as
+            # ``*.jsonl.reset.*`` and is discovered above.
+            print(
+                f"  note: OpenClaw {indexed_channel} session {session_id} has no "
+                "transcript yet (no messages since it was created); skipped"
+            )
+            continue
         channel = indexed_channel or openclaw_session_direct_channel(raw)
         if channel not in OPENCLAW_DIRECT_CHANNEL_LABELS:
             continue

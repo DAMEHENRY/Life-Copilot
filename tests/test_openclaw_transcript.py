@@ -54,6 +54,26 @@ class TestOpenClawTranscript(unittest.TestCase):
 
         self.assertEqual(run.call_count, 3)
 
+    def test_remote_read_reports_missing_file_without_retrying(self):
+        missing = type(
+            "Result",
+            (),
+            {
+                "returncode": 1,
+                "stderr": "cat: /home/henry/new.jsonl: No such file or directory\n",
+            },
+        )()
+
+        with patch.object(
+            copilot.subprocess,
+            "run",
+            return_value=missing,
+        ) as run, patch.object(copilot.time, "sleep"):
+            with self.assertRaises(copilot.OpenClawRemoteFileMissing):
+                copilot.read_openclaw_remote_text("/home/henry/new.jsonl")
+
+        self.assertEqual(run.call_count, 1)
+
     def test_visible_messages_only_and_local_date_filter(self):
         session = "\n".join(
             [
@@ -183,6 +203,77 @@ class TestOpenClawTranscript(unittest.TestCase):
         self.assertEqual(session_count, 1)
         self.assertIn("索引外的凌晨对话", text)
         self.assertIn("Kai / Telegram Session 11111111-1111-1111-1111-111111111111", text)
+
+    def test_day_export_skips_indexed_session_before_its_first_message(self):
+        index = {
+            "agent:main:telegram:direct:owner": {"sessionId": "fresh-session"},
+        }
+        retained_path = (
+            f"{copilot.OPENCLAW_SESSIONS_DIR}/"
+            "22222222-2222-2222-2222-222222222222.jsonl.reset.2026-07-26T14-00-00Z"
+        )
+        retained = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "message",
+                        "timestamp": "2026-07-26T04:00:00.000Z",
+                        "message": {
+                            "role": "user",
+                            "sourceChannel": "telegram",
+                            "content": "重置前的对话",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                record("assistant", "收到", "2026-07-26T04:00:01.000Z"),
+            ]
+        )
+
+        def remote_read(path):
+            if path.endswith("sessions.json"):
+                return json.dumps(index)
+            if path.endswith("fresh-session.jsonl"):
+                raise copilot.OpenClawRemoteFileMissing(f"{path} does not exist")
+            if path == retained_path:
+                return retained
+            raise AssertionError(f"unexpected remote read: {path}")
+
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(
+                 copilot,
+                 "list_openclaw_remote_direct_session_paths",
+                 return_value=[retained_path],
+             ), \
+             patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 7, 26)):
+            text, message_count, session_count = copilot.export_openclaw_day_transcript(
+                date(2026, 7, 26)
+            )
+
+        self.assertEqual(message_count, 2)
+        self.assertEqual(session_count, 1)
+        self.assertIn("重置前的对话", text)
+        self.assertNotIn("fresh-session", text)
+
+    def test_day_export_fails_if_retained_session_disappears(self):
+        retained_path = (
+            f"{copilot.OPENCLAW_SESSIONS_DIR}/"
+            "33333333-3333-3333-3333-333333333333.jsonl.deleted.2026-07-26T14-00-00Z"
+        )
+
+        def remote_read(path):
+            if path.endswith("sessions.json"):
+                return "{}"
+            raise copilot.OpenClawRemoteFileMissing(f"{path} does not exist")
+
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(
+                 copilot,
+                 "list_openclaw_remote_direct_session_paths",
+                 return_value=[retained_path],
+             ):
+            with self.assertRaises(copilot.OpenClawRemoteFileMissing):
+                copilot.export_openclaw_day_transcript(date(2026, 7, 26))
 
     def test_wechat_delivery_mirror_is_not_archived_twice(self):
         session = "\n".join(
