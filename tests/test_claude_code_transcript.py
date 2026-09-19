@@ -47,6 +47,10 @@ def _assistant(parts: list[dict], ts: str, *, sidechain: bool = False) -> dict:
     }
 
 
+def _with_uuid(uuid: str, record: dict) -> dict:
+    return {**record, "uuid": uuid}
+
+
 class TestClaudeCodeTranscript(unittest.TestCase):
     def test_exports_only_visible_dialogue_for_target_day(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -198,6 +202,61 @@ class TestClaudeCodeTranscript(unittest.TestCase):
             self.assertEqual(text, "")
             self.assertEqual(message_count, 0)
             self.assertEqual(session_count, 0)
+
+    def test_forked_session_renders_shared_messages_once_in_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            renderer = root / "history.json"
+            renderer.write_text("[]", encoding="utf-8")
+            first_ts = _iso(datetime(2026, 6, 6, 10, 0))
+            draft_ts = _iso(datetime(2026, 6, 6, 11, 0))
+            fork_ts = _iso(datetime(2026, 6, 6, 11, 5))
+            title = {"type": "custom-title", "customTitle": "读书讨论"}
+            history = [
+                _with_uuid("u-1", _user("第一个问题", first_ts)),
+                _with_uuid("a-1", _assistant([{"type": "text", "text": "第一个回答"}], first_ts)),
+            ]
+
+            def fork(*records: dict) -> list[dict]:
+                # A fork writes its own first record, then copies the parent's
+                # records with their uuids and timestamps.
+                return [title, {"type": "queue-operation", "timestamp": fork_ts}, *history, *records]
+
+            # Named so that sorting by file name would put a fork first.
+            _write_session(projects, "b-original", [
+                {"type": "queue-operation", "timestamp": first_ts},
+                *history,
+                _with_uuid("u-2", _user("草稿问题", draft_ts)),
+                title,
+            ])
+            _write_session(projects, "a-edited-fork", fork(
+                _with_uuid("u-3", _user("改写后的问题", fork_ts)),
+                _with_uuid("a-3", _assistant([{"type": "text", "text": "改写后的回答"}], fork_ts)),
+            ))
+            _write_session(projects, "c-copy-only-fork", fork())
+            _write_session(projects, "d-unanswered-fork", fork(
+                _with_uuid("u-4", _user("没等到回答", fork_ts)),
+            ))
+
+            with patch.object(copilot, "CLAUDIAN_SESSIONS_DIR", root / "claudian"):
+                text, message_count, session_count = copilot.export_claude_code_day_transcript(
+                    date(2026, 6, 6),
+                    projects_dir=projects,
+                    renderer_history_path=renderer,
+                )
+
+            self.assertEqual(text, "\n\n".join([
+                "### Claude Code Session b-original - 读书讨论",
+                "[6/6/26 10:00 AM] Henry: 第一个问题",
+                "[6/6/26 10:00 AM] Claude: 第一个回答",
+                "[6/6/26 11:00 AM] Henry: 草稿问题",
+                "### Claude Code Session a-edited-fork - 读书讨论 (branched from b-original)",
+                "[6/6/26 11:05 AM] Henry: 改写后的问题",
+                "[6/6/26 11:05 AM] Claude: 改写后的回答",
+            ]) + "\n")
+            self.assertEqual(message_count, 5)
+            self.assertEqual(session_count, 2)
 
     def test_writeback_creates_trace_and_idempotent_from_kai_link(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1314,23 +1314,25 @@ def export_claude_code_day_transcript(
     """Build the visible transcript from native Claude Code project sessions.
 
     Tool results, tool calls, thinking, sidechains, abandoned user-only sessions,
-    and sessions already represented by Claudian/Renderer are excluded.
+    and sessions already represented by Claudian/Renderer are excluded. A forked
+    session repeats its parent's messages under the same uuids; each message is
+    shown once, in the session where it first appeared.
     """
     if projects_dir is None:
         projects_dir = CLAUDE_PROJECTS_DIR
     if not projects_dir.exists():
         return "", 0, 0
     excluded = claude_code_excluded_session_ids(renderer_history_path)
-    session_blocks: List[Tuple[str, str]] = []
-    total_messages = 0
+    # (started, session_id, custom title, [(ts, role, text, uuid)])
+    sessions: List[Tuple[str, str, str, List[Tuple[str, str, str, str]]]] = []
 
     for jsonl_path in sorted(projects_dir.glob("*.jsonl")):
         session_id = jsonl_path.stem
         if session_id in excluded:
             continue
         title = ""
-        lines: List[Tuple[str, str, str]] = []
-        has_visible_assistant = False
+        started = ""
+        lines: List[Tuple[str, str, str, str]] = []
         for raw in read_text(jsonl_path).splitlines():
             if not raw.strip():
                 continue
@@ -1344,28 +1346,52 @@ def export_claude_code_day_transcript(
                     title = candidate.strip()
                 continue
             ts = str(record.get("timestamp") or "")
+            started = started or ts
             if not ts or timestamp_to_local_date(ts) != d:
                 continue
             visible = claude_code_visible_message(record)
             if visible is None:
                 continue
             role, message_text = visible
-            speaker = user_name if role == "user" else assistant_name
-            has_visible_assistant = has_visible_assistant or role == "assistant"
-            lines.append((ts, speaker, message_text))
-            if not title and role == "user":
-                title = re.sub(r"\s+", " ", message_text)[:80]
-        if not lines or not has_visible_assistant:
+            lines.append((ts, role, message_text, str(record.get("uuid") or "")))
+        if lines:
+            sessions.append((started, session_id, title, lines))
+
+    # Records are appended as they happen, so the first timestamp in a file
+    # marks when the session started. Editing or rewinding a message in the
+    # desktop app starts a new session that writes its own first record, then
+    # copies the parent's records with their original uuids and timestamps.
+    # Walking sessions in start order keeps each copied message with the
+    # session it first appeared in.
+    sessions.sort(key=lambda item: item[0])
+    rendered_by: Dict[str, str] = {}
+    speakers = {"user": user_name, "assistant": assistant_name}
+    session_blocks: List[Tuple[str, str]] = []
+    total_messages = 0
+    for _, session_id, title, lines in sessions:
+        own = [line for line in lines if line[3] not in rendered_by]
+        if not any(role == "assistant" for _, role, _, _ in own):
             continue
+        parents = [rendered_by[uuid] for _, _, _, uuid in lines if uuid in rendered_by]
+        rendered_by.update((uuid, session_id) for _, _, _, uuid in own if uuid)
+        if not title:
+            title = next(
+                (re.sub(r"\s+", " ", text)[:80] for _, role, text, _ in own if role == "user"),
+                "",
+            )
         rendered = [
-            f"[{format_chat_timestamp(ts)}] {speaker}: {message_text}"
-            for ts, speaker, message_text in lines
+            f"[{format_chat_timestamp(ts)}] {speakers[role]}: {message_text}"
+            for ts, role, message_text, _ in own
         ]
         total_messages += len(rendered)
         heading = f"### Claude Code Session {session_id}"
         if title:
             heading += f" - {title}"
-        session_blocks.append((lines[0][0], heading + "\n\n" + "\n\n".join(rendered)))
+        if parents:
+            # A fork of a fork copies the root's messages first, so the last
+            # copied message names the session it branched from.
+            heading += f" (branched from {parents[-1]})"
+        session_blocks.append((own[0][0], heading + "\n\n" + "\n\n".join(rendered)))
 
     session_blocks.sort(key=lambda item: item[0])
     blocks = [block for _, block in session_blocks]
