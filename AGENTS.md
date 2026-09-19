@@ -23,7 +23,7 @@
 | 概念 | 路径 |
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web}-trace.md` |
+| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
