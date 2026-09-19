@@ -26,7 +26,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Paths (new flat structure)
@@ -1819,6 +1819,7 @@ def export_openclaw_day_transcript(
     d: date,
     user_name: str = "Henry",
     assistant_name: str = "Kai",
+    retained: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[str, int, int]:
     """Read retained Telegram/WeChat direct sessions and build a daily Kai trace.
 
@@ -1826,6 +1827,9 @@ def export_openclaw_day_transcript(
     files are also scanned because lifecycle resets and database rebuilds can
     remove historical chats from the active index without deleting transcripts.
     Group/heartbeat, cron, explicit test, and trajectory files remain excluded.
+    ``retained`` collects (session id, JSONL text) for every file read, so the
+    writeback can check the existing trace against them without another SSH
+    round trip.
     """
     index_path = f"{OPENCLAW_SESSIONS_DIR}/sessions.json"
     try:
@@ -1883,6 +1887,8 @@ def export_openclaw_day_transcript(
                 "transcript yet (no messages since it was created); skipped"
             )
             continue
+        if retained is not None:
+            retained.append((session_id, raw))
         channel = indexed_channel or openclaw_session_direct_channel(raw)
         if channel not in OPENCLAW_DIRECT_CHANNEL_LABELS:
             continue
@@ -3627,6 +3633,635 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
         print("\n  No AI conversations found for this date.")
 
 
+# ---------------------------------------------------------------------------
+# Non-destructive trace writeback
+# ---------------------------------------------------------------------------
+# Sources forget: OpenClaw stops retaining old sessions, Codex drops retried
+# and rolled-back turns from a rollout, Claude Code deletes old transcripts
+# and the renderer plugin trims its history. A regenerated trace is therefore
+# checked against the one on disk. A message missing from the new export may
+# go only if its source record still exists (the importer now filters it or
+# renders it differently) or the importer's text filters would drop it whole;
+# otherwise it is merged back.
+
+TRACE_USER = "Henry"
+TRACE_ASSISTANTS: Dict[str, str] = {
+    "codex": "Codex",
+    "claude-code": "Claude",
+    "life-claude-renderer": "Claude",
+    "openclaw": "Kai",
+    **{source: assistant for source, assistant, _, _ in WEB_CHAT_SOURCES.values()},
+}
+TRACE_SESSION_HEADING_RE = re.compile(
+    r"^### (?:Codex Thread|(?:Claude Code|Life Claude Renderer|Kai / \S+) Session"
+    r"|(?:Claude|ChatGPT) Web Conversation) (?P<session>\S+)"
+)
+# Henry's manual OpenClaw blocks put U+202F before AM/PM.
+TRACE_MESSAGE_RE = re.compile(
+    r"^\[(?P<ts>\d{1,2}/\d{1,2}/\d{2} \d{1,2}:\d{2}\s[AP]M)\] (?P<speaker>[^:\n]+): "
+)
+TRACE_SOURCE_LINE_RE = re.compile(r"^Source: <\S+>$")
+TRACE_MANUAL_MARKER_RE = re.compile(r"^<!-- openclaw-manual-(?P<edge>begin|end)\b.*-->$")
+# Lines importers write themselves (placeholders for images, audio and files,
+# notes on attachments or omitted context); the source never contains them.
+TRACE_ANNOTATION_RE = re.compile(
+    r"\[(?:Image|Audio|File|Attachment)(?:: [^\]]*)?\]"
+    r"|Attachments:"
+    r"|- (?:Image|Selected text|PDF selection|Quoted message)\b.*"
+    r"|(?:Attached file|Referenced (?:Codex chat|ChatGPT conversation)|Application screenshot)\b.*"
+)
+# (session id, displayed time, role, text) of one message a source still
+# holds. The text is normalized with trace_match_text; a time of "" matches
+# any time.
+SourceRecord = Tuple[str, str, str, str]
+
+
+def trace_match_text(*parts: object) -> str:
+    """Normalize text for line lookups, undoing what importers strip."""
+    text = "\n".join(part for part in parts if isinstance(part, str))
+    text = UNSAFE_CONTROL_RE.sub("", ANSI_ESCAPE_RE.sub("", text))
+    text = CHATGPT_PRIVATE_MARKER_RE.sub("", CHATGPT_CITATION_RE.sub("", text))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def split_trace_units(body: str, assistant: str) -> List[dict]:
+    """Split a trace body into units, in file order.
+
+    A unit starts at a message line, a session heading, a web ``Source:``
+    line or a manual-block marker and runs to the next of these. Units keep
+    their lines verbatim, so joining all their lines with newlines rebuilds
+    ``body``. Units of one session heading share a ``block`` number.
+    """
+    units: List[dict] = []
+    block, session, manual = 0, "", False
+    for line in body.split("\n"):
+        heading = None if manual else TRACE_SESSION_HEADING_RE.match(line)
+        marker = TRACE_MANUAL_MARKER_RE.match(line)
+        message = TRACE_MESSAGE_RE.match(line)
+        if message and message.group("speaker") not in (TRACE_USER, assistant):
+            message = None
+        if heading:
+            block, session = block + 1, heading.group("session")
+        elif marker and marker.group("edge") == "begin":
+            # A manual block is its own session, named by its begin marker.
+            block, session, manual = block + 1, line, True
+        kind = (
+            "heading" if heading
+            else "marker" if marker
+            else "source" if TRACE_SOURCE_LINE_RE.match(line)
+            else "message" if message
+            else ""
+        )
+        if kind or not units:
+            units.append({"kind": kind or "text", "lines": [line], "block": block, "session": session})
+            if kind == "message":
+                units[-1]["ts"] = re.sub(r"\s", " ", message.group("ts"))
+                units[-1]["role"] = "user" if message.group("speaker") == TRACE_USER else "assistant"
+        else:
+            units[-1]["lines"].append(line)
+        if marker and marker.group("edge") == "end":
+            block, session, manual = block + 1, "", False
+    # Codex hook fallback blocks have their own lifecycle in writeback_ai_day.
+    fallback_blocks = {
+        unit["block"]
+        for unit in units
+        if unit["kind"] == "heading"
+        and any(line.startswith("> hook-fallback-turn:") for line in unit["lines"])
+    }
+    for unit in units:
+        unit["text"] = "\n".join(line.rstrip() for line in unit["lines"]).strip()
+        unit["fallback"] = unit["block"] in fallback_blocks
+        unit["manual"] = unit["session"].startswith("<!--")
+    return units
+
+
+def trace_message_lines(unit: dict) -> List[str]:
+    """Lines of an archived message that its source record must contain."""
+    lines: List[str] = []
+    for line in TRACE_MESSAGE_RE.sub("", unit["text"], count=1).split("\n"):
+        line = trace_match_text(line.lstrip(" \t>"))
+        if line and not TRACE_ANNOTATION_RE.fullmatch(line):
+            lines.append(line)
+    return lines
+
+
+def trace_message_is_synthetic(source: str, unit: dict) -> bool:
+    """Whether the importer's text filters would now drop this message whole.
+
+    Such text (an injected context block, a runtime notice) may leave the
+    trace even when its source record is gone. Filters that depend on record
+    flags (Claude Code isMeta, OpenClaw senderIsOwner) cannot be replayed.
+    """
+    body = TRACE_MESSAGE_RE.sub("", unit["text"], count=1)
+    if source == "codex":
+        if unit["role"] == "user":
+            return not clean_codex_user_text(
+                codex_user_parts_to_text([{"type": "input_text", "text": body}])
+            )
+        return not clean_codex_assistant_text(body)
+    if source == "claude-code" and unit["role"] == "user":
+        return claude_code_visible_message({"type": "user", "message": {"content": body}}) is None
+    if source == "life-claude-renderer" and unit["role"] == "assistant":
+        return not LIFE_CLAUDE_RENDERER_NOTICE_RE.sub(
+            "", body.replace(LIFE_CLAUDE_RENDERER_PARTIAL_WARNING, "")
+        ).strip()
+    if source == "openclaw":
+        if unit["role"] == "user":
+            return not OPENCLAW_INTERNAL_CONTEXT_RE.sub("", body).strip()
+        return body.strip() == "NO_REPLY"
+    return False
+
+
+def trace_unit_time(unit: Optional[dict]) -> Optional[datetime]:
+    try:
+        return datetime.strptime((unit or {})["ts"], "%m/%d/%y %I:%M %p")
+    except (KeyError, ValueError):
+        return None
+
+
+def trace_unit_earlier(unit: Optional[dict], other: Optional[dict]) -> bool:
+    first, second = trace_unit_time(unit), trace_unit_time(other)
+    return bool(first and second and first < second)
+
+
+def guard_trace_transcript(
+    existing_trace: str,
+    transcript: str,
+    source: str,
+    source_records: Callable[[], List[SourceRecord]],
+) -> Tuple[str, List[dict], List[dict]]:
+    """Check a regenerated transcript against the trace it would replace.
+
+    Returns the transcript with lost messages merged back, the lost messages
+    (missing from the export and from the source), and the dropped ones
+    (the source still holds them, or the importer's text filters would drop
+    them whole, so the importer now filters or re-renders them).
+    ``source_records`` is called only when something is missing.
+    """
+    assistant = TRACE_ASSISTANTS[source]
+    # The frontmatter and title end up in a leading text unit, which is not compared.
+    old_units = split_trace_units(existing_trace, assistant)
+    new_units = split_trace_units(transcript, assistant)
+
+    # Messages that come through unchanged, looked up in their own session
+    # first. The pairs anchor lost messages when they are merged back.
+    available: Dict[Tuple[str, str], List[dict]] = {}
+    for unit in new_units:
+        if unit["kind"] == "message":
+            available.setdefault((unit["session"], unit["text"]), []).append(unit)
+    matched: Dict[int, dict] = {}
+    unmatched: List[dict] = []
+    for unit in old_units:
+        if unit["kind"] != "message" or unit["fallback"]:
+            continue
+        same_session = available.get((unit["session"], unit["text"]))
+        if same_session:
+            matched[id(unit)] = same_session.pop(0)
+        else:
+            unmatched.append(unit)
+    # Then in any session, since a regrouped export can move a message.
+    elsewhere: Dict[str, int] = {}
+    for (_, text), units in available.items():
+        elsewhere[text] = elsewhere.get(text, 0) + len(units)
+    missing: List[dict] = []
+    for unit in unmatched:
+        if elsewhere.get(unit["text"]):
+            elsewhere[unit["text"]] -= 1
+        else:
+            missing.append(unit)
+    if not missing:
+        return transcript, [], []
+
+    # Henry supplied the manual blocks; no source record stands behind them.
+    lost_ids = {id(unit) for unit in missing if unit["manual"]}
+    dropped = [
+        unit for unit in missing
+        if not unit["manual"] and trace_message_is_synthetic(source, unit)
+    ]
+    dropped_ids = {id(unit) for unit in dropped}
+    pending = [
+        unit for unit in missing
+        if not unit["manual"] and id(unit) not in dropped_ids
+    ]
+    if pending:
+        by_session: Dict[Tuple[str, str], List[dict]] = {}
+        by_role: Dict[str, List[dict]] = {}
+        for session, ts, role, text in source_records():
+            record = {"session": session, "ts": ts, "text": text, "used": False}
+            by_session.setdefault((session, role), []).append(record)
+            by_role.setdefault(role, []).append(record)
+
+        def claim(unit: dict) -> bool:
+            # Each source message accounts for one archived message, so a
+            # rollout that kept one of five identical retries covers one.
+            pool = (
+                by_session.get((unit["session"], unit["role"]), [])
+                if unit["session"]
+                else by_role.get(unit["role"], [])
+            )
+            candidates = [r for r in pool if not r["used"] and r["ts"] in (unit["ts"], "")]
+            remaining = set(trace_message_lines(unit))
+            chosen: List[dict] = []
+            # A message the importer merged from several records needs all of them.
+            while candidates and (remaining or not chosen):
+                best = max(
+                    candidates,
+                    key=lambda r: (sum(line in r["text"] for line in remaining), -len(r["text"])),
+                )
+                covered = {line for line in remaining if line in best["text"]}
+                if remaining and not covered:
+                    break
+                chosen.append(best)
+                candidates.remove(best)
+                remaining -= covered
+            if remaining or not chosen:
+                return False
+            for record in chosen:
+                record["used"] = True
+            return True
+
+        # Messages that came through claim their records before missing ones.
+        keys = {(unit["session"], unit["ts"], unit["role"]) for unit in pending}
+        missing_ids = {id(unit) for unit in missing}
+        for unit in old_units:
+            if (
+                unit["kind"] == "message"
+                and not unit["fallback"]
+                and id(unit) not in missing_ids
+                and (unit["session"], unit["ts"], unit["role"]) in keys
+            ):
+                claim(unit)
+        for unit in pending:
+            if claim(unit):
+                dropped.append(unit)
+            else:
+                lost_ids.add(id(unit))
+    lost = [unit for unit in missing if id(unit) in lost_ids]
+    if not lost:
+        return transcript, [], dropped
+    return merge_trace_units(old_units, new_units, lost_ids, matched), lost, dropped
+
+
+def merge_trace_units(
+    old_units: List[dict],
+    new_units: List[dict],
+    lost_ids: set[int],
+    matched: Dict[int, dict],
+) -> str:
+    """Put lost messages back where they were, rebuilding missing sessions.
+
+    A message goes after the nearest earlier message of its session that is
+    in the new transcript, stepping over newly exported messages that are
+    older than it. A session missing from the export is rebuilt from its old
+    heading and placed after the session it used to follow.
+    """
+    def blocks_of(units: List[dict]) -> List[List[dict]]:
+        blocks: List[List[dict]] = []
+        for unit in units:
+            if not blocks or blocks[-1][0]["block"] != unit["block"]:
+                blocks.append([])
+            blocks[-1].append(unit)
+        return blocks
+
+    def index_of(units: List[dict], unit: Optional[dict]) -> Optional[int]:
+        return next((i for i, other in enumerate(units) if other is unit), None)
+
+    def home(session: str) -> Optional[List[dict]]:
+        return next(
+            (block for block in new_blocks if block[0]["session"] == session and not block[0]["fallback"]),
+            None,
+        )
+
+    def first_message(block: List[dict]) -> Optional[dict]:
+        return next((unit for unit in block if unit["kind"] == "message"), None)
+
+    new_blocks = blocks_of(new_units)
+    old_blocks = blocks_of(old_units)
+    old_sessions = {unit["session"] for unit in old_units}
+    carried_over = {id(unit) for unit in matched.values()}
+    inserted: set[int] = set()
+    for number, old_block in enumerate(old_blocks):
+        lost_here = [unit for unit in old_block if id(unit) in lost_ids]
+        if not lost_here:
+            continue
+        target = home(old_block[0]["session"])
+        if target is None:
+            restored = (
+                list(old_block)
+                if old_block[0]["manual"]
+                else [
+                    unit for unit in old_block
+                    if unit["kind"] in ("heading", "source") or id(unit) in lost_ids
+                ]
+            )
+            position = 0
+            for earlier in reversed(old_blocks[:number]):
+                previous = home(earlier[0]["session"]) if not earlier[0]["fallback"] else None
+                if previous is not None:
+                    position = next(i for i, block in enumerate(new_blocks) if block is previous) + 1
+                    break
+            while (
+                position < len(new_blocks)
+                and new_blocks[position][0]["session"] not in old_sessions
+                and trace_unit_earlier(first_message(new_blocks[position]), first_message(restored))
+            ):
+                position += 1
+            new_blocks.insert(position, restored)
+            inserted.update(id(unit) for unit in restored)
+            continue
+        for unit in lost_here:
+            place = index_of(old_block, unit) or 0
+            position = None
+            for earlier in reversed(old_block[:place]):
+                anchor = earlier if id(earlier) in inserted else matched.get(id(earlier))
+                found = index_of(target, anchor)
+                if found is not None:
+                    position = found + 1
+                    break
+            if position is None:
+                position = next(
+                    (i for i, other in enumerate(target) if other["kind"] == "message"),
+                    len(target),
+                )
+            while (
+                position < len(target)
+                and target[position]["kind"] == "message"
+                and id(target[position]) not in carried_over | inserted
+                and trace_unit_earlier(target[position], unit)
+            ):
+                position += 1
+            target.insert(position, unit)
+            inserted.add(id(unit))
+
+    # Units keep their own lines; each run of put-back units gets one blank
+    # line on either side.
+    flat = [unit for block in new_blocks for unit in block]
+    lines: List[str] = []
+    for number, unit in enumerate(flat):
+        unit_lines = unit["lines"]
+        if id(unit) in inserted:
+            if number and id(flat[number - 1]) not in inserted and lines and lines[-1].strip():
+                lines.append("")
+            if number + 1 == len(flat) or id(flat[number + 1]) not in inserted:
+                while unit_lines and not unit_lines[-1].strip():
+                    unit_lines = unit_lines[:-1]
+                unit_lines = [*unit_lines, ""]
+        lines.extend(unit_lines)
+    return "\n".join(lines)
+
+
+def describe_trace_units(units: List[dict], limit: int = 5) -> str:
+    shown = [unit["text"].split("\n", 1)[0][:80] for unit in units[:limit]]
+    if len(units) > limit:
+        shown.append(f"… and {len(units) - limit} more")
+    return "; ".join(shown)
+
+
+def write_ai_trace(
+    path: Path,
+    header: List[str],
+    transcript: str,
+    source: str,
+    source_records: Callable[[], List[SourceRecord]],
+    force: bool = False,
+) -> int:
+    """Write a regenerated trace without silently shrinking the archive.
+
+    Messages the source no longer has are merged back unless ``force`` is
+    set (Henry must approve that). Returns how many were kept.
+    """
+    label = path.relative_to(ROOT)
+    kept = 0
+    if path.exists():
+        merged, lost, dropped = guard_trace_transcript(
+            read_text(path), transcript, source, source_records
+        )
+        if dropped:
+            print(
+                f"  note: {label}: left out {len(dropped)} archived message(s) that the "
+                "importer now filters or renders differently"
+            )
+        if lost and force:
+            print(
+                f"  WARNING: --force dropped {len(lost)} message(s) from {label} that the "
+                f"source no longer has: {describe_trace_units(lost)}"
+            )
+        elif lost:
+            transcript, kept = merged, len(lost)
+            print(
+                f"  WARNING: kept {len(lost)} message(s) in {label} that the source no "
+                f"longer has, so regenerating would have lost them: {describe_trace_units(lost)}. "
+                "Dropping them needs Henry's explicit approval (--force)."
+            )
+    write_text(path, "\n".join([*header, transcript]))
+    print(f"  wrote: {label}")
+    return kept
+
+
+def codex_day_source_records(d: date) -> List[SourceRecord]:
+    """Every user/assistant message the Codex rollouts still hold for ``d``.
+
+    Subagent threads and filtered messages count: the only question is
+    whether the source still has them.
+    """
+    records: List[SourceRecord] = []
+    for session_file in codex_session_files_for_date_range(d):
+        thread = codex_thread_label(session_file)
+        for raw in read_text(session_file).splitlines():
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            payload = record.get("payload")
+            ts = str(record.get("timestamp") or "")
+            if (
+                record.get("type") != "response_item"
+                or not isinstance(payload, dict)
+                or payload.get("type") != "message"
+                or payload.get("role") not in {"user", "assistant"}
+                or timestamp_to_local_date(ts) != d
+            ):
+                continue
+            content = payload.get("content")
+            text = "\n".join(
+                part["text"]
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+            # Answers to Codex's questions are stored as JSON; add their text.
+            reply = summarize_codex_question_reply(text)
+            records.append((
+                thread,
+                format_chat_timestamp(ts),
+                payload["role"],
+                trace_match_text(text, reply if reply != text else None),
+            ))
+    return records
+
+
+def claude_code_day_source_records(
+    d: date,
+    projects_dir: Optional[Path] = None,
+) -> List[SourceRecord]:
+    """Every user/assistant message the Claude Code project still holds for ``d``."""
+    if projects_dir is None:
+        projects_dir = CLAUDE_PROJECTS_DIR
+    records: List[SourceRecord] = []
+    for jsonl_path in sorted(projects_dir.glob("*.jsonl")) if projects_dir.exists() else []:
+        for raw in read_text(jsonl_path).splitlines():
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            role = record.get("type")
+            message = record.get("message")
+            ts = str(record.get("timestamp") or "")
+            if role not in {"user", "assistant"} or not isinstance(message, dict) or timestamp_to_local_date(ts) != d:
+                continue
+            content = message.get("content")
+            texts = [content] if isinstance(content, str) else [
+                part.get("text")
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            records.append((jsonl_path.stem, format_chat_timestamp(ts), role, trace_match_text(*texts)))
+    return records
+
+
+def life_claude_renderer_day_source_records(
+    d: date,
+    history_path: Optional[Path] = None,
+) -> List[SourceRecord]:
+    """Every user/assistant message the renderer history still holds for ``d``."""
+    if history_path is None:
+        history_path = LIFE_CLAUDE_RENDERER_HISTORY
+    records: List[SourceRecord] = []
+    for conv in load_life_claude_renderer_history(history_path):
+        for msg in conv["messages"]:
+            if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
+                continue
+            ts_ms = msg.get("timestamp")
+            if not isinstance(ts_ms, (int, float)):
+                continue
+            local = datetime.fromtimestamp(ts_ms / 1000)
+            if local.date() != d:
+                continue
+            attachments = msg.get("contextAttachments")
+            selections = [
+                att.get("text")
+                for att in (attachments if isinstance(attachments, list) else [])
+                if isinstance(att, dict)
+            ]
+            records.append((
+                conv["sessionId"],
+                format_chat_timestamp(local.isoformat()),
+                msg["role"],
+                trace_match_text(msg.get("displayContent"), msg.get("content"), *selections),
+            ))
+    return records
+
+
+def openclaw_day_source_records(d: date, retained: List[Tuple[str, str]]) -> List[SourceRecord]:
+    """Every message the OpenClaw sessions read for ``d`` still hold.
+
+    Kai's text and each of its message-tool sends count separately, since
+    the importer archives them as separate messages.
+    """
+    records: List[SourceRecord] = []
+    for session_id, session_jsonl in retained:
+        for raw in session_jsonl.splitlines():
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            message = record.get("message")
+            ts = str(record.get("timestamp") or "")
+            if (
+                record.get("type") != "message"
+                or not isinstance(message, dict)
+                or message.get("role") not in {"user", "assistant"}
+                or timestamp_to_local_date(ts) != d
+            ):
+                continue
+            content = message.get("content")
+            texts = [openclaw_message_text(content)]
+            for part in content if isinstance(content, list) else []:
+                if not isinstance(part, dict) or part.get("type") != "toolCall" or part.get("name") != "message":
+                    continue
+                args = part.get("arguments")
+                if isinstance(args, dict) and isinstance(args.get("message"), str):
+                    texts.append(args["message"].replace("\\n", "\n"))
+            for text in texts:
+                if text.strip():
+                    records.append((session_id, format_chat_timestamp(ts), message["role"], trace_match_text(text)))
+    return records
+
+
+def web_chat_day_source_records(
+    provider: str,
+    d: date,
+    store_dir: Optional[Path] = None,
+) -> List[SourceRecord]:
+    """Every message, on any branch, the web chat archive holds for ``d``."""
+    if store_dir is None:
+        store_dir = WEB_CHATS_DIR
+    provider_dir = store_dir / provider
+    records: List[SourceRecord] = []
+    for path in sorted(provider_dir.glob("*.json")) if provider_dir.is_dir() else []:
+        try:
+            stored = json.loads(read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        conversation = stored.get("conversation") if isinstance(stored, dict) else None
+        if not isinstance(conversation, dict):
+            continue
+        conv_id = str(stored.get("id") or path.stem)
+        if provider == "claude":
+            for message in conversation.get("chat_messages") or []:
+                if not isinstance(message, dict):
+                    continue
+                role = {"human": "user", "assistant": "assistant"}.get(message.get("sender"))
+                ts = message.get("created_at")
+                if role is None or not isinstance(ts, str) or timestamp_to_local_date(ts) != d:
+                    continue
+                content = message.get("content")
+                blocks = [
+                    block.get("text")
+                    for block in (content if isinstance(content, list) else [])
+                    if isinstance(block, dict)
+                ]
+                names = [
+                    item.get("file_name")
+                    for item in [*(message.get("files") or []), *(message.get("attachments") or [])]
+                    if isinstance(item, dict)
+                ]
+                records.append((
+                    conv_id, format_chat_timestamp(ts), role,
+                    trace_match_text(message.get("text"), *blocks, *names),
+                ))
+            continue
+        mapping = conversation.get("mapping")
+        for node in mapping.values() if isinstance(mapping, dict) else []:
+            message = node.get("message") if isinstance(node, dict) else None
+            if not isinstance(message, dict):
+                continue
+            role = {"user": "user", "assistant": "assistant", "tool": "assistant"}.get(
+                (message.get("author") or {}).get("role")
+            )
+            ts = chatgpt_timestamp(message.get("create_time"))
+            if role is None or (ts and timestamp_to_local_date(ts) != d):
+                continue
+            metadata = message.get("metadata") or {}
+            parts = (message.get("content") or {}).get("parts") or []
+            texts = [part if isinstance(part, str) else part.get("text") for part in parts if isinstance(part, (str, dict))]
+            names = [a.get("name") for a in metadata.get("attachments") or [] if isinstance(a, dict)]
+            records.append((
+                conv_id, format_chat_timestamp(ts) if ts else "", role,
+                trace_match_text(*texts, *names, metadata.get("image_gen_title")),
+            ))
+    return records
+
+
 def render_hook_fallback_turn(
     target: date,
     payload: dict,
@@ -3721,11 +4356,14 @@ def writeback_ai_day(
     allow_missing_openclaw: bool = False,
     web_chats: bool = False,
     allow_missing_web_chats: bool = False,
+    force: bool = False,
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn.
 
     `web_chats` first syncs Claude/ChatGPT web conversations through Chrome.
     Hooks leave it off so finishing a turn never launches the browser.
+    Archived messages that a source no longer has are kept in their trace
+    unless `force` is set, which needs Henry's explicit approval.
     """
     jp = journal_path_for_date(target)
     if not jp.exists() and not create_journal:
@@ -3772,8 +4410,9 @@ def writeback_ai_day(
         )
     renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
     claude_code_transcript, _, _ = export_claude_code_day_transcript(target)
+    openclaw_retained: List[Tuple[str, str]] = []
     try:
-        openclaw_transcript, _, _ = export_openclaw_day_transcript(target)
+        openclaw_transcript, _, _ = export_openclaw_day_transcript(target, retained=openclaw_retained)
     except OpenClawImportUnavailable as exc:
         if not allow_missing_openclaw:
             raise OpenClawImportUnavailable(
@@ -3820,88 +4459,45 @@ def writeback_ai_day(
             read_text(openclaw_path),
         )
 
-    # Write Codex trace file
-    if codex_transcript:
-        codex_content = "\n".join([
-            "---",
-            f"date: {target.isoformat()}",
-            "source: codex",
-            "generated_by: scripts/copilot.py writeback-ai-day",
-            "---",
-            "",
-            f"# {target.isoformat()} Codex Trace",
-            "",
-            codex_transcript,
-        ])
-        write_text(codex_path, codex_content)
-        print(f"  wrote: {codex_path.relative_to(ROOT)}")
-
-    # Write Life Claude Renderer trace file
-    if renderer_transcript:
-        renderer_content = "\n".join([
-            "---",
-            f"date: {target.isoformat()}",
-            "source: life-claude-renderer",
-            "generated_by: scripts/copilot.py writeback-ai-day",
-            "---",
-            "",
-            f"# {target.isoformat()} Life Claude Renderer Trace",
-            "",
-            renderer_transcript,
-        ])
-        write_text(renderer_path, renderer_content)
-        print(f"  wrote: {renderer_path.relative_to(ROOT)}")
-
-    # Write native Claude Code trace file
-    if claude_code_transcript:
-        claude_code_content = "\n".join([
-            "---",
-            f"date: {target.isoformat()}",
-            "source: claude-code",
-            "generated_by: scripts/copilot.py writeback-ai-day",
-            "---",
-            "",
-            f"# {target.isoformat()} Claude Code Trace",
-            "",
-            claude_code_transcript,
-        ])
-        write_text(claude_code_path, claude_code_content)
-        print(f"  wrote: {claude_code_path.relative_to(ROOT)}")
-
-    if openclaw_transcript:
-        openclaw_content = "\n".join([
-            "---",
-            f"date: {target.isoformat()}",
-            "source: openclaw",
-            "channels: telegram, openclaw-weixin",
-            "generated_by: scripts/copilot.py writeback-ai-day",
-            "---",
-            "",
-            f"# {target.isoformat()} Kai / OpenClaw Direct-Message Trace",
-            "",
-            openclaw_transcript,
-        ])
-        write_text(openclaw_path, openclaw_content)
-        print(f"  wrote: {openclaw_path.relative_to(ROOT)}")
-
+    # (source, path, title, extra frontmatter, transcript, source records)
+    traces: List[Tuple[str, Path, str, List[str], str, Callable[[], List[SourceRecord]]]] = [
+        ("codex", codex_path, "Codex Trace", [], codex_transcript,
+         lambda: codex_day_source_records(target)),
+        ("life-claude-renderer", renderer_path, "Life Claude Renderer Trace", [], renderer_transcript,
+         lambda: life_claude_renderer_day_source_records(target)),
+        ("claude-code", claude_code_path, "Claude Code Trace", [], claude_code_transcript,
+         lambda: claude_code_day_source_records(target)),
+        ("openclaw", openclaw_path, "Kai / OpenClaw Direct-Message Trace",
+         ["channels: telegram, openclaw-weixin"], openclaw_transcript,
+         lambda: openclaw_day_source_records(target, openclaw_retained)),
+    ]
     web_paths: Dict[str, Path] = {}
     for provider, (source, _, label, _) in WEB_CHAT_SOURCES.items():
         if not web_transcripts.get(provider):
             continue
-        web_path = ai_trace_path_for_date(target, source)
-        write_text(web_path, "\n".join([
+        web_paths[provider] = ai_trace_path_for_date(target, source)
+        traces.append((
+            source, web_paths[provider], f"{label} Trace", [], web_transcripts[provider],
+            lambda provider=provider: web_chat_day_source_records(provider, target),
+        ))
+    kept_lost_messages: Dict[str, int] = {}
+    for source, path, title, extra, transcript, records in traces:
+        if not transcript:
+            continue
+        header = [
             "---",
             f"date: {target.isoformat()}",
             f"source: {source}",
+            *extra,
             "generated_by: scripts/copilot.py writeback-ai-day",
             "---",
             "",
-            f"# {target.isoformat()} {label} Trace",
+            f"# {target.isoformat()} {title}",
             "",
-            web_transcripts[provider],
-        ]))
-        web_paths[provider] = web_path
-        print(f"  wrote: {web_path.relative_to(ROOT)}")
+        ]
+        kept = write_ai_trace(path, header, transcript, source, records, force=force)
+        if kept:
+            kept_lost_messages[source] = kept
 
     # Normalize generated wikilinks so retries and concurrent sessions cannot
     # produce more than one bullet for a source/day.
@@ -3962,6 +4558,7 @@ def writeback_ai_day(
         "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
         "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
         "fallback_used": fallback_used,
+        "kept_lost_messages": kept_lost_messages,
     }
 
 
@@ -3978,6 +4575,7 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         allow_missing_web_chats=bool(
             getattr(args, "allow_missing_web_chats", False)
         ),
+        force=bool(getattr(args, "force", False)),
     )
     print(result["journal"])
 
@@ -5109,6 +5707,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-missing-web-chats",
         action="store_true",
         help="Use the last local Claude/ChatGPT web archive when the browser sync fails.",
+    )
+    s.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Let regenerated traces drop archived messages that their source no longer "
+            "has. Only with Henry's explicit approval."
+        ),
     )
     s.set_defaults(func=cmd_writeback_ai_day, web_chats=True)
 
