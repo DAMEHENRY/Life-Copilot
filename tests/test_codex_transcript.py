@@ -191,6 +191,85 @@ class TestCodexTranscriptSanitizing(unittest.TestCase):
         self.assertNotIn("\x00", transcript)
         self.assertNotIn("\x1b", transcript)
 
+    def test_injected_context_is_dropped_and_images_become_placeholders(self):
+        def user(ts, *parts):
+            return {
+                "timestamp": ts,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": list(parts)},
+            }
+
+        def text(value):
+            return {"type": "input_text", "text": value}
+
+        image = {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+        records = [
+            {
+                "timestamp": "2026-07-10T02:14:00Z",
+                "type": "session_meta",
+                "payload": {"type": "session_meta", "id": "thread-injected"},
+            },
+            user(
+                "2026-07-10T02:14:06Z",
+                text("<recommended_plugins>\n- Teams (teams@openai-curated-remote)\n</recommended_plugins>"),
+                text("# AGENTS.md instructions for /Users/me/project\n\n<INSTRUCTIONS>\n# Life Copilot\n</INSTRUCTIONS>"),
+                text("<environment_context>\n  <cwd>/Users/me/project</cwd>\n</environment_context>"),
+            ),
+            user(
+                "2026-07-10T02:15:00Z",
+                text("# Files mentioned by the user:\n\n## photo.png: /tmp/photo.png\n\n## My request for Codex:\n看看这张图\n"),
+                text('<image name=[Image #1] path="/Users/me/project/attachments/photo.png">'),
+                image,
+                text("</image>"),
+            ),
+            user("2026-07-10T02:16:00Z", text("<image>"), image, text("</image>"), text("这张呢")),
+            user(
+                "2026-07-10T02:17:00Z",
+                text("<environment_context>\n  <current_date>2026-07-11</current_date>\n</environment_context>"),
+            ),
+            user(
+                "2026-07-10T02:18:00Z",
+                text("<skill>\n<name>doc</name>\n<path>/skills/doc/SKILL.md</path>\nbody\n</skill>"),
+            ),
+            user(
+                "2026-07-10T02:19:00Z",
+                text("<environment_context>\n  <cwd>/x</cwd>\n</environment_context>\n\n还有这个问题"),
+            ),
+            user(
+                "2026-07-10T02:20:00Z",
+                text(
+                    "<send_user_message_question_reply>\n"
+                    '[{"questionItemId":"q1","question":"用哪个编辑器？","answer":"Vim"}]\n'
+                    "</send_user_message_question_reply>"
+                ),
+            ),
+            {
+                "timestamp": "2026-07-10T02:21:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "好的"}],
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "rollout-injected.jsonl"
+            session.write_text(
+                "\n".join(json.dumps(record, ensure_ascii=False) for record in records),
+                encoding="utf-8",
+            )
+            transcript = export_codex_transcript(session)
+
+        for injected in ("recommended_plugins", "AGENTS.md instructions", "environment_context", "<skill>", "<image", "</image>"):
+            self.assertNotIn(injected, transcript)
+        self.assertIn("看看这张图\n\n[Image: photo.png]", transcript)
+        self.assertIn("Henry: [Image]\n这张呢", transcript)
+        self.assertIn("Henry: 还有这个问题", transcript)
+        self.assertIn("Henry: > 用哪个编辑器？\n\nVim", transcript)
+        self.assertIn("Codex: 好的", transcript)
+        self.assertEqual(transcript.count("Henry:"), 4)
+
     def test_oversized_trace_emits_warning(self):
         with patch("sys.stderr") as stderr:
             warn_if_oversized_codex_transcript(

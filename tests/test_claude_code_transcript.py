@@ -88,6 +88,90 @@ class TestClaudeCodeTranscript(unittest.TestCase):
             self.assertEqual(message_count, 2)
             self.assertEqual(session_count, 1)
 
+    def test_keeps_prompts_sent_as_content_parts_with_pasted_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            renderer = root / "history.json"
+            renderer.write_text("[]", encoding="utf-8")
+            ts = _iso(datetime(2026, 9, 18, 15, 18))
+            image = {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
+            }
+            meta_note = _user([{"type": "text", "text": "[Image: source: /private/tmp/paste.png]"}], ts)
+            meta_note["isMeta"] = True
+            resize_note = _user("[Image: original 2250x1110, displayed at 2000x987.]", ts)
+            resize_note["isMeta"] = True
+            _write_session(projects, "image-session", [
+                _user([image, {"type": "text", "text": "  图是会议白板  "}], ts),
+                meta_note,
+                resize_note,
+                _assistant([{"type": "text", "text": "看到了"}], ts),
+                _user([image, image, {"type": "text", "text": "两张截图"}], ts),
+                _user([{"type": "text", "text": "prompt sent as parts"}], ts),
+                _user([{"type": "text", "text": "[Request interrupted by user]"}], ts),
+                _user([image], ts),
+                _user([
+                    {"type": "tool_result", "content": "tool output"},
+                    {"type": "text", "text": "[Request interrupted by user for tool use]"},
+                ], ts),
+            ])
+
+            with patch.object(copilot, "CLAUDIAN_SESSIONS_DIR", root / "claudian"):
+                text, message_count, session_count = copilot.export_claude_code_day_transcript(
+                    date(2026, 9, 18),
+                    projects_dir=projects,
+                    renderer_history_path=renderer,
+                )
+
+            self.assertIn("Henry: [Image]\n\n图是会议白板\n", text)
+            self.assertIn("Henry: [Image]\n\n[Image]\n\n两张截图\n", text)
+            self.assertIn("Henry: prompt sent as parts", text)
+            self.assertNotIn("iVBORw0KGgo", text)
+            self.assertNotIn("/private/tmp", text)
+            self.assertNotIn("displayed at", text)
+            self.assertNotIn("Request interrupted", text)
+            self.assertNotIn("tool output", text)
+            self.assertEqual(message_count, 4)
+            self.assertEqual(session_count, 1)
+
+    def test_drops_task_notifications_and_client_error_notices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            renderer = root / "history.json"
+            renderer.write_text("[]", encoding="utf-8")
+            ts = _iso(datetime(2026, 9, 7, 22, 56))
+            limit_notice = _assistant(
+                [{"type": "text", "text": "You've hit your session limit · resets 1am"}], ts
+            )
+            limit_notice["isApiErrorMessage"] = True
+            limit_notice["message"]["model"] = "<synthetic>"
+            _write_session(projects, "notices", [
+                _user("更新一下索引", ts),
+                _assistant([{"type": "text", "text": "开始更新"}], ts),
+                _user(
+                    "<task-notification>\n<task-id>task-1</task-id>\n"
+                    "<status>completed</status>\n</task-notification>",
+                    ts,
+                ),
+                limit_notice,
+            ])
+
+            with patch.object(copilot, "CLAUDIAN_SESSIONS_DIR", root / "claudian"):
+                text, message_count, _ = copilot.export_claude_code_day_transcript(
+                    date(2026, 9, 7),
+                    projects_dir=projects,
+                    renderer_history_path=renderer,
+                )
+
+            self.assertIn("Henry: 更新一下索引", text)
+            self.assertIn("Claude: 开始更新", text)
+            self.assertNotIn("task-notification", text)
+            self.assertNotIn("session limit", text)
+            self.assertEqual(message_count, 2)
+
     def test_excludes_renderer_session_and_abandoned_user_only_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

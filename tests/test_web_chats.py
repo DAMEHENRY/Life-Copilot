@@ -178,6 +178,50 @@ class TestVisibleMessages(unittest.TestCase):
         for hidden in ("OLD QUESTION", "Let me look", "HEALTH DATA", "turn0search0"):
             self.assertNotIn(hidden, joined)
 
+    def test_chatgpt_keeps_generated_images_and_untranscribed_voice_turns(self):
+        image = {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_9"}
+        nodes = [
+            _node("root", None),
+            _node("u1", "root", "user", parts=["画一只猫"], at=_local(12, 11)),
+            _node("gen", "u1", "assistant", content_type="code", recipient="t2uay3k.sj1i4kz", at=_local(12, 11, 1)),
+            _node(
+                "img", "gen", "tool", content_type="multimodal_text", parts=[image],
+                metadata={"image_gen_title": "Cat portrait"}, at=_local(12, 11, 2),
+            ),
+            _node(
+                "img-for-model", "img", "tool", content_type="multimodal_text",
+                parts=[image, "Model caption: a cat"],
+                metadata={"image_gen_title": "Cat portrait", "is_visually_hidden_from_conversation": True},
+                at=_local(12, 11, 2),
+            ),
+            _node("a1", "img-for-model", "assistant", parts=["画好了"], at=_local(12, 11, 3)),
+            _node(
+                "u2", "a1", "user", content_type="multimodal_text", at=_local(12, 11, 4),
+                parts=[
+                    {"content_type": "audio_transcription", "text": ""},
+                    {"content_type": "real_time_user_audio_video_asset_pointer"},
+                ],
+            ),
+            _node("a2", "u2", "assistant", parts=["我没听清"], at=_local(12, 11, 5)),
+        ]
+        conversation = {
+            "create_time": _local(12, 11).timestamp(),
+            "current_node": "a2",
+            "mapping": {node["id"]: node for node in nodes},
+        }
+        messages = copilot.merge_consecutive_web_messages(
+            copilot.chatgpt_web_visible_messages(conversation)
+        )
+        self.assertEqual(
+            [(role, text) for _, role, text in messages],
+            [
+                ("user", "画一只猫"),
+                ("assistant", "[Image: Cat portrait]\n\n画好了"),
+                ("user", "[Audio]"),
+                ("assistant", "我没听清"),
+            ],
+        )
+
 
 class TestDayTranscripts(unittest.TestCase):
     def setUp(self) -> None:

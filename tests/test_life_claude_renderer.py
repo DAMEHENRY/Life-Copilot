@@ -382,12 +382,12 @@ class TestExportDayTranscript(unittest.TestCase):
             # But the path/mime/size should still be there
             assert "path=attachments/photo.jpg" in text
 
-    def test_non_image_attachments_not_exported_as_image_lines(self):
-        """editor-selection and pdf-selection attachments should not produce Image: lines."""
+    def test_selection_attachments_are_quoted_not_exported_as_image_lines(self):
+        """Selections keep their text, which the message often refers to, and never become Image: lines."""
         with tempfile.TemporaryDirectory() as tmp:
             msg = _make_message("user", "check this", _TS_BASE_MS)
             msg["contextAttachments"] = [
-                {"type": "editor-selection", "path": "notes/a.md", "lines": "1-5", "text": "selected"},
+                {"type": "editor-selection", "path": "notes/a.md", "lines": "1-5", "text": "selected\nsecond line"},
                 {"type": "pdf-selection", "path": "paper.pdf", "page": "3", "text": "pdf text"},
             ]
             conv = _make_conversation("sid-no-img", "No img", [msg])
@@ -395,9 +395,52 @@ class TestExportDayTranscript(unittest.TestCase):
             text, _, _ = export_life_claude_renderer_day_transcript(
                 date(2026, 6, 6), history_path=p,
             )
-            assert "Attachments:" not in text
             assert "Image:" not in text
-            assert "check this" in text
+            assert "check this\n\nAttachments:\n" in text
+            assert "  - Selected text: path=notes/a.md, lines=1-5\n    > selected\n    > second line" in text
+            assert "  - PDF selection: path=paper.pdf, page=3\n    > pdf text" in text
+
+    def test_image_only_message_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            msg = _make_message("user", "", _TS_BASE_MS)
+            msg["contextAttachments"] = [
+                {"type": "image", "path": "attachments/a.png", "text": "[image: a.png]", "mime": "image/png", "sizeBytes": 10},
+            ]
+            reply = _make_message("assistant", "a nice photo", _TS_BASE_MS + 1000)
+            conv = _make_conversation("sid-img-only", "Img only", [msg, reply])
+            p = _write_history(Path(tmp), [conv])
+            text, count, _ = export_life_claude_renderer_day_transcript(
+                date(2026, 6, 6), history_path=p,
+            )
+            assert "Henry: Attachments:\n  - Image: path=attachments/a.png, mime=image/png, size=10 bytes" in text
+            assert count == 2
+
+    def test_plugin_error_and_cancel_notices_are_not_claude_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            error = _make_message("assistant", "**Error:** There's an issue with the selected model.", _TS_BASE_MS + 1000)
+            error["sendStatus"] = "error"
+            cancelled = _make_message(
+                "assistant",
+                "partial answer\n\n**Error:** Cancelled by user"
+                "\n\n> ⚠️ **This run may have partial filesystem side effects.** Check git status or the target folder.",
+                _TS_BASE_MS + 2000,
+            )
+            cancelled["sendStatus"] = "cancelled"
+            quoted = _make_message("assistant", "**Error:** is how the plugin marks failures", _TS_BASE_MS + 3000)
+            quoted["sendStatus"] = "success"
+            conv = _make_conversation("sid-notices", "Notices", [
+                _make_message("user", "hello", _TS_BASE_MS), error, cancelled, quoted,
+            ])
+            p = _write_history(Path(tmp), [conv])
+            text, count, _ = export_life_claude_renderer_day_transcript(
+                date(2026, 6, 6), history_path=p,
+            )
+            assert "selected model" not in text
+            assert "Cancelled by user" not in text
+            assert "partial filesystem side effects" not in text
+            assert "Claude: partial answer\n" in text
+            assert "Claude: **Error:** is how the plugin marks failures" in text
+            assert count == 3
 
     def test_message_count_with_image_attachment(self):
         """message_count should count user+assistant messages, not attachment lines."""

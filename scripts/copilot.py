@@ -66,6 +66,21 @@ CLAUDE_PROJECTS_DIR = Path(os.environ.get(
     str(Path.home() / ".claude" / "projects" / CLAUDE_PROJECT_SLUG),
 ))
 LIFE_CLAUDE_RENDERER_HISTORY = ROOT / ".obsidian" / "plugins" / "life-claude-renderer" / "history.json"
+# Notices the plugin appends to a failed, cancelled or timed-out run
+# (see PARTIAL_WARNING and the error/timeout handling in its source).
+LIFE_CLAUDE_RENDERER_PARTIAL_WARNING = (
+    "\n\n> ⚠️ **This run may have partial filesystem side effects.** "
+    "Check git status or the target folder."
+)
+LIFE_CLAUDE_RENDERER_NOTICE_RE = re.compile(
+    r"(?:\A|\n\n)(?:\*\*Error:\*\* .*|\*\*Timed out after \d+ minutes\.\*\*)\Z",
+    re.DOTALL,
+)
+LIFE_CLAUDE_RENDERER_TEXT_ATTACHMENTS = {
+    "editor-selection": "Selected text",
+    "pdf-selection": "PDF selection",
+    "message-quote": "Quoted message",
+}
 OPENCLAW_SSH_HOST = os.environ.get("LIFE_OPENCLAW_SSH_HOST", "mechrevo")
 OPENCLAW_WSL_DISTRO = os.environ.get("LIFE_OPENCLAW_WSL_DISTRO", "Ubuntu")
 OPENCLAW_WSL_USER = os.environ.get("LIFE_OPENCLAW_WSL_USER", "henry")
@@ -77,6 +92,12 @@ OPENCLAW_DIRECT_CHANNEL_LABELS = {
 OPENCLAW_SESSION_FILE_RE = re.compile(
     r"^(?P<session_id>[0-9a-f-]{36})\.jsonl(?:\.(?:reset|deleted)\..+)?$",
     re.IGNORECASE,
+)
+# Runtime events (e.g. a finished subagent task) that OpenClaw hands the model
+# inside a user turn; the block itself says it is not user-authored.
+OPENCLAW_INTERNAL_CONTEXT_RE = re.compile(
+    r"<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>.*?<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+    re.DOTALL,
 )
 OPENCLAW_MANUAL_BLOCK_RE = re.compile(
     r"<!-- openclaw-manual-begin channel=(?P<channel>[a-z0-9-]+) "
@@ -132,6 +153,18 @@ CODEX_APPLICATIONS_HEADER = "# Applications mentioned by the user:"
 THREAD_URI_RE = re.compile(r"thread://([0-9a-f-]+)", re.IGNORECASE)
 APPSHOT_RE = re.compile(r"<appshot\b([^>]*)>.*?</appshot>", re.DOTALL | re.IGNORECASE)
 APPSHOT_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+# Codex adds these context blocks to user messages on its own: the AGENTS.md
+# and environment bootstrap, plugin/skill listings and goal reminders.
+CODEX_INJECTED_BLOCK_RE = re.compile(
+    r"\s*(?:# AGENTS\.md instructions for [^\n]*\n+<INSTRUCTIONS>.*?</INSTRUCTIONS>"
+    r"|<(environment_context|recommended_plugins|skill|goal_context)>.*?</\1>)\s*",
+    re.DOTALL,
+)
+CODEX_IMAGE_OPEN_RE = re.compile(r'<image(?: name=\[Image #\d+\])?(?: path="([^"]*)")?>')
+CODEX_QUESTION_REPLY_RE = re.compile(
+    r"<send_user_message_question_reply>\s*(.*?)\s*</send_user_message_question_reply>",
+    re.DOTALL,
+)
 CODEX_TRACE_WARNING_BYTES = 256 * 1024
 CHAT_CAPTURE_ID_PREFIX = "chat-capture"
 SYSTEM_EVOLUTION_SCHEMA_VERSION = "1.0"
@@ -657,6 +690,40 @@ def content_parts_to_text(parts: object) -> str:
     return "\n".join(t for t in texts if t).strip()
 
 
+def codex_user_parts_to_text(parts: object) -> str:
+    """Join what the user sent, without the context blocks Codex injects.
+
+    Images become placeholders, named after their file when Codex recorded
+    the path in the ``<image …>`` wrapper around them.
+    """
+    if not isinstance(parts, list):
+        return ""
+    texts: List[str] = []
+    image_name = ""
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "input_image":
+            texts.append(f"[Image: {image_name}]" if image_name else "[Image]")
+            image_name = ""
+            continue
+        text = part.get("text")
+        if part.get("type") != "input_text" or not isinstance(text, str):
+            continue
+        opening = CODEX_IMAGE_OPEN_RE.fullmatch(text.strip())
+        if opening:
+            image_name = Path(opening.group(1)).name if opening.group(1) else ""
+            continue
+        if text.strip() == "</image>":
+            continue
+        match = CODEX_INJECTED_BLOCK_RE.match(text)
+        while match:
+            text = text[match.end():]
+            match = CODEX_INJECTED_BLOCK_RE.match(text)
+        texts.append(text)
+    return "\n".join(t for t in texts if t).strip()
+
+
 def sanitize_codex_transcript_text(text: str) -> str:
     """Remove terminal and binary control bytes that are unsafe in Markdown."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -779,6 +846,27 @@ def summarize_codex_injected_contexts(text: str) -> str:
     return text
 
 
+def summarize_codex_question_reply(text: str) -> str:
+    """Show answers to Codex's questions as the quoted question plus answer."""
+    reply = CODEX_QUESTION_REPLY_RE.fullmatch(text.strip())
+    if not reply:
+        return text
+    try:
+        items = json.loads(reply.group(1))
+    except json.JSONDecodeError:
+        return text
+    answers: List[str] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("answer"), str):
+            continue
+        question = item.get("question")
+        quoted = ""
+        if isinstance(question, str) and question.strip():
+            quoted = "\n".join(f"> {line}" for line in question.strip().splitlines())
+        answers.append(f"{quoted}\n\n{item['answer'].strip()}".strip())
+    return "\n\n".join(answers) or text
+
+
 def clean_codex_user_text(text: str) -> str:
     # Codex Desktop stores the AGENTS/env bootstrap inside the first user message.
     # For diary transcripts, keep the actual user request and drop the bootstrap.
@@ -787,6 +875,7 @@ def clean_codex_user_text(text: str) -> str:
         text = text.split(marker, 1)[1].strip()
     if text.startswith("<turn_aborted>"):
         return ""
+    text = summarize_codex_question_reply(text)
     text = summarize_codex_injected_contexts(text)
     text = summarize_codex_contexts(text)
     return sanitize_codex_transcript_text(text).strip()
@@ -963,12 +1052,14 @@ def export_codex_transcript(
             continue
         if role == "assistant" and payload.get("phase") == "commentary" and not include_commentary:
             continue
-        text = content_parts_to_text(payload.get("content"))
         if role == "user":
-            text = clean_codex_user_text(text)
+            text = clean_codex_user_text(codex_user_parts_to_text(payload.get("content")))
             speaker = user_name
         else:
-            text = clean_codex_assistant_text(text, keep_memory_citation=keep_memory_citation)
+            text = clean_codex_assistant_text(
+                content_parts_to_text(payload.get("content")),
+                keep_memory_citation=keep_memory_citation,
+            )
             speaker = assistant_name
         if not text:
             continue
@@ -1158,20 +1249,47 @@ def claude_code_visible_message(record: dict) -> Optional[Tuple[str, str]]:
         return None
     content = message.get("content")
     if rec_type == "user":
-        if not isinstance(content, str):
+        # isMeta records are Claude Code's own injections (skill bodies, image
+        # notes), not the user's words.
+        if record.get("isMeta") is True:
             return None
-        text = content.strip()
-        # Claude Code records slash commands and their local output as synthetic
-        # user messages. They are runtime metadata, not dialogue evidence.
-        if not text or text.startswith((
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            return None
+        # Prompts with pasted images arrive as image + text parts. Pasted
+        # images carry no file name, so each one becomes a bare placeholder.
+        texts: List[str] = []
+        parts: List[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "tool_result":
+                return None
+            if part_type == "image":
+                parts.append("[Image]")
+            elif part_type == "text" and isinstance(part.get("text"), str) and part["text"].strip():
+                texts.append(part["text"].strip())
+                parts.append(texts[-1])
+        # Claude Code records slash commands, their local output, Esc
+        # interruptions and background-task notices as synthetic user
+        # messages. They are runtime metadata, not dialogue evidence.
+        if not texts or texts[0].startswith((
             "<local-command-caveat>",
             "<command-name>",
             "<command-message>",
             "<command-args>",
             "<local-command-stdout>",
+            "[Request interrupted by user",
+            "<task-notification>",
         )):
             return None
-        return "user", text
+        return "user", "\n\n".join(parts)
+    # Client-side notices (API errors, login and usage limits) are stored as
+    # assistant messages from a "<synthetic>" model; Claude never said them.
+    if record.get("isApiErrorMessage") is True or message.get("model") == "<synthetic>":
+        return None
     if not isinstance(content, list):
         return None
     parts = [
@@ -1283,6 +1401,42 @@ def load_life_claude_renderer_history(history_path: Path) -> List[dict]:
     return result
 
 
+def life_claude_renderer_attachment_lines(attachments: object) -> List[str]:
+    """Describe a user message's attachments, quoting any selected text.
+
+    A selection is often what the message is about ("I like this sentence"),
+    so its text is kept rather than just the file it came from.
+    """
+    lines: List[str] = []
+    for att in attachments if isinstance(attachments, list) else []:
+        if not isinstance(att, dict):
+            continue
+        att_type = att.get("type")
+        att_path = att.get("path", "")
+        if att_type == "image":
+            parts = [f"path={att_path}"]
+            if att.get("mime"):
+                parts.append(f"mime={att['mime']}")
+            if att.get("sizeBytes") is not None:
+                parts.append(f"size={att['sizeBytes']} bytes")
+            lines.append(f"  - Image: {', '.join(parts)}")
+            continue
+        label = LIFE_CLAUDE_RENDERER_TEXT_ATTACHMENTS.get(str(att_type))
+        text = att.get("text")
+        if not label or not isinstance(text, str) or not text.strip():
+            continue
+        parts = [f"path={att_path}"] if att_path else []
+        if att.get("lines"):
+            parts.append(f"lines={att['lines']}")
+        if att.get("page") and att.get("page") != "unknown":
+            parts.append(f"page={att['page']}")
+        if att.get("truncated"):
+            parts.append("truncated")
+        lines.append(f"  - {label}: {', '.join(parts)}" if parts else f"  - {label}:")
+        lines.extend(f"    > {line}".rstrip() for line in text.strip().splitlines())
+    return lines
+
+
 def export_life_claude_renderer_day_transcript(
     d: date,
     history_path: Optional[Path] = None,
@@ -1331,27 +1485,25 @@ def export_life_claude_renderer_day_transcript(
                 text = msg.get("displayContent") or msg.get("content") or ""
             else:
                 text = msg.get("content") or ""
-            if not isinstance(text, str) or not text.strip():
+                # Failed, cancelled and timed-out runs end with the plugin's
+                # own notices; only what the model streamed before them is
+                # Claude's.
+                if isinstance(text, str) and msg.get("sendStatus") not in (None, "success"):
+                    text = LIFE_CLAUDE_RENDERER_NOTICE_RE.sub(
+                        "", text.replace(LIFE_CLAUDE_RENDERER_PARTIAL_WARNING, "")
+                    )
+            if not isinstance(text, str):
                 continue
 
-            # Append image attachment provenance for user messages
+            # Append attachment provenance for user messages
             if role == "user":
-                attachments = msg.get("contextAttachments") or []
-                image_lines = []
-                for att in attachments:
-                    if not isinstance(att, dict) or att.get("type") != "image":
-                        continue
-                    att_path = att.get("path", "")
-                    att_mime = att.get("mime", "")
-                    att_size = att.get("sizeBytes")
-                    parts = [f"path={att_path}"]
-                    if att_mime:
-                        parts.append(f"mime={att_mime}")
-                    if att_size is not None:
-                        parts.append(f"size={att_size} bytes")
-                    image_lines.append(f"  - Image: {', '.join(parts)}")
-                if image_lines:
-                    text = text.rstrip() + "\n\nAttachments:\n" + "\n".join(image_lines)
+                attachment_lines = life_claude_renderer_attachment_lines(
+                    msg.get("contextAttachments")
+                )
+                if attachment_lines:
+                    text = text.rstrip() + "\n\nAttachments:\n" + "\n".join(attachment_lines)
+            if not text.strip():
+                continue
 
             if earliest_ts is None or ts_ms < earliest_ts:
                 earliest_ts = ts_ms
@@ -1520,6 +1672,29 @@ def openclaw_message_text(content: object) -> str:
     return "\n\n".join(parts).strip()
 
 
+def openclaw_sent_messages(content: object, owner_targets: frozenset = frozenset()) -> List[str]:
+    """Return what Kai sent to the owner's chat through the message tool.
+
+    A send without a target goes to the chat the session belongs to; one with
+    a target counts only when it is addressed to the owner.
+    """
+    sent: List[str] = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict) or part.get("type") != "toolCall" or part.get("name") != "message":
+            continue
+        args = part.get("arguments")
+        if not isinstance(args, dict) or args.get("action") != "send":
+            continue
+        target = args.get("target")
+        if target not in (None, "") and str(target) not in owner_targets:
+            continue
+        text = args.get("message")
+        if isinstance(text, str) and text.strip():
+            # OpenClaw turns escaped newlines into real ones when it delivers.
+            sent.append(text.replace("\\n", "\n").strip())
+    return sent
+
+
 def export_openclaw_session_transcript(
     session_jsonl: str,
     d: date,
@@ -1538,8 +1713,14 @@ def export_openclaw_session_transcript(
 def openclaw_session_visible_messages(
     session_jsonl: str,
     d: date,
+    owner_targets: frozenset = frozenset(),
 ) -> List[Tuple[str, str, str]]:
-    """Return timestamped visible messages, excluding tools and delivery mirrors."""
+    """Return timestamped visible messages, excluding tools and delivery mirrors.
+
+    Kai answers either with plain text or by sending through the message tool
+    (the only record of most replies since OpenClaw moved to tool-based
+    delivery), so both count. ``owner_targets`` are the owner's chat ids.
+    """
     messages: List[Tuple[str, str, str]] = []
     last_visible_message: Optional[Tuple[str, str]] = None
     for raw in session_jsonl.splitlines():
@@ -1557,23 +1738,36 @@ def openclaw_session_visible_messages(
         role = message.get("role")
         if role not in {"user", "assistant"}:
             continue
+        # Delivery mirrors repeat what Kai sent (reformatted for the channel)
+        # plus OpenClaw's own command output; Kai's texts and sends are used.
         if (
             role == "assistant"
             and message.get("provider") == "openclaw"
             and message.get("model") == "delivery-mirror"
         ):
             continue
+        # OpenClaw writes its own prompts (memory flushes, cron jobs) into the
+        # chat as user messages; only the owner's messages carry senderIsOwner.
+        runtime = message.get("__openclaw")
+        if role == "user" and isinstance(runtime, dict) and runtime.get("senderIsOwner") is not True:
+            continue
         ts = str(record.get("timestamp") or "")
         if not ts or timestamp_to_local_date(ts) != d:
             continue
-        text = openclaw_message_text(message.get("content"))
-        if not text:
-            continue
-        visible_message = (role, text)
-        if visible_message == last_visible_message:
-            continue
-        last_visible_message = visible_message
-        messages.append((ts, role, text))
+        content = message.get("content")
+        if role == "user":
+            texts = [OPENCLAW_INTERNAL_CONTEXT_RE.sub("", openclaw_message_text(content)).strip()]
+        else:
+            texts = [openclaw_message_text(content), *openclaw_sent_messages(content, owner_targets)]
+        for text in texts:
+            # NO_REPLY tells OpenClaw to deliver nothing to the chat.
+            if not text or (role == "assistant" and text == "NO_REPLY"):
+                continue
+            visible_message = (role, text)
+            if visible_message == last_visible_message:
+                continue
+            last_visible_message = visible_message
+            messages.append((ts, role, text))
     return messages
 
 
@@ -1616,6 +1810,7 @@ def export_openclaw_day_transcript(
         raise OpenClawImportUnavailable("OpenClaw sessions.json is not an object")
 
     candidates: Dict[str, Tuple[str, str]] = {}
+    owner_targets: set[str] = set()
     for key, metadata in index.items():
         if not isinstance(key, str):
             continue
@@ -1629,6 +1824,11 @@ def export_openclaw_day_transcript(
         )
         if channel is None:
             continue
+        peer = key[len(f"agent:main:{channel}:direct:"):]
+        # Sub-sessions such as "<peer>:heartbeat" carry OpenClaw's own polls.
+        if not peer or ":" in peer:
+            continue
+        owner_targets.add(peer)
         if not isinstance(metadata, dict):
             continue
         session_id = metadata.get("sessionId")
@@ -1661,7 +1861,7 @@ def export_openclaw_day_transcript(
         if channel not in OPENCLAW_DIRECT_CHANNEL_LABELS:
             continue
         group_key = (channel, session_id)
-        for ts, role, text in openclaw_session_visible_messages(raw, d):
+        for ts, role, text in openclaw_session_visible_messages(raw, d, frozenset(owner_targets)):
             message_key = (channel, session_id, ts, role, text)
             if message_key in seen_messages:
                 continue
@@ -1974,6 +2174,7 @@ def chatgpt_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str
 
     Drops system/tool messages, hidden context, thinking and reasoning recaps,
     tool calls (assistant messages addressed to a tool), and citation markers.
+    Generated images, which arrive as tool messages, become image placeholders.
     """
     mapping = conversation.get("mapping")
     if not isinstance(mapping, dict):
@@ -1989,9 +2190,20 @@ def chatgpt_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str
         role = (message.get("author") or {}).get("role")
         metadata = message.get("metadata") or {}
         content = message.get("content") or {}
-        if role not in {"user", "assistant"}:
-            continue
         if metadata.get("is_visually_hidden_from_conversation") or metadata.get("is_thinking_preamble_message"):
+            continue
+        # Generated images come back as tool messages but show as the reply.
+        if role == "tool" and "image_gen_title" in metadata:
+            title = str(metadata.get("image_gen_title") or "").strip()
+            images = [
+                f"[Image: {title}]" if title else "[Image]"
+                for part in content.get("parts") or []
+                if isinstance(part, dict) and part.get("content_type") == "image_asset_pointer"
+            ]
+            if images and last_ts:
+                visible.append((last_ts, "assistant", "\n\n".join(images)))
+            continue
+        if role not in {"user", "assistant"}:
             continue
         if role == "assistant" and message.get("recipient") not in (None, "all"):
             continue
@@ -2003,6 +2215,7 @@ def chatgpt_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str
             if str(a.get("mime_type") or "").startswith("image/") and a.get("name")
         ]
         parts: List[str] = []
+        has_audio = False
         for part in content.get("parts") or []:
             if isinstance(part, str):
                 text = CHATGPT_PRIVATE_MARKER_RE.sub("", CHATGPT_CITATION_RE.sub("", part)).strip()
@@ -2014,6 +2227,11 @@ def chatgpt_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str
                     parts.append(str(part["text"]).strip())
                 elif part_type == "image_asset_pointer":
                     parts.append(f"[Image: {image_names.pop(0)}]" if image_names else "[Image]")
+                elif part_type in {"audio_asset_pointer", "real_time_user_audio_video_asset_pointer"}:
+                    has_audio = True
+        if has_audio and not parts:
+            # A voice turn whose speech was never transcribed.
+            parts.append("[Audio]")
         if role == "user":
             for attachment in attachments:
                 if not str(attachment.get("mime_type") or "").startswith("image/"):

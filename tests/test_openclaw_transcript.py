@@ -304,6 +304,138 @@ class TestOpenClawTranscript(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual(text.count("Kai: 能收到。"), 1)
 
+    def test_openclaw_prompts_and_undelivered_replies_are_not_dialogue(self):
+        def with_runtime(role, content, timestamp, runtime):
+            return json.dumps(
+                {
+                    "type": "message",
+                    "timestamp": timestamp,
+                    "message": {"role": role, "content": content, "__openclaw": runtime},
+                },
+                ensure_ascii=False,
+            )
+
+        owner = {"senderIsOwner": True, "mirrorOrigin": "codex-app-server"}
+        runtime_only = {"mirrorOrigin": "codex-app-server"}
+        session = "\n".join(
+            [
+                with_runtime("user", "记一下今天早上跑了五公里", "2026-08-27T01:00:00.000Z", owner),
+                record("assistant", [{"type": "text", "text": "记下了。"}], "2026-08-27T01:00:05.000Z"),
+                with_runtime(
+                    "user",
+                    "Pre-compaction memory flush. If nothing to store, reply with NO_REPLY.",
+                    "2026-08-27T09:46:21.603Z",
+                    runtime_only,
+                ),
+                record("assistant", [{"type": "text", "text": "NO_REPLY"}], "2026-08-27T09:47:14.795Z"),
+                with_runtime(
+                    "user",
+                    "[cron:0001 喝水] 提醒 Henry：该喝水了。",
+                    "2026-08-27T13:00:01.000Z",
+                    runtime_only,
+                ),
+                record("assistant", [{"type": "text", "text": "该喝水了。"}], "2026-08-27T13:00:05.000Z"),
+                record(
+                    "user",
+                    "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nOpenClaw runtime context (internal):\n"
+                    "[Internal task completion event]\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+                    "2026-08-27T14:00:00.000Z",
+                ),
+                record("assistant", [{"type": "text", "text": "报告写好了。"}], "2026-08-27T14:00:05.000Z"),
+            ]
+        )
+
+        with patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 8, 27)):
+            text, count = copilot.export_openclaw_session_transcript(
+                session, date(2026, 8, 27)
+            )
+
+        self.assertIn("Henry: 记一下今天早上跑了五公里", text)
+        self.assertIn("Kai: 该喝水了。", text)
+        self.assertIn("Kai: 报告写好了。", text)
+        self.assertNotIn("memory flush", text)
+        self.assertNotIn("cron:", text)
+        self.assertNotIn("NO_REPLY", text)
+        self.assertNotIn("INTERNAL_CONTEXT", text)
+        self.assertEqual(count, 4)
+
+    def test_replies_sent_through_the_message_tool_are_archived_once(self):
+        def tool_call(name, arguments, timestamp):
+            return record(
+                "assistant",
+                [{"type": "toolCall", "name": name, "arguments": arguments}],
+                timestamp,
+            )
+
+        mirror = json.dumps(
+            {
+                "type": "message",
+                "timestamp": "2026-09-17T23:43:56.963Z",
+                "message": {
+                    "role": "assistant",
+                    "provider": "openclaw",
+                    "model": "delivery-mirror",
+                    "content": [{"type": "text", "text": "好，明早 8 点提醒你。"}],
+                },
+            },
+            ensure_ascii=False,
+        )
+        session = "\n".join(
+            [
+                record("user", "明早提醒我带伞", "2026-09-17T23:43:26.208Z"),
+                mirror,
+                tool_call("cron", {"action": "add"}, "2026-09-17T23:43:56.985Z"),
+                tool_call("message", {"action": "send", "message": "好，明早 8 点提醒你。"}, "2026-09-17T23:43:56.989Z"),
+                tool_call(
+                    "message",
+                    {"action": "send", "channel": "telegram", "target": "100000001", "message": "出门记得带伞。\\n\\n下午有雨。"},
+                    "2026-09-18T13:00:49.931Z",
+                ),
+                tool_call(
+                    "message",
+                    {"action": "send", "channel": "telegram", "target": "someone-else", "message": "not for Henry"},
+                    "2026-09-18T13:01:00.000Z",
+                ),
+            ]
+        )
+
+        with patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 9, 18)):
+            messages = copilot.openclaw_session_visible_messages(
+                session, date(2026, 9, 18), frozenset({"100000001"})
+            )
+
+        self.assertEqual(
+            [(role, text) for _, role, text in messages],
+            [
+                ("user", "明早提醒我带伞"),
+                ("assistant", "好，明早 8 点提醒你。"),
+                ("assistant", "出门记得带伞。\n\n下午有雨。"),
+            ],
+        )
+
+    def test_day_export_skips_heartbeat_sub_session(self):
+        index = {
+            "agent:main:telegram:direct:100000001": {"sessionId": "main-session"},
+            "agent:main:telegram:direct:100000001:heartbeat": {"sessionId": "heartbeat-session"},
+        }
+        files = {
+            "sessions.json": json.dumps(index),
+            "main-session.jsonl": record("user", "早", "2026-09-07T01:00:00.000Z"),
+            "heartbeat-session.jsonl": record("user", "[OpenClaw heartbeat poll]", "2026-09-07T14:27:14.828Z"),
+        }
+
+        def fake_read(path, *args, **kwargs):
+            return files[path.rsplit("/", 1)[-1]]
+
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=fake_read), patch.object(
+            copilot, "list_openclaw_remote_direct_session_paths", return_value=[]
+        ), patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 9, 7)):
+            text, count, sessions = copilot.export_openclaw_day_transcript(date(2026, 9, 7))
+
+        self.assertIn("Henry: 早", text)
+        self.assertNotIn("heartbeat poll", text)
+        self.assertEqual((count, sessions), (1, 1))
+
     def test_manual_channel_block_replaces_partial_generated_channel(self):
         generated = (
             "### Kai / Telegram Session remote\n\n"
