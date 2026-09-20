@@ -1,14 +1,21 @@
 # Life 本地语义检索
 
-在这台 Mac 上给日记和 AI 对话记录建向量索引，按意思而不是关键词找过去的事。模型是 `microsoft/harrier-oss-v1-0.6b`，全程本地运行；第一次使用时会从 Hugging Face 下载模型（约 1.1GB）。
+在这台 Mac 上给日记和 AI 对话记录建向量索引，按意思而不是关键词找过去的事。模型是 `microsoft/harrier-oss-v1-0.6b`，检索和索引计算全程本地运行，也不会联网检查模型更新。
 
 ## 怎么用
 
+- 首次使用或缓存缺文件时，在可联网的环境运行 `python3 tools/recall/recall.py download-model`，从 Hugging Face 下载模型（约 1.1GB）；已有完整缓存则不需要。
 - 搜索：`python3 tools/recall/recall.py search "在图书馆复习到很晚的那天" "stayed late studying in the library"`
 - 每次搜索前会自动把新增或改过的文件补进索引，平时几秒钟；没有后台定时任务。
 - 分析某一天时只看那天及以前的内容，避免用后来的内容解释当时：加 `--before YYYY-MM-DD`。
 - 只看手写原文：加 `--kinds handwritten`。
 - 手动全量重建：`python3 tools/recall/recall.py index --full`；看索引状态：`python3 tools/recall/recall.py status`。
+
+## 加载与等待
+
+- 普通搜索只加载本机缓存；缓存缺失会直接提示下载命令，不会在后台反复尝试联网。
+- 加载时会显示使用 CPU 还是 MPS，以及模型就绪所用时间；受限运行环境可能只能使用 CPU。
+- 另一个检索正在更新索引时，会显示等待提示，最多等 30 秒后退出；稍后重试即可。若明确接受尚未更新的内容，可以用 `search --no-update` 搜索已经保存的索引。
 
 ## 怎么搜更准
 

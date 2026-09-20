@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("recall", ROOT / "tools" / "recall" / "recall.py")
@@ -104,3 +107,89 @@ def test_merge_hits_combines_overlapping_chunks_from_one_file() -> None:
 
     assert [(h["path"], h["line_start"], h["line_end"]) for h in hits] == [("a.md", 1, 5), ("b.md", 1, 2)]
     assert hits[0]["score"] == 0.9
+
+
+@pytest.fixture
+def model_runtime(monkeypatch):
+    """Exercise loader behavior without importing a model or accessing the Hub."""
+    calls = []
+    model = SimpleNamespace(max_seq_length=None)
+
+    class CacheMiss(OSError):
+        pass
+
+    def snapshot(model_id, **kwargs):
+        calls.append(("snapshot", model_id, kwargs))
+        assert kwargs.get("local_files_only") is True, "ordinary searches must not access the network"
+        return "/cached/snapshot"
+
+    def load(path, **kwargs):
+        calls.append(("load", path, kwargs))
+        assert kwargs.get("local_files_only") is True, "nested model loads must also stay offline"
+        return model
+
+    hub = SimpleNamespace(snapshot_download=snapshot)
+    sentence_transformers = SimpleNamespace(SentenceTransformer=load)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(backends=SimpleNamespace(
+        mps=SimpleNamespace(is_available=lambda: False))))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", SimpleNamespace(LocalEntryNotFoundError=CacheMiss))
+    monkeypatch.setitem(sys.modules, "sentence_transformers", sentence_transformers)
+    monkeypatch.setattr(recall, "_MODEL", None)
+    return SimpleNamespace(calls=calls, model=model, hub=hub, st=sentence_transformers, error=CacheMiss)
+
+
+def test_cached_model_load_stays_offline_and_reuses_instance(model_runtime):
+    assert recall.load_model() is model_runtime.model
+    assert recall.load_model() is model_runtime.model
+    assert [call[0] for call in model_runtime.calls] == ["snapshot", "load"]
+    assert model_runtime.calls[1][1] == "/cached/snapshot"
+    assert model_runtime.model.max_seq_length == recall.MAX_SEQ_TOKENS
+
+
+def test_missing_cache_fails_without_network_fallback(model_runtime):
+    def missing(*args, **kwargs):
+        assert kwargs == {"local_files_only": True}
+        raise model_runtime.error("not cached")
+
+    model_runtime.hub.snapshot_download = missing
+    with pytest.raises(SystemExit, match="download-model"):
+        recall.load_model()
+    assert model_runtime.calls == []
+    assert recall._MODEL is None
+
+
+def test_incomplete_model_cache_has_recovery_message(model_runtime):
+    def broken(*args, **kwargs):
+        assert kwargs["local_files_only"]
+        raise OSError("missing weights")
+
+    model_runtime.st.SentenceTransformer = broken
+    with pytest.raises(SystemExit, match="download-model"):
+        recall.load_model()
+    assert recall._MODEL is None
+
+
+def test_busy_index_times_out_without_modifying_lock(monkeypatch, tmp_path):
+    lock_path = tmp_path / ".lock"
+    lock_path.write_text("existing lock file")
+    monkeypatch.setattr(recall, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(recall, "LOCK_FILE", lock_path)
+    with lock_path.open("a") as owner:
+        recall.fcntl.flock(owner, recall.fcntl.LOCK_EX | recall.fcntl.LOCK_NB)
+        with pytest.raises(SystemExit, match="Index is still busy"):
+            with recall.index_lock(timeout=0):
+                pytest.fail("must not enter while another process holds the lock")
+    assert lock_path.read_text() == "existing lock file"
+    with recall.index_lock(timeout=0):
+        pass
+
+
+def test_index_lock_released_after_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(recall, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(recall, "LOCK_FILE", tmp_path / ".lock")
+    with pytest.raises(ValueError):
+        with recall.index_lock(timeout=0):
+            raise ValueError("index update failed")
+    with recall.index_lock(timeout=0):
+        pass

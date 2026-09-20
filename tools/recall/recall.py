@@ -6,6 +6,7 @@ Usage:
   python3 tools/recall/recall.py search "query" ["another query" ...] [-k 10] [--before YYYY-MM-DD]
                                         [--kinds handwritten,transcribed,copilot,trace] [--json] [--no-update]
   python3 tools/recall/recall.py status
+  python3 tools/recall/recall.py download-model
 
 Search updates the index for new or changed files first, so there is no background job.
 Results are candidates only: open the original file at the listed lines before citing it.
@@ -19,6 +20,7 @@ import os
 import re
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +40,7 @@ OVERLAP_TOKENS = 50
 MAX_SEQ_TOKENS = 512
 QUERY_TASK = "Given a question about something that happened in the author's life, retrieve diary or conversation passages that describe it"
 LITERAL_BOOST = 0.1
+LOCK_TIMEOUT_SECONDS = 30
 
 DIARY_RE = re.compile(r"^journal/\d{4}/\d{2}/\d{4}-\d{2}-\d{2}\.md$")
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -194,11 +197,63 @@ def load_model():
     global _MODEL
     if _MODEL is None:
         import torch
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
         from sentence_transformers import SentenceTransformer
+        # Resolve the cached snapshot without even a metadata request. Passing a
+        # repo ID with the default settings retries Hub requests when offline,
+        # even when all model weights are already present locally.
+        try:
+            snapshot = snapshot_download(MODEL_ID, local_files_only=True)
+        except LocalEntryNotFoundError as exc:
+            raise SystemExit(
+                "Model is not cached locally. With network access, run: "
+                "python3 tools/recall/recall.py download-model"
+            ) from exc
         device = "mps" if torch.backends.mps.is_available() else "cpu"
-        _MODEL = SentenceTransformer(MODEL_ID, device=device, model_kwargs={"dtype": "auto"})
+        print(f"loading cached model on {device} (offline)...", file=sys.stderr)
+        started = time.monotonic()
+        try:
+            model = SentenceTransformer(snapshot, local_files_only=True, device=device,
+                                        model_kwargs={"dtype": "auto"})
+        except (OSError, ValueError) as exc:
+            raise SystemExit(
+                f"Could not load the cached model: {exc}\n"
+                "To download missing model files, run with network access: "
+                "python3 tools/recall/recall.py download-model"
+            ) from exc
+        _MODEL = model
         _MODEL.max_seq_length = MAX_SEQ_TOKENS
+        print(f"model ready ({time.monotonic() - started:.1f}s)", file=sys.stderr)
     return _MODEL
+
+
+@contextmanager
+def index_lock(timeout=LOCK_TIMEOUT_SECONDS):
+    """Bound the wait for another indexer; never silently use a stale index."""
+    DATA_DIR.mkdir(exist_ok=True)
+    with LOCK_FILE.open("a") as lock:
+        deadline = time.monotonic() + timeout
+        announced = False
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not announced:
+                    print("another recall process is updating the index; waiting...", file=sys.stderr)
+                    announced = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SystemExit(
+                        f"Index is still busy after {timeout:g}s. Retry after the other "
+                        "recall process finishes; --no-update explicitly searches the saved index."
+                    )
+                time.sleep(min(0.2, remaining))
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def load_index():
@@ -232,9 +287,7 @@ def save_index(chunks, emb, files):
 
 
 def update_index(full=False, verbose=True):
-    DATA_DIR.mkdir(exist_ok=True)
-    with LOCK_FILE.open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with index_lock():
         chunks, emb, manifest = ([], None, {}) if full else load_index()
         old_files = manifest.get("files", {}) if manifest else {}
         current = list_sources()
@@ -360,9 +413,13 @@ def main():
     p_search.add_argument("--json", action="store_true")
     p_search.add_argument("--no-update", action="store_true", help="skip the incremental update")
     sub.add_parser("status", help="show index size and freshness")
+    sub.add_parser("download-model", help="download model files (requires network; searches stay offline)")
     args = parser.parse_args()
 
-    if args.cmd == "index":
+    if args.cmd == "download-model":
+        from huggingface_hub import snapshot_download
+        print(snapshot_download(MODEL_ID))
+    elif args.cmd == "index":
         update_index(full=args.full)
     elif args.cmd == "search":
         kinds = set(args.kinds.split(",")) if args.kinds else None
