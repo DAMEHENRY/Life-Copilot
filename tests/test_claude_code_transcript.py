@@ -258,6 +258,52 @@ class TestClaudeCodeTranscript(unittest.TestCase):
             self.assertEqual(message_count, 5)
             self.assertEqual(session_count, 2)
 
+    def test_reads_background_task_sessions_from_worktree_projects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects" / "-Users-henry-Life"
+            worktree_projects = (
+                root / "projects" / "-Users-henry-Life--claude-worktrees-gifted-pike-11e47b"
+            )
+            other_projects = root / "projects" / "-Users-henry-other-repo"
+            renderer = root / "history.json"
+            renderer.write_text("[]", encoding="utf-8")
+            vault_ts = _iso(datetime(2026, 6, 6, 8, 20))
+            worktree_ts = _iso(datetime(2026, 6, 6, 21, 0))
+            other_ts = _iso(datetime(2026, 6, 6, 12, 0))
+            _write_session(projects, "vault-session", [
+                _user("早上的问题", vault_ts),
+                _assistant([{"type": "text", "text": "早上的回答"}], vault_ts),
+            ])
+            _write_session(worktree_projects, "worktree-session", [
+                _user("commit it on your branch", worktree_ts),
+                _assistant([{"type": "text", "text": "已经提交并推送"}], worktree_ts),
+            ])
+            _write_session(other_projects, "other-session", [
+                _user("别的仓库", other_ts),
+                _assistant([{"type": "text", "text": "别的回答"}], other_ts),
+            ])
+
+            with patch.object(copilot, "CLAUDIAN_SESSIONS_DIR", root / "claudian"):
+                text, message_count, session_count = copilot.export_claude_code_day_transcript(
+                    date(2026, 6, 6),
+                    projects_dir=projects,
+                    renderer_history_path=renderer,
+                )
+                records = copilot.claude_code_day_source_records(
+                    date(2026, 6, 6),
+                    projects_dir=projects,
+                )
+
+            self.assertIn("早上的回答", text)
+            self.assertIn("已经提交并推送", text)
+            self.assertNotIn("别的回答", text)
+            self.assertEqual(message_count, 4)
+            self.assertEqual(session_count, 2)
+            # The worktree session ran later, so it is rendered after the vault one.
+            self.assertLess(text.index("早上的问题"), text.index("commit it on your branch"))
+            self.assertIn("worktree-session", {session for session, _, _, _ in records})
+
     def test_writeback_creates_trace_and_idempotent_from_kai_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

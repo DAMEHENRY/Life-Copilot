@@ -1103,8 +1103,8 @@ def claudian_sessions_for_date(d: date) -> List[dict]:
         provider_id = meta.get("providerState", {}).get("providerSessionId")
         if not provider_id:
             continue
-        jsonl_path = CLAUDE_PROJECTS_DIR / f"{provider_id}.jsonl"
-        if not jsonl_path.exists():
+        jsonl_path = claude_code_session_jsonl(provider_id)
+        if jsonl_path is None:
             continue
         # Coarse filter: include if createdAt or updatedAt is within ±1 day of d.
         # Per-message filtering in export handles the exact date match.
@@ -1134,8 +1134,8 @@ def export_claudian_day_transcript(d: date, user_name: str = "Henry", assistant_
     for meta in sessions:
         provider_id = meta["providerState"]["providerSessionId"]
         title = meta.get("title") or provider_id
-        jsonl_path = CLAUDE_PROJECTS_DIR / f"{provider_id}.jsonl"
-        if not jsonl_path.exists():
+        jsonl_path = claude_code_session_jsonl(provider_id)
+        if jsonl_path is None:
             continue
         lines: List[str] = []
         current_speaker = ""
@@ -1212,6 +1212,43 @@ def export_claudian_day_transcript(d: date, user_name: str = "Henry", assistant_
             total_messages += len(lines)
             blocks.append(f"### Claudian Session {provider_id} - {title}\n\n" + "\n\n".join(lines))
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
+
+
+def claude_projects_dirs(projects_dir: Optional[Path] = None) -> List[Path]:
+    """The vault's Claude Code project directory and its worktree siblings.
+
+    A background task runs in a git worktree under ``.claude/worktrees/``, and
+    Claude Code stores that session under a project directory named after the
+    worktree path, not the vault. Those are still Henry's conversations with
+    Claude on that day, so every source read here has to cover them too.
+    """
+    if projects_dir is None:
+        projects_dir = CLAUDE_PROJECTS_DIR
+    dirs = [projects_dir] if projects_dir.is_dir() else []
+    parent = projects_dir.parent
+    if parent.is_dir():
+        dirs.extend(sorted(
+            path for path in parent.glob(f"{projects_dir.name}--claude-worktrees-*")
+            if path.is_dir()
+        ))
+    return dirs
+
+
+def claude_code_session_files(projects_dirs: List[Path]) -> List[Path]:
+    """Every Claude Code session file across the given project directories."""
+    return sorted(
+        (path for projects_dir in projects_dirs for path in projects_dir.glob("*.jsonl")),
+        key=lambda path: path.name,
+    )
+
+
+def claude_code_session_jsonl(session_id: str) -> Optional[Path]:
+    """Locate a Claude Code session file in the vault or a worktree project."""
+    for projects_dir in claude_projects_dirs():
+        path = projects_dir / f"{session_id}.jsonl"
+        if path.exists():
+            return path
+    return None
 
 
 def claude_code_excluded_session_ids(
@@ -1318,15 +1355,14 @@ def export_claude_code_day_transcript(
     session repeats its parent's messages under the same uuids; each message is
     shown once, in the session where it first appeared.
     """
-    if projects_dir is None:
-        projects_dir = CLAUDE_PROJECTS_DIR
-    if not projects_dir.exists():
+    projects_dirs = claude_projects_dirs(projects_dir)
+    if not projects_dirs:
         return "", 0, 0
     excluded = claude_code_excluded_session_ids(renderer_history_path)
     # (started, session_id, custom title, [(ts, role, text, uuid)])
     sessions: List[Tuple[str, str, str, List[Tuple[str, str, str, str]]]] = []
 
-    for jsonl_path in sorted(projects_dir.glob("*.jsonl")):
+    for jsonl_path in claude_code_session_files(projects_dirs):
         session_id = jsonl_path.stem
         if session_id in excluded:
             continue
@@ -4104,10 +4140,8 @@ def claude_code_day_source_records(
     projects_dir: Optional[Path] = None,
 ) -> List[SourceRecord]:
     """Every user/assistant message the Claude Code project still holds for ``d``."""
-    if projects_dir is None:
-        projects_dir = CLAUDE_PROJECTS_DIR
     records: List[SourceRecord] = []
-    for jsonl_path in sorted(projects_dir.glob("*.jsonl")) if projects_dir.exists() else []:
+    for jsonl_path in claude_code_session_files(claude_projects_dirs(projects_dir)):
         for raw in read_text(jsonl_path).splitlines():
             try:
                 record = json.loads(raw)
