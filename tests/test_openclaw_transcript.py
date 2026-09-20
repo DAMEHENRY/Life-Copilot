@@ -1,4 +1,6 @@
+import io
 import json
+import tarfile
 import tempfile
 import unittest
 from datetime import date
@@ -18,6 +20,21 @@ def record(role, content, timestamp):
         },
         ensure_ascii=False,
     )
+
+
+def batched(remote_read):
+    """Serve the batched reader from the same fake as single-file reads."""
+
+    def read_many(paths, **kwargs):
+        texts = {}
+        for path in paths:
+            try:
+                texts[path] = remote_read(path)
+            except copilot.OpenClawRemoteFileMissing:
+                continue
+        return texts
+
+    return read_many
 
 
 class TestOpenClawTranscript(unittest.TestCase):
@@ -145,6 +162,7 @@ class TestOpenClawTranscript(unittest.TestCase):
             raise AssertionError(f"unexpected remote read: {path}")
 
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(copilot, "read_openclaw_remote_texts", side_effect=batched(remote_read)), \
              patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]), \
              patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 7, 26)):
             text, message_count, session_count = copilot.export_openclaw_day_transcript(
@@ -189,6 +207,7 @@ class TestOpenClawTranscript(unittest.TestCase):
             raise AssertionError(f"unexpected remote read: {path}")
 
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(copilot, "read_openclaw_remote_texts", side_effect=batched(remote_read)), \
              patch.object(
                  copilot,
                  "list_openclaw_remote_direct_session_paths",
@@ -240,6 +259,7 @@ class TestOpenClawTranscript(unittest.TestCase):
             raise AssertionError(f"unexpected remote read: {path}")
 
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(copilot, "read_openclaw_remote_texts", side_effect=batched(remote_read)), \
              patch.object(
                  copilot,
                  "list_openclaw_remote_direct_session_paths",
@@ -255,6 +275,129 @@ class TestOpenClawTranscript(unittest.TestCase):
         self.assertIn("重置前的对话", text)
         self.assertNotIn("fresh-session", text)
 
+    def test_archive_closed_before_the_day_is_not_fetched(self):
+        stale = (
+            f"{copilot.OPENCLAW_SESSIONS_DIR}/"
+            "44444444-4444-4444-4444-444444444444.jsonl.reset.2026-07-20T00-00-00Z"
+        )
+        fresh = (
+            f"{copilot.OPENCLAW_SESSIONS_DIR}/"
+            "55555555-5555-5555-5555-555555555555.jsonl.reset.2026-07-26T14-00-00Z"
+        )
+        session = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "message",
+                        "timestamp": "2026-07-26T04:00:00.000Z",
+                        "message": {
+                            "role": "user",
+                            "sourceChannel": "telegram",
+                            "content": "当天的对话",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                record("assistant", "收到", "2026-07-26T04:00:01.000Z"),
+            ]
+        )
+        requested = []
+
+        def remote_read(path):
+            if path.endswith("sessions.json"):
+                return "{}"
+            if path == fresh:
+                return session
+            raise AssertionError(f"unexpected remote read: {path}")
+
+        def read_many(paths, **kwargs):
+            requested.extend(paths)
+            return batched(remote_read)(paths)
+
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(copilot, "read_openclaw_remote_texts", side_effect=read_many), \
+             patch.object(
+                 copilot,
+                 "list_openclaw_remote_direct_session_paths",
+                 return_value=[stale, fresh],
+             ), \
+             patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 7, 26)):
+            text, message_count, _ = copilot.export_openclaw_day_transcript(date(2026, 7, 26))
+
+        self.assertEqual(requested, [fresh])
+        self.assertEqual(message_count, 2)
+        self.assertIn("当天的对话", text)
+
+    def test_archive_closed_on_the_previous_utc_day_is_still_fetched(self):
+        # 2026-07-25T20:00Z is 2026-07-26 04:00 in Henry's timezone.
+        name = "66666666-6666-6666-6666-666666666666.jsonl.deleted.2026-07-25T20-00-00Z"
+        self.assertFalse(copilot.openclaw_archive_closed_before(name, date(2026, 7, 26)))
+        self.assertTrue(copilot.openclaw_archive_closed_before(name, date(2026, 7, 28)))
+        # An active transcript carries no closing stamp and is always read.
+        self.assertFalse(
+            copilot.openclaw_archive_closed_before("live-session.jsonl", date(2026, 7, 26))
+        )
+
+    def test_batched_read_returns_one_entry_per_archived_file(self):
+        directory = copilot.OPENCLAW_SESSIONS_DIR
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+            for name, body in (("first.jsonl", "一"), ("second.jsonl", "二")):
+                data = body.encode("utf-8")
+                info = tarfile.TarInfo(name=f"./{name}")
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        succeeded = type("Result", (), {"returncode": 0, "stdout": payload.getvalue()})()
+
+        with patch.object(copilot.subprocess, "run", return_value=succeeded) as run:
+            texts = copilot.read_openclaw_remote_texts([
+                f"{directory}/first.jsonl",
+                f"{directory}/second.jsonl",
+            ])
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(texts, {
+            f"{directory}/first.jsonl": "一",
+            f"{directory}/second.jsonl": "二",
+        })
+        command = run.call_args[0][0]
+        self.assertIn("tar", command)
+        self.assertIn("ControlMaster=auto", command)
+        # Read-only: the batch only asks the host to write an archive to stdout.
+        self.assertNotIn("rm", command)
+
+    def test_batched_read_splits_large_requests_into_chunks(self):
+        directory = copilot.OPENCLAW_SESSIONS_DIR
+        paths = [f"{directory}/session-{index:03d}.jsonl" for index in range(85)]
+
+        def fake_archive(dir_name, names, **kwargs):
+            return {f"{dir_name}/{name}": name for name in names}
+
+        with patch.object(copilot, "read_openclaw_remote_archive", side_effect=fake_archive) as run:
+            texts = copilot.read_openclaw_remote_texts(paths)
+
+        self.assertEqual(len(texts), 85)
+        self.assertEqual(run.call_count, 3)
+        self.assertLessEqual(
+            max(len(call[0][1]) for call in run.call_args_list),
+            copilot.OPENCLAW_REMOTE_BATCH_SIZE,
+        )
+
+    def test_batched_read_reports_transport_failure_after_all_attempts(self):
+        failed = type("Result", (), {"returncode": 255, "stdout": b"", "stderr": b"timed out"})()
+
+        with patch.object(copilot.subprocess, "run", return_value=failed) as run, \
+             patch.object(copilot.time, "sleep"):
+            with self.assertRaisesRegex(
+                copilot.OpenClawImportUnavailable,
+                "after 3 attempts: timed out",
+            ):
+                copilot.read_openclaw_remote_texts([
+                    f"{copilot.OPENCLAW_SESSIONS_DIR}/first.jsonl",
+                ])
+
+        self.assertEqual(run.call_count, 3)
+
     def test_day_export_fails_if_retained_session_disappears(self):
         retained_path = (
             f"{copilot.OPENCLAW_SESSIONS_DIR}/"
@@ -267,6 +410,7 @@ class TestOpenClawTranscript(unittest.TestCase):
             raise copilot.OpenClawRemoteFileMissing(f"{path} does not exist")
 
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(copilot, "read_openclaw_remote_texts", side_effect=batched(remote_read)), \
              patch.object(
                  copilot,
                  "list_openclaw_remote_direct_session_paths",
@@ -428,6 +572,8 @@ class TestOpenClawTranscript(unittest.TestCase):
             return files[path.rsplit("/", 1)[-1]]
 
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=fake_read), patch.object(
+            copilot, "read_openclaw_remote_texts", side_effect=batched(fake_read)
+        ), patch.object(
             copilot, "list_openclaw_remote_direct_session_paths", return_value=[]
         ), patch.object(copilot, "timestamp_to_local_date", return_value=date(2026, 9, 7)):
             text, count, sessions = copilot.export_openclaw_day_transcript(date(2026, 9, 7))
@@ -470,6 +616,7 @@ class TestOpenClawTranscript(unittest.TestCase):
             raise copilot.OpenClawImportUnavailable("session read failed")
 
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=remote_read), \
+             patch.object(copilot, "read_openclaw_remote_texts", side_effect=batched(remote_read)), \
              patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]):
             with self.assertRaisesRegex(
                 copilot.OpenClawImportUnavailable,

@@ -412,7 +412,13 @@ class TestWritebackKeepsLostMessages(unittest.TestCase):
         }
         self.patchers[-1].stop()
         self.patchers.pop()
-        with patch.object(copilot, "read_openclaw_remote_text", side_effect=lambda path, *a, **k: files[path.rsplit("/", 1)[-1]]), \
+        read_one = lambda path, *a, **k: files[path.rsplit("/", 1)[-1]]
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=read_one), \
+             patch.object(
+                 copilot,
+                 "read_openclaw_remote_texts",
+                 side_effect=lambda paths, **k: {path: read_one(path) for path in paths},
+             ), \
              patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]), \
              redirect_stdout(io.StringIO()):
             result = copilot.writeback_ai_day(DAY)

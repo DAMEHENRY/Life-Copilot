@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -93,6 +95,33 @@ OPENCLAW_SESSION_FILE_RE = re.compile(
     r"^(?P<session_id>[0-9a-f-]{36})\.jsonl(?:\.(?:reset|deleted)\..+)?$",
     re.IGNORECASE,
 )
+# OpenClaw closes a session by renaming its transcript to
+# ``<id>.jsonl.reset.<UTC timestamp>`` or ``.deleted.<UTC timestamp>``, so the
+# suffix marks the last moment the file could have received a message.
+OPENCLAW_ARCHIVE_STAMP_RE = re.compile(
+    r"\.jsonl\.(?:reset|deleted)\.(?P<day>\d{4}-\d{2}-\d{2})T",
+    re.IGNORECASE,
+)
+OPENCLAW_REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# One remote ``tar`` per batch; keeps the Windows command line well clear of
+# its length limit as the retained archives pile up.
+OPENCLAW_REMOTE_BATCH_SIZE = 40
+# Every ssh handshake to the Windows host, plus the wsl.exe start behind it,
+# costs seconds, so the whole import shares one multiplexed connection.
+OPENCLAW_SSH_CONTROL_PATH = os.environ.get(
+    "LIFE_OPENCLAW_SSH_CONTROL_PATH",
+    "/tmp/life-copilot-openclaw-%C",
+)
+OPENCLAW_SSH_OPTIONS = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=6",
+    "-o", "ConnectionAttempts=2",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=2",
+    "-o", "ControlMaster=auto",
+    "-o", f"ControlPath={OPENCLAW_SSH_CONTROL_PATH}",
+    "-o", "ControlPersist=60",
+]
 # Runtime events (e.g. a finished subagent task) that OpenClaw hands the model
 # inside a user turn; the block itself says it is not user-authored.
 OPENCLAW_INTERNAL_CONTEXT_RE = re.compile(
@@ -1595,6 +1624,129 @@ class OpenClawRemoteFileMissing(OpenClawImportUnavailable):
     """Raised when the Windows/OpenClaw host answers but the file does not exist."""
 
 
+def openclaw_ssh_command(*remote_args: str) -> List[str]:
+    """Build a read-only ssh command that runs ``remote_args`` inside WSL."""
+    return [
+        "ssh",
+        *OPENCLAW_SSH_OPTIONS,
+        OPENCLAW_SSH_HOST,
+        "wsl.exe",
+        "-d", OPENCLAW_WSL_DISTRO,
+        "-u", OPENCLAW_WSL_USER,
+        "--",
+        *remote_args,
+    ]
+
+
+def openclaw_archive_closed_before(name: str, d: date, margin_days: int = 1) -> bool:
+    """True when a retained archive was closed before day ``d`` started.
+
+    A closed transcript holds nothing newer than the timestamp in its name, so
+    fetching it to look for ``d`` is a wasted round trip. The archives are
+    never pruned and already outnumber the active sessions, which is what made
+    the import scale with Henry's whole OpenClaw history instead of one day.
+    The margin absorbs the UTC-to-local offset and any clock skew on the host.
+    """
+    match = OPENCLAW_ARCHIVE_STAMP_RE.search(name)
+    if not match:
+        return False
+    try:
+        closed = date.fromisoformat(match.group("day"))
+    except ValueError:
+        return False
+    return closed < d - timedelta(days=margin_days)
+
+
+def read_openclaw_remote_texts(
+    remote_paths: List[str],
+    timeout: int = 180,
+    attempts: int = 3,
+) -> Dict[str, str]:
+    """Read many OpenClaw files in a few SSH round trips instead of one each.
+
+    The files come back as a single gzipped tar per batch, so a day's import
+    pays a handshake per batch rather than per session. Paths the host does
+    not have are simply absent from the result; the caller decides whether a
+    missing file is fatal. Still read-only: ``tar`` only writes to stdout.
+    """
+    texts: Dict[str, str] = {}
+    batches: Dict[str, List[str]] = {}
+    for remote_path in dict.fromkeys(remote_paths):
+        directory, _, name = remote_path.rpartition("/")
+        if not directory or not OPENCLAW_REMOTE_NAME_RE.fullmatch(name):
+            # Anything unusual goes through the single-file reader, which
+            # quotes nothing and so cannot be confused by the name either.
+            try:
+                texts[remote_path] = read_openclaw_remote_text(remote_path)
+            except OpenClawRemoteFileMissing:
+                continue
+            continue
+        batches.setdefault(directory, []).append(name)
+
+    for directory, names in batches.items():
+        for start in range(0, len(names), OPENCLAW_REMOTE_BATCH_SIZE):
+            chunk = names[start:start + OPENCLAW_REMOTE_BATCH_SIZE]
+            texts.update(read_openclaw_remote_archive(
+                directory, chunk, timeout=timeout, attempts=attempts,
+            ))
+    return texts
+
+
+def read_openclaw_remote_archive(
+    directory: str,
+    names: List[str],
+    timeout: int = 180,
+    attempts: int = 3,
+) -> Dict[str, str]:
+    """Fetch one batch of files from ``directory`` as a gzipped tar stream."""
+    command = openclaw_ssh_command(
+        "tar", "-czf", "-", "--ignore-failed-read", "-C", directory, "--", *names,
+    )
+    failures: List[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(str(exc))
+        else:
+            if result.returncode == 0:
+                try:
+                    return read_openclaw_archive_bytes(directory, result.stdout)
+                except (tarfile.TarError, EOFError, OSError) as exc:
+                    # A truncated or mangled stream is a transport failure.
+                    failures.append(f"unreadable archive: {exc}")
+            else:
+                stderr = result.stderr.decode("utf-8", "replace").strip()
+                failures.append(stderr or f"ssh exited {result.returncode}")
+        if attempt < attempts:
+            time.sleep(attempt)
+    detail = failures[-1] if failures else "unknown SSH failure"
+    raise OpenClawImportUnavailable(
+        f"cannot read {len(names)} files from {directory} on {OPENCLAW_SSH_HOST} "
+        f"after {attempts} attempts: {detail}"
+    )
+
+
+def read_openclaw_archive_bytes(directory: str, payload: bytes) -> Dict[str, str]:
+    """Decode a gzipped tar of session files into {remote path: text}."""
+    texts: Dict[str, str] = {}
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            handle = archive.extractfile(member)
+            if handle is None:
+                continue
+            name = Path(member.name).name
+            texts[f"{directory}/{name}"] = handle.read().decode("utf-8", "replace")
+    return texts
+
+
 def read_openclaw_remote_text(
     remote_path: str,
     timeout: int = 15,
@@ -1605,21 +1757,7 @@ def read_openclaw_remote_text(
     The operation is deliberately read-only: it invokes ``cat`` for a fixed
     WSL path and never writes to the Windows host.
     """
-    command = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=6",
-        "-o", "ConnectionAttempts=2",
-        "-o", "ServerAliveInterval=5",
-        "-o", "ServerAliveCountMax=2",
-        OPENCLAW_SSH_HOST,
-        "wsl.exe",
-        "-d", OPENCLAW_WSL_DISTRO,
-        "-u", OPENCLAW_WSL_USER,
-        "--",
-        "cat",
-        remote_path,
-    ]
+    command = openclaw_ssh_command("cat", remote_path)
     failures: List[str] = []
     for attempt in range(1, attempts + 1):
         try:
@@ -1663,24 +1801,13 @@ def list_openclaw_remote_direct_session_paths(
     leaving its immutable JSONL transcript in place. This read-only discovery
     step keeps daily provenance complete across those lifecycle events.
     """
-    command = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=6",
-        "-o", "ConnectionAttempts=2",
-        "-o", "ServerAliveInterval=5",
-        "-o", "ServerAliveCountMax=2",
-        OPENCLAW_SSH_HOST,
-        "wsl.exe",
-        "-d", OPENCLAW_WSL_DISTRO,
-        "-u", OPENCLAW_WSL_USER,
-        "--",
+    command = openclaw_ssh_command(
         "find",
         OPENCLAW_SESSIONS_DIR,
         "-maxdepth", "1",
         "-type", "f",
         "-exec", "grep", "-Il", "sourceChannel", "{}", "+",
-    ]
+    )
     failures: List[str] = []
     for attempt in range(1, attempts + 1):
         try:
@@ -1903,18 +2030,25 @@ def export_openclaw_day_transcript(
             candidates[path] = (session_id, channel)
 
     for path in list_openclaw_remote_direct_session_paths():
-        match = OPENCLAW_SESSION_FILE_RE.fullmatch(Path(path).name)
-        if match and path not in candidates:
-            candidates[path] = (match.group("session_id"), "")
+        name = Path(path).name
+        match = OPENCLAW_SESSION_FILE_RE.fullmatch(name)
+        if not match or path in candidates:
+            continue
+        if openclaw_archive_closed_before(name, d):
+            continue
+        candidates[path] = (match.group("session_id"), "")
+
+    session_texts = read_openclaw_remote_texts(sorted(candidates))
 
     grouped: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
     seen_messages: set[Tuple[str, str, str, str, str]] = set()
     for session_path, (session_id, indexed_channel) in sorted(candidates.items()):
-        try:
-            raw = read_openclaw_remote_text(session_path)
-        except OpenClawRemoteFileMissing:
+        raw = session_texts.get(session_path)
+        if raw is None:
             if not indexed_channel:
-                raise
+                raise OpenClawRemoteFileMissing(
+                    f"{session_path} does not exist on {OPENCLAW_SSH_HOST}"
+                )
             # A reset indexes the new session before its first message creates
             # the transcript; the previous transcript stays retained as
             # ``*.jsonl.reset.*`` and is discovered above.
