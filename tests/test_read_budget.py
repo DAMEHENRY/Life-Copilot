@@ -92,6 +92,7 @@ class TestAuditReadBudget(unittest.TestCase):
             patch.object(copilot_module, "LIFE_BOARD_FILE", self.root / "life-board.md"),
             patch.object(copilot_module, "MEMORY_FILE", journal / "memory.md"),
             patch.object(copilot_module, "AI_CONVERSATIONS_DIR", journal / "ai-conversations"),
+            patch.object(copilot_module, "PEOPLE_DIR", journal / "people"),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -132,11 +133,12 @@ class TestAuditReadBudget(unittest.TestCase):
 
 
 class TestWritebackAiDayReadBudget(unittest.TestCase):
-    def _run(self, **audit_patch) -> list[str]:
+    def _run(self, pages: list | None = None, **audit_patch) -> list[str]:
         args = SimpleNamespace(date="2026-09-20")
         out = io.StringIO()
         with patch.object(copilot_module, "writeback_ai_day", return_value={"journal": "/vault/journal/day.md"}), \
                 patch.object(copilot_module, "audit_read_budget", **audit_patch), \
+                patch.object(copilot_module, "pages_mentioned", return_value=pages or []), \
                 redirect_stdout(out):
             cmd_writeback_ai_day(args)
         return out.getvalue().splitlines()
@@ -153,6 +155,13 @@ class TestWritebackAiDayReadBudget(unittest.TestCase):
         lines = self._run(return_value=result)
         self.assertTrue(lines[0].startswith("Read budget: 1 over cap"))
         self.assertIn("read in 4 parts", lines[1])
+        self.assertEqual(lines[-1], "/vault/journal/day.md")
+
+    def test_mentioned_people_pages_are_named_before_the_journal_path(self) -> None:
+        result = {"counts": {"over": 0, "near": 0, "ok": 1, "missing": 0}, "files": []}
+        pages = [{"slug": "zheng-chen", "path": Path("p"), "name": "郑宸", "mentions": 3}]
+        lines = self._run(pages=pages, return_value=result)
+        self.assertEqual(lines[1], "People pages mentioned today (read before the analysis): zheng-chen (郑宸 ×3)")
         self.assertEqual(lines[-1], "/vault/journal/day.md")
 
     def test_a_failed_budget_check_does_not_fail_the_archive(self) -> None:

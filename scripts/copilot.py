@@ -6,7 +6,7 @@ Only structural write commands that are unsafe for the model to do freehand:
 writeback-journal, writeback-thought, writeback-chat-capture,
 writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
 finalize-ai-day, sync-web-chats, web-chats-status, install-web-chats,
-writeback-memory, maintain-memory, append-insight, compact-memory,
+writeback-memory, maintain-memory, maintain-page, append-insight, compact-memory,
 audit-system-rules, promote-system-rule, rollback-system-rule, quant-mission,
 quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
 """
@@ -39,6 +39,7 @@ LIFE_BOARD_FILE = ROOT / "life-board.md"
 MEMORY_FILE = JOURNAL_DIR / "memory.md"
 MEMORY_ARCHIVE_FILE = JOURNAL_DIR / "memory-archive.md"
 INSIGHTS_FILE = JOURNAL_DIR / "insights.jsonl"
+PEOPLE_DIR = JOURNAL_DIR / "people"
 SYSTEM_EVOLUTION_LEDGER = JOURNAL_DIR / "system-evolution.jsonl"
 SYSTEM_EVOLUTION_CANDIDATES_DIR = JOURNAL_DIR / "system-evolution-candidates"
 ROADMAP_FILE = ROOT / "quant" / "roadmap.md"
@@ -3486,6 +3487,7 @@ def read_budget_paths(target: Optional[date] = None) -> List[Path]:
         paths += sorted(
             ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md")
         )
+        paths += [item["path"] for item in pages_mentioned(target) if "error" not in item]
     return paths
 
 
@@ -3551,6 +3553,272 @@ def cmd_check_read_budget(args: argparse.Namespace) -> None:
         return
     for line in format_read_budget(result):
         print(line)
+    if target is not None:
+        for line in format_pages_mentioned(pages_mentioned(target)):
+            print(line)
+
+
+# People pages (journal/people/): one standing answer per person, rewritten as a
+# whole from the evidence. journal/people/00-index.md describes the shape.
+PEOPLE_PAGE_SECTIONS = ("答案", "证据", "悬着的")
+PEOPLE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+PEOPLE_BELIEF_RE = re.compile(r"^- \*\*(.+?)\*\* · 支持 (\d+)")
+PEOPLE_QUOTE_RE = re.compile(r"^\s+- (.+)$")
+PEOPLE_QUOTE_SOURCE = " — [["
+PEOPLE_EVIDENCE_LINK_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([a-z-]+)-trace)?$")
+CJK_RE = re.compile(r"[一-鿿]")
+
+
+def split_people_page(text: str) -> Tuple[Dict[str, object], Dict[str, str]]:
+    """Return a people page's YAML fields and its ## sections by title."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("page must start with a --- YAML block")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        raise ValueError("YAML block is not closed with ---")
+    fields: Dict[str, object] = {}
+    key: Optional[str] = None
+    for line in lines[1:end]:
+        item = re.match(r"^\s+-\s+(.+?)\s*$", line)
+        if item and key is not None:
+            values = fields.setdefault(key, [])
+            if isinstance(values, list):
+                values.append(item.group(1).strip("'\""))
+            continue
+        m = re.match(r"^([A-Za-z_]+):\s*(.*?)\s*$", line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if value.startswith("[") and value.endswith("]"):
+            fields[key] = [v.strip().strip("'\"") for v in value[1:-1].split(",") if v.strip()]
+        elif value:
+            fields[key] = value.strip("'\"")
+    sections: Dict[str, str] = {}
+    title: Optional[str] = None
+    for line in lines[end + 1:]:
+        heading = re.match(r"^##\s+(.+?)\s*$", line)
+        if heading:
+            title = heading.group(1)
+            sections[title] = ""
+        elif title is not None:
+            sections[title] += line + "\n"
+    return fields, sections
+
+
+def people_alias_problem(alias: str) -> Optional[str]:
+    """Why an alias would match too much, or None when it is specific enough."""
+    if CJK_RE.search(alias):
+        return None if len(alias) >= 2 else "is shorter than two Chinese characters"
+    return None if len(alias) >= 3 else "is shorter than three characters"
+
+
+def people_evidence_source(link: str) -> Path:
+    """Map an evidence wikilink to the diary or daily trace it names."""
+    m = PEOPLE_EVIDENCE_LINK_RE.match(link)
+    if not m:
+        raise ValueError(f"evidence must cite a diary date or a daily trace, not [[{link}]]")
+    day = parse_date_str(m.group(1))
+    if m.group(2):
+        return ai_conversation_dir_for_date(day) / f"{link}.md"
+    return journal_path_for_date(day)
+
+
+def quote_in_source(quote: str, source_text: str) -> bool:
+    """True when every …-separated fragment of the quote appears, in order."""
+    haystack = re.sub(r"\s+", " ", source_text)
+    pos = 0
+    for fragment in quote.split("…"):
+        needle = re.sub(r"\s+", " ", fragment).strip()
+        if not needle:
+            continue
+        found = haystack.find(needle, pos)
+        if found < 0:
+            return False
+        pos = found + len(needle)
+    return True
+
+
+def validate_people_page(text: str) -> Dict[str, int]:
+    """Check a page's shape and that every evidence quote is verbatim in its source."""
+    fields, sections = split_people_page(text)
+    problems: List[str] = []
+    for key in ("name", "question", "updated"):
+        if not fields.get(key):
+            problems.append(f"YAML is missing {key}")
+    if fields.get("updated"):
+        try:
+            parse_date_str(str(fields["updated"]))
+        except ValueError:
+            problems.append("updated is not YYYY-MM-DD")
+    aliases = fields.get("aliases")
+    if not isinstance(aliases, list) or not aliases:
+        problems.append("YAML needs at least one alias")
+    else:
+        for alias in aliases:
+            issue = people_alias_problem(alias)
+            if issue:
+                problems.append(f"alias {alias!r} {issue}")
+    for title in PEOPLE_PAGE_SECTIONS:
+        if title not in sections:
+            problems.append(f"missing section ## {title}")
+    if "答案" in sections and not sections["答案"].strip():
+        problems.append("## 答案 is empty")
+
+    beliefs: List[Tuple[str, int, List[str]]] = []
+    for line in sections.get("证据", "").splitlines():
+        belief = PEOPLE_BELIEF_RE.match(line)
+        if belief:
+            beliefs.append((belief.group(1), int(belief.group(2)), []))
+        elif line.startswith("- "):
+            problems.append(f"evidence bullet without a 支持 count: {line[:60]}")
+        elif PEOPLE_QUOTE_RE.match(line) and beliefs:
+            beliefs[-1][2].append(line.strip()[2:])
+    if "证据" in sections and not beliefs:
+        problems.append("## 证据 has no beliefs")
+    for title, count, quotes in beliefs:
+        if count < 1:
+            problems.append(f"{title}: 支持 must be at least 1")
+        if not quotes:
+            problems.append(f"{title}: no quote")
+        for quote_line in quotes:
+            cut = quote_line.rfind(PEOPLE_QUOTE_SOURCE)
+            if cut < 0:
+                problems.append(f"{title}: quote without a dated source: {quote_line[:60]}")
+                continue
+            quote = quote_line[:cut].strip()
+            link = quote_line[cut + len(PEOPLE_QUOTE_SOURCE):].split("]]", 1)[0].split("|", 1)[0]
+            try:
+                source = people_evidence_source(link)
+            except ValueError as exc:
+                problems.append(f"{title}: {exc}")
+                continue
+            if not source.exists():
+                problems.append(f"{title}: source [[{link}]] not found")
+            elif not quote_in_source(quote, read_text(source)):
+                problems.append(f"{title}: quote not found verbatim in [[{link}]]: {quote[:60]}")
+    if problems:
+        raise ValueError("people page is invalid:\n- " + "\n- ".join(problems))
+    return {"beliefs": len(beliefs), "quotes": sum(len(q) for _, _, q in beliefs)}
+
+
+def people_page_path(slug: str) -> Path:
+    if not PEOPLE_SLUG_RE.match(slug):
+        raise ValueError(f"slug must be lowercase kebab-case: {slug!r}")
+    return PEOPLE_DIR / f"{slug}.md"
+
+
+def maintain_people_page(
+    slug: str,
+    text: str,
+    base_sha256: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, object]:
+    """Create or rewrite one people page, keeping the version it replaces."""
+    path = people_page_path(slug)
+    result: Dict[str, object] = {
+        "slug": slug,
+        "path": str(path),
+        "dry_run": dry_run,
+        **validate_people_page(text),
+        "history": None,
+    }
+    if not path.exists():
+        if base_sha256 is not None:
+            raise ValueError(f"{path.name} does not exist; drop --base-sha256 to create it")
+        result["action"] = "created"
+        if not dry_run:
+            write_text(path, text)
+    else:
+        current_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        if base_sha256 is None:
+            raise ValueError(
+                f"{path.name} exists; pass --base-sha256 with the sha256 of the version you read "
+                f"(shasum -a 256 {shlex.quote(str(path))})"
+            )
+        if base_sha256 != current_sha:
+            raise ValueError(
+                f"{path.name} changed since it was read (now {current_sha[:12]}); read it again before rewriting"
+            )
+        current = read_text(path)
+        if current == text:
+            result["action"] = "no-op"
+            return result
+        try:
+            old_updated = str(split_people_page(current)[0].get("updated") or "undated")
+        except ValueError:
+            old_updated = "undated"
+        history = PEOPLE_DIR / ".history" / slug / f"{old_updated}.md"
+        suffix = 2
+        while history.exists():
+            history = history.with_name(f"{old_updated}-{suffix}.md")
+            suffix += 1
+        result.update(action="updated", history=str(history))
+        if not dry_run:
+            write_text(history, current)
+            write_text(path, text)
+    if not dry_run and read_text(path) != text:
+        raise RuntimeError(f"read-back of {path} does not match what was written")
+    return result
+
+
+def cmd_maintain_page(args: argparse.Namespace) -> None:
+    text = read_text(Path(args.input_file).expanduser())
+    result = maintain_people_page(
+        args.slug,
+        text,
+        base_sha256=args.base_sha256,
+        dry_run=bool(args.dry_run),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def people_alias_pattern(names: List[str]) -> "re.Pattern[str]":
+    """One pattern per page, longest name first, so overlapping aliases count once."""
+    parts = []
+    for name in sorted(set(names), key=len, reverse=True):
+        escaped = re.escape(name)
+        parts.append(escaped if CJK_RE.search(name) else rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])")
+    return re.compile("|".join(parts), re.IGNORECASE)
+
+
+def pages_mentioned(target: date) -> List[Dict[str, object]]:
+    """People pages whose name or an alias appears in that day's diary or traces."""
+    if not PEOPLE_DIR.is_dir():
+        return []
+    pages = sorted(p for p in PEOPLE_DIR.glob("*.md") if p.name != "00-index.md")
+    if not pages:
+        return []
+    sources = [journal_path_for_date(target)]
+    sources += sorted(ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md"))
+    text = "\n".join(read_text(source) for source in sources if source.exists())
+    found: List[Dict[str, object]] = []
+    for page in pages:
+        try:
+            fields, _ = split_people_page(read_text(page))
+            names = [str(fields["name"])] + [str(a) for a in fields.get("aliases") or []]
+            names = [n for n in names if not people_alias_problem(n)]
+            mentions = len(people_alias_pattern(names).findall(text)) if names else 0
+        except (KeyError, ValueError) as exc:
+            found.append({"slug": page.stem, "path": page, "error": str(exc) or type(exc).__name__})
+            continue
+        if mentions:
+            found.append({"slug": page.stem, "path": page, "name": fields["name"], "mentions": mentions})
+    return sorted(found, key=lambda item: -int(item.get("mentions", 0)))  # type: ignore[arg-type]
+
+
+def format_pages_mentioned(found: List[Dict[str, object]]) -> List[str]:
+    lines = []
+    readable = [item for item in found if "error" not in item]
+    if readable:
+        lines.append(
+            "People pages mentioned today (read before the analysis): "
+            + ", ".join(f"{item['slug']} ({item['name']} ×{item['mentions']})" for item in readable)
+        )
+    for item in found:
+        if "error" in item:
+            lines.append(f"People page {item['slug']} could not be read: {item['error']}")
+    return lines
 
 
 def split_life_board_track_sections(board_text: str) -> List[Tuple[str, str]]:
@@ -4876,6 +5144,10 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         summary = format_read_budget(audit_read_budget(target), include_ok=False)
     except Exception as exc:  # the archive is already written; a size report must not fail it
         summary = [f"Read budget: unavailable ({exc})"]
+    try:
+        summary += format_pages_mentioned(pages_mentioned(target))
+    except Exception as exc:
+        summary.append(f"People pages: unavailable ({exc})")
     for line in summary:
         print(line)
     print(result["journal"])
@@ -6079,6 +6351,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--input-file", required=True)
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_maintain_memory)
+
+    s = sub.add_parser("maintain-page")
+    s.add_argument("--slug", required=True, help="Page file name under journal/people/, lowercase kebab-case.")
+    s.add_argument("--input-file", required=True, help="The complete rewritten page.")
+    s.add_argument("--base-sha256", help="sha256 of the page as it was read; required to rewrite an existing page.")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_maintain_page)
 
     s = sub.add_parser("append-insight")
     s.add_argument("--date", required=True)
