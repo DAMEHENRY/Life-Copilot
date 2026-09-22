@@ -34,7 +34,8 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex、原生 Claude Code CLI、Life Claude Renderer，以及通过 Tailscale SSH 只读取得的 Windows OpenClaw/Kai Telegram 与微信私聊归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引。Telegram 与微信均是当前入口；归档按当天实际存在的私聊收集，不要求两个渠道每天都产生消息。OpenClaw/Kai 是必需证据源：若 Windows/OpenClaw 暂时不可达，停止分析并修复或重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。同一命令会先经 Chrome 扩展同步 Claude 网页版与 ChatGPT 网页版（含 Health）对话并写入 `claude-web` / `chatgpt-web` trace；Chrome 未打开时脚本会后台启动并在同步后退出，无需 Henry 手动打开。网页对话也是必需证据源：若同步失败（例如登录过期或出现人机验证），停止分析并请 Henry 在 Chrome 中处理后重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-web-chats`。若日记文件不存在，说明后跳过；若当天确实没有 OpenClaw 私聊或网页对话，零消息是正常结果。
 0.5. 跟读当日 trace，提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
-2. `journal/memory.md`（长期记忆，`Active Hypotheses` 区块优先）
+1.5. 当天提到的人物页（`writeback-ai-day` 会列出）：派生的累积理解，引用细节仍回原件。
+2. `journal/memory.md` 全文（长期记忆）：按 `writeback-ai-day` 打印的读取计划分段整读，Stable Profile 每次必读，不要只读 Active Hypotheses。
 3. 目标日期前后 2-3 天的日记（时间上下文）
 4. `journal/insights.jsonl`（历史模式索引层，用于找已有命名模式、refs 与验证线索）
 5. `journal/memory-archive.md`（冷归档，找仍 relevant 的旧模式）
@@ -64,7 +65,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 
 **💬 From Kai 证据层：**
 - `## 💬 From Kai` 是当天 AI 原始对话流的索引层。它包含指向每日 AI trace 文件的 wikilink，例如 `[[2026-06-01-codex-trace]]`、`[[2026-06-01-claude-code-trace]]`、`[[2026-06-01-life-claude-renderer-trace]]`、`[[2026-06-01-openclaw-trace]]`、`[[2026-06-01-claude-web-trace]]` 和 `[[2026-06-01-chatgpt-web-trace]]`。
-- 完整的 Codex、原生 Claude Code CLI、Life Claude Renderer 和 Windows OpenClaw/Kai Telegram 与微信私聊，存放在 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件中，由 `writeback-ai-day` 自动归档。各来源的图片记为 `[Image]` 或 `[Image: 名称]` 占位，由客户端或平台自己写入对话的上下文、提示与报错不算任何一方的话。Codex 导入去掉 Codex 自动注入的环境、AGENTS.md、插件、技能与目标上下文。Claude Code 导入只保留 Henry/Claude 可见正文，过滤 thinking、tool use/result、sidechain、本地斜杠命令记录、isMeta 注入、中断标记、后台任务通知、客户端错误提示及已被 Claudian/Renderer 表示的 provider session。Life Claude Renderer 导入保留 Henry 附上的选中文本，过滤插件自己的报错与中断提示。OpenClaw 导入同时读取活动索引与保留的历史会话文件，只保留受支持私聊中的 Henry/Kai 可见正文（Kai 通过 message 工具发出的回复也算），过滤 thinking、其他 tool logs、delivery mirror、heartbeat、OpenClaw 自己写入的提示（cron、memory flush、内部上下文）、`NO_REPLY`、群聊和测试会话。Henry 手工提供的完整记录优先于远端残留片段，并在重复 writeback 时保留。Claude 网页版与 ChatGPT 网页版导入只保留当前可见分支里 Henry 与 Claude/ChatGPT 的正文，按每条消息时间归入当天，过滤 thinking、推理摘要、工具调用与工具返回（含 Health 读取的健康数据）、隐藏上下文和引用标记，ChatGPT 生成的图片保留为占位；ChatGPT Health 对话在标题中标记 `[Health]`，每段对话附原始链接。历史 `*-claudian-trace.md` 文件保持不动。
+- 完整对话在 `journal/ai-conversations/YYYY/MM/` 下各来源的 trace 里，由 `writeback-ai-day` 归档；各导入器保留和过滤什么，以 `AGENTS.md` 的结构化写回说明和脚本为准。读 trace 时记住：只保留双方可见正文，图片记为 `[Image]` 占位，客户端或平台自己写入的上下文、提示与报错不算任何一方的话；Henry 手工补的完整记录优先于远端残留；网页对话按每条消息的时间归日，ChatGPT Health 对话的标题带 `[Health]`。
 - 分析时需跟读 wikilink 读取完整 trace 文件，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Claude Code/Life Claude Renderer 当场反照了什么、晚上日记正文又如何重构这一天。
 - 不要把 AI 的回答直接复述成夜间分析；夜间分析要做二阶工作：提炼主线、校验 AI 的判断、补本地历史证据、指出对话流里反复出现的结构。
 - 如果 AI 在 trace 文件里声称”找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
@@ -193,6 +194,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 - 长期记忆应忠实于日记本身，而不是服务于漂亮的单一主题。若当天同时包含身体、关系、学习、工具、职业等不同主线，且它们各自有长期复用价值，应保留这种多中心结构。
 - 用户明确说“记住这点”是强触发：默认直接写入或更新；除非存在无法安全解决的来源冲突。
 - 写入内容必须满足：一条一事实、可复用、可检索、包含日期证据 wikilink、避免纯情绪句。
+- 同一条 Active 条目第三次更新时，不再往里追加：它在持续回答同一个问题。关于某个人的，转成人物页（家人相关的页先请 Henry 审）；关于 Henry 偏好或行为规则的，移进对应的规则文件（如 `journal/closing-greetings.md`）。旧版本本来就会进 archive，改写时不必把旧内容带进新条目。
 
 **Tomorrow Projection：**
 - `What Life Copilot Said` 不强制以行动结尾。若执行 closeout，将目标日方向单独写入 `## 🧭 Daily Suggestion`。
@@ -208,13 +210,13 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 仅在通过 Entry Gate，并已完成“归档 trace → 合并 Chat capture → 读取本地证据 → diary analysis”后，以下六步才是默认收尾动作。普通 Chat 或 Capture 永远不触发本 Contract。除非 Henry 明确说“只调查 / 不要写回 / dry run”。执行细节以 `AGENTS.md` 为全局边界，本节定义 Diary Mode 的内容与顺序。
 
 1. **Analysis Writeback**：将关系性回应写入 `## What Life Copilot Said`。正文只包含真正对 Henry 的回应；不包含 memory audit、维护状态、工具日志、Board/inbox 报告，也不强制包含历史锚点或微行动。必须先写临时文件，再调用 `writeback-journal`；禁止用 `writeback-thought` 写 Copilot 回应。
-2. **Automatic Memory Maintenance**：在后台完成 `no-op / add / replace / promote / archive / conflict` 判断。先生成临时 JSON，运行 `maintain-memory --dry-run`，校验通过后正式执行并回读。no-op 静默；实际改变只在最终执行说明中简短报告，不进入关系性正文。
+2. **Automatic Memory Maintenance**：在后台完成 `no-op / add / replace / promote / archive / conflict` 判断。先生成临时 JSON，运行 `maintain-memory --dry-run`，校验通过后正式执行并回读。no-op 静默；实际改变只在最终执行说明中简短报告，不进入关系性正文。当天证据碰到已有人物页的人时，在这一步一并重写那一页：重读当前页，按全部证据重写答案，更新支持次数、原话和悬着的问题；先用 `maintain-page --dry-run` 校验（原话必须能在所引原件里逐字找到），再带 `--base-sha256` 正式写入；没有新证据就 no-op。
 3. **Life Board Audit Gate**：运行 `audit-life-board`。若为 `needs_audit`，只提出最小 patch；未经 Henry 确认不修改 Board。
 4. **Inbox Audit / Closure Check**：读取 `inbox/00-readme.md` 并判断待处理文件去向。默认只建议，不移动或删除；Henry 明确授权 flush/move 时才执行。
 5. **Daily Suggestion Writeback**：基于分析和 post-inbox 状态，将短小的目标日方向写入 `## 🧭 Daily Suggestion`。它可以是行动、边界、许可或“不新增任务”，不必把每一天变成优化项目。使用目标日语态；遇到已有不同 provenance 时不自动 `--force`。
-6. **Final Response**：先呈现关系性回应的结果，再用最短必要文字说明真实发生的维护动作。Board/inbox/memory no-op 不制造活动感。
+6. **Final Response**：先呈现关系性回应的结果，再用最短必要文字说明真实发生的维护动作。Board/inbox/memory no-op 不制造活动感。执行说明里加一行读取回执：每个必读来源是整读还是只读了哪几段（对照读取计划）。需要收尾问候时，先读 `journal/closing-greetings.md`，照其中规则写，用完在它的台账末尾加一行。
 
-收尾顺序：分析 → 写回关系性回应 → 自动维护长期记忆 → Life Board audit → inbox audit / closure → 写回 Daily Suggestion → 最终回复。
+收尾顺序：分析 → 写回关系性回应 → 自动维护长期记忆与人物页 → Life Board audit → inbox audit / closure → 写回 Daily Suggestion → 最终回复。
 
 # Safety Protocol
 
