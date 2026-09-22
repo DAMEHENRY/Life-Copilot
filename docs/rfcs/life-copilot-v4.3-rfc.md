@@ -1,6 +1,6 @@
 # Life Copilot v4.3 RFC
 
-> Status: Draft
+> Status: implemented (2026-06-05); superseded by [[life-copilot-v4.4-rfc]]
 > Author: Henry + Claude Code
 > Date: 2026-06-04
 > Replaces: v4.2 (2026-06-01)

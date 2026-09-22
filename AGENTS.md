@@ -27,6 +27,7 @@
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md` |
 | 收尾问候 | `journal/closing-greetings.md`；日记收尾与睡前晚安共用的规则和用过的材料 |
+| 设计记录 | `docs/rfcs/`；只为结构性改动写，标为 implemented 后不再改，修订写进下一份 |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
 | Seeds / Inbox | `seeds/` / `inbox/` |

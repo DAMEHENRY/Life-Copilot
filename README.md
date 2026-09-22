@@ -343,9 +343,9 @@ git diff --check
 
 `RFC` means **Request for Comments**.
 
-In this vault, [[life-copilot-v4.5-rfc]] is the current design rationale and migration note; the earlier ones stay as history. It is not short for "refactor", although this version does refactor rule ownership.
+In this vault, RFCs live in `docs/rfcs/`. [[life-copilot-v4.5-rfc]] is the current design rationale and migration note; the earlier ones stay as history. It is not short for "refactor", although this version does refactor rule ownership.
 
-Use the RFC when you want to understand why the system changed. Use this README when you want to know how to operate it.
+Use the RFC when you want to understand why the system changed. Use this README when you want to know how to operate it. `docs/rfcs/00-index.md` says which changes get an RFC and when an RFC stops changing.
 
 ---
 
