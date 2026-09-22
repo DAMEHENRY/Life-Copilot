@@ -3428,6 +3428,131 @@ def cmd_audit_life_board(args: argparse.Namespace) -> None:
         print("Next step: include a Proposed Life Board Patch in the final response; do not edit life-board.md without Henry approval.")
 
 
+# Largest single tool output every agent can count on receiving whole. This is
+# Claude Code's default (bashOutputMaxChars), measured on 2026-09-21: 28,237
+# bytes arrived intact, while 30,996 bytes of ASCII and 31,588 bytes of Chinese
+# were both cut to a 2 KB preview, so for Chinese it lands near 10,000
+# characters. A higher setting on one machine does not reach Codex, whose limit
+# is its own tool_output_token_limit, so plans keep the default.
+READ_CAP_BYTES = 30_000
+# Plan reads with a fifth of headroom: the exact cap is unknown and files grow.
+READ_BUDGET_BYTES = 24_000
+
+
+def read_budget_plan(
+    data: bytes,
+    budget: int = READ_BUDGET_BYTES,
+) -> Tuple[List[Tuple[int, int]], List[int]]:
+    """Split text into consecutive 1-based line ranges that each fit the budget.
+
+    Ranges count lines the way `sed -n 'A,Bp'` does. A line longer than the
+    budget cannot be read whole by line range, so it gets a range of its own and
+    its number is also returned separately.
+    """
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    ranges: List[Tuple[int, int]] = []
+    oversize: List[int] = []
+    start, size = 1, 0
+    for number, line in enumerate(lines, 1):
+        length = len(line) + 1
+        if length > budget:
+            oversize.append(number)
+        if size and size + length > budget:
+            ranges.append((start, number - 1))
+            start, size = number, 0
+        size += length
+    if lines:
+        ranges.append((start, len(lines)))
+    return ranges, oversize
+
+
+def read_budget_status(size: int) -> str:
+    if size <= READ_BUDGET_BYTES:
+        return "ok"
+    if size <= READ_CAP_BYTES:
+        return "near"
+    return "over"
+
+
+def read_budget_paths(target: Optional[date] = None) -> List[Path]:
+    """Files an agent is expected to read in full, plus one day's diary and traces."""
+    paths = [ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
+    paths += sorted((ROOT / "prompts").glob("*.md"))
+    paths += [LIFE_BOARD_FILE, MEMORY_FILE]
+    if target is not None:
+        paths.append(journal_path_for_date(target))
+        paths += sorted(
+            ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md")
+        )
+    return paths
+
+
+def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
+    files: List[Dict[str, object]] = []
+    for path in read_budget_paths(target):
+        shown = path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
+        if not path.exists():
+            files.append({"path": shown, "status": "missing"})
+            continue
+        data = path.read_bytes()
+        ranges, oversize = read_budget_plan(data)
+        planned = len(data) > READ_BUDGET_BYTES
+        files.append({
+            "path": shown,
+            "bytes": len(data),
+            "percent_of_cap": round(100 * len(data) / READ_CAP_BYTES),
+            "status": read_budget_status(len(data)),
+            "reads": len(ranges) if planned else 1,
+            "ranges": [f"{a}-{b}" for a, b in ranges] if planned else [],
+            "oversize_lines": oversize,
+        })
+    counts = {
+        status: sum(1 for item in files if item["status"] == status)
+        for status in ("over", "near", "ok", "missing")
+    }
+    return {
+        "date": target.isoformat() if target else None,
+        "cap_bytes": READ_CAP_BYTES,
+        "budget_bytes": READ_BUDGET_BYTES,
+        "counts": counts,
+        "files": files,
+    }
+
+
+def format_read_budget(result: Dict[str, object], include_ok: bool = True) -> List[str]:
+    counts = result["counts"]
+    lines = [
+        f"Read budget: {counts['over']} over cap, {counts['near']} near cap, "  # type: ignore[index]
+        f"{counts['ok']} ok, {counts['missing']} missing "  # type: ignore[index]
+        f"(one read holds {READ_CAP_BYTES:,} bytes; plans use {READ_BUDGET_BYTES:,})"
+    ]
+    for item in result["files"]:  # type: ignore[union-attr]
+        if item["status"] == "ok" and not include_ok:
+            continue
+        if item["status"] == "missing":
+            lines.append(f"- missing {item['path']}")
+            continue
+        text = f"- {item['status']:<4} {item['path']}  {item['bytes']:,} bytes ({item['percent_of_cap']}% of cap)"
+        if item["ranges"]:
+            text += f"; read in {item['reads']} parts, lines " + ", ".join(item["ranges"])
+        if item["oversize_lines"]:
+            text += "; lines too long to read whole: " + ", ".join(map(str, item["oversize_lines"]))
+        lines.append(text)
+    return lines
+
+
+def cmd_check_read_budget(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date) if args.date else None
+    result = audit_read_budget(target)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for line in format_read_budget(result):
+        print(line)
+
+
 def split_life_board_track_sections(board_text: str) -> List[Tuple[str, str]]:
     sections: List[Tuple[str, str]] = []
     matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", board_text))
@@ -4745,6 +4870,14 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         ),
         force=bool(getattr(args, "force", False)),
     )
+    # Diary Mode reads next. List what cannot be read in one go, so the reading
+    # plan is known up front instead of discovered by a truncated tool output.
+    try:
+        summary = format_read_budget(audit_read_budget(target), include_ok=False)
+    except Exception as exc:  # the archive is already written; a size report must not fail it
+        summary = [f"Read budget: unavailable ({exc})"]
+    for line in summary:
+        print(line)
     print(result["journal"])
 
 
@@ -5821,6 +5954,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--date", required=True, help="Diary date used to check board audit due/drift state (YYYY-MM-DD).")
     s.add_argument("--json", action="store_true", help="Emit structured JSON instead of human-readable output.")
     s.set_defaults(func=cmd_audit_life_board)
+
+    s = sub.add_parser("check-read-budget")
+    s.add_argument("--date", help="Also check that day's diary and AI traces (YYYY-MM-DD).")
+    s.add_argument("--json", action="store_true", help="Emit structured JSON instead of human-readable output.")
+    s.set_defaults(func=cmd_check_read_budget)
 
     s = sub.add_parser("writeback-life-board")
     s.add_argument("--date", required=True, help="Approval date to stamp into the board Last updated line (YYYY-MM-DD).")
