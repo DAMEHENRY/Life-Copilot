@@ -1,6 +1,6 @@
 # Life Copilot v4.5 RFC
 
-> Status: in progress — migration steps 1–4 landed on 2026-09-22
+> Status: implemented on 2026-09-22, except the chat-mode.md promotion (candidate ready; promotions are limited to one per day)
 > Date: 2026-09-21
 > Extends: [[life-copilot-v4.4-rfc]]
 
@@ -47,8 +47,8 @@ Active entries stay as rich as they are; there is no length cap. The 30-day wind
 
 | Command | Change |
 |---|---|
-| `check-read-budget [--date] [--json]` | new; in the working tree since 2026-09-21, uncommitted |
-| `writeback-ai-day` | prints the read plan, and later the mentioned pages, before the journal path |
+| `check-read-budget [--date] [--json]` | new |
+| `writeback-ai-day` | prints the read plan and the mentioned people pages before the journal path |
 | `maintain-page --slug S --input-file F [--base-sha256 H] [--dry-run]` | new |
 
 ## Rule ownership

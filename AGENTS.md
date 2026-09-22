@@ -1,6 +1,6 @@
 # Life Copilot — Codex
 
-> Version: v4.4 (2026-07-25). Design: [[life-copilot-v4.4-rfc]].
+> Version: v4.5 (2026-09-22). Design: [[life-copilot-v4.5-rfc]].
 
 ## L2 Kernel（不可自动修改）
 
@@ -26,6 +26,7 @@
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md` |
+| 收尾问候 | `journal/closing-greetings.md`；日记收尾与睡前晚安共用的规则和用过的材料 |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
 | Seeds / Inbox | `seeds/` / `inbox/` |
