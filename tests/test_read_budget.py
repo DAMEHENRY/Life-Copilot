@@ -122,6 +122,8 @@ class TestAuditReadBudget(unittest.TestCase):
         memory = by_path["journal/memory.md"]
         self.assertEqual(memory["status"], "over")
         self.assertEqual(memory["reads"], len(memory["ranges"]))
+        # Text inserted mid-file after planning must not push the tail out of the plan.
+        self.assertTrue(memory["ranges"][-1].endswith("-end"))
         self.assertEqual(result["counts"]["missing"], 1)
 
     def test_without_a_date_only_the_standing_files_are_checked(self) -> None:

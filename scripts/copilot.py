@@ -3433,8 +3433,9 @@ def cmd_audit_life_board(args: argparse.Namespace) -> None:
 # Claude Code's default (bashOutputMaxChars), measured on 2026-09-21: 28,237
 # bytes arrived intact, while 30,996 bytes of ASCII and 31,588 bytes of Chinese
 # were both cut to a 2 KB preview, so for Chinese it lands near 10,000
-# characters. A higher setting on one machine does not reach Codex, whose limit
-# is its own tool_output_token_limit, so plans keep the default.
+# characters. Codex keeps 10,000 tokens per tool output by default, which its
+# source counts as 4 bytes each (40,000 bytes), and marks the cut; its
+# tool_output_token_limit is separate. Plans keep the smallest default.
 READ_CAP_BYTES = 30_000
 # Plan reads with a fifth of headroom: the exact cap is unknown and files grow.
 READ_BUDGET_BYTES = 24_000
@@ -3501,13 +3502,18 @@ def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
         data = path.read_bytes()
         ranges, oversize = read_budget_plan(data)
         planned = len(data) > READ_BUDGET_BYTES
+        labels = [f"{a}-{b}" for a, b in ranges]
+        if labels:
+            # The diary grows mid-file after planning (merged capture), so the
+            # last part runs to the end rather than to today's last line.
+            labels[-1] = f"{ranges[-1][0]}-end"
         files.append({
             "path": shown,
             "bytes": len(data),
             "percent_of_cap": round(100 * len(data) / READ_CAP_BYTES),
             "status": read_budget_status(len(data)),
             "reads": len(ranges) if planned else 1,
-            "ranges": [f"{a}-{b}" for a, b in ranges] if planned else [],
+            "ranges": labels if planned else [],
             "oversize_lines": oversize,
         })
     counts = {
@@ -3566,7 +3572,42 @@ PEOPLE_BELIEF_RE = re.compile(r"^- \*\*(.+?)\*\* · 支持 (\d+)")
 PEOPLE_QUOTE_RE = re.compile(r"^\s+- (.+)$")
 PEOPLE_QUOTE_SOURCE = " — [["
 PEOPLE_EVIDENCE_LINK_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([a-z-]+)-trace)?$")
-CJK_RE = re.compile(r"[一-鿿]")
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+COPILOT_OWNED_SECTIONS = ("What Life Copilot Said", "Daily Suggestion")
+
+
+def henry_owned_text(path: Path) -> str:
+    """The parts of a diary or daily trace that are Henry's own words.
+
+    A trace keeps only Henry's messages. A diary drops the sections Copilot
+    writes and the merged capture block, which is Copilot's transcription.
+    """
+    text = read_text(path)
+    if path.name.endswith("-trace.md"):
+        speaker: Optional[str] = None
+        henry_lines: List[str] = []
+        for line in text.splitlines():
+            header = TRACE_MESSAGE_RE.match(line)
+            if header:
+                speaker = header.group("speaker").strip()
+            elif line.startswith("### "):
+                speaker = None
+            if speaker == "Henry":
+                henry_lines.append(line)
+        return "\n".join(henry_lines)
+    kept: List[str] = []
+    in_copilot_section = in_capture = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_copilot_section = any(title in line for title in COPILOT_OWNED_SECTIONS)
+            in_capture = False
+        if line.startswith("> capture-id:"):
+            in_capture = True
+        if not in_copilot_section and not in_capture:
+            kept.append(line)
+        if line.startswith("> capture-end:"):
+            in_capture = False
+    return "\n".join(kept)
 
 
 def split_people_page(text: str) -> Tuple[Dict[str, object], Dict[str, str]]:
@@ -3640,7 +3681,7 @@ def quote_in_source(quote: str, source_text: str) -> bool:
 
 
 def validate_people_page(text: str) -> Dict[str, int]:
-    """Check a page's shape and that every evidence quote is verbatim in its source."""
+    """Check a page's shape and that every quote is Henry's own words, verbatim, in its source."""
     fields, sections = split_people_page(text)
     problems: List[str] = []
     for key in ("name", "question", "updated"):
@@ -3695,8 +3736,10 @@ def validate_people_page(text: str) -> Dict[str, int]:
                 continue
             if not source.exists():
                 problems.append(f"{title}: source [[{link}]] not found")
-            elif not quote_in_source(quote, read_text(source)):
-                problems.append(f"{title}: quote not found verbatim in [[{link}]]: {quote[:60]}")
+            elif not quote_in_source(quote, henry_owned_text(source)):
+                problems.append(
+                    f"{title}: quote not found verbatim in Henry's own words in [[{link}]]: {quote[:60]}"
+                )
     if problems:
         raise ValueError("people page is invalid:\n- " + "\n- ".join(problems))
     return {"beliefs": len(beliefs), "quotes": sum(len(q) for _, _, q in beliefs)}
@@ -3783,7 +3826,7 @@ def people_alias_pattern(names: List[str]) -> "re.Pattern[str]":
 
 
 def pages_mentioned(target: date) -> List[Dict[str, object]]:
-    """People pages whose name or an alias appears in that day's diary or traces."""
+    """People pages whose name or an alias appears in Henry's own words that day."""
     if not PEOPLE_DIR.is_dir():
         return []
     pages = sorted(p for p in PEOPLE_DIR.glob("*.md") if p.name != "00-index.md")
@@ -3791,7 +3834,7 @@ def pages_mentioned(target: date) -> List[Dict[str, object]]:
         return []
     sources = [journal_path_for_date(target)]
     sources += sorted(ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md"))
-    text = "\n".join(read_text(source) for source in sources if source.exists())
+    text = "\n".join(henry_owned_text(source) for source in sources if source.exists())
     found: List[Dict[str, object]] = []
     for page in pages:
         try:

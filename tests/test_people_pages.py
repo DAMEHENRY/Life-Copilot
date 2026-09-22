@@ -82,7 +82,7 @@ class TestValidatePeoplePage(PeopleDirCase):
 
     def test_quote_must_be_verbatim_in_its_source(self) -> None:
         evidence = "- **看重高频** · 支持 1\n  - He said the edge is in low frequency — [[2026-09-20]]\n"
-        with self.assertRaisesRegex(ValueError, "not found verbatim in \\[\\[2026-09-20\\]\\]"):
+        with self.assertRaisesRegex(ValueError, "not found verbatim in Henry's own words in \\[\\[2026-09-20\\]\\]"):
             validate_people_page(_page(evidence=evidence))
 
     def test_ellipsis_fragments_must_appear_in_order(self) -> None:
@@ -108,6 +108,49 @@ class TestValidatePeoplePage(PeopleDirCase):
             validate_people_page(_page(aliases="  - 贺\n  - He"))
         self.assertIn("'贺' is shorter than two Chinese characters", str(caught.exception))
         self.assertIn("'He' is shorter than three characters", str(caught.exception))
+
+
+class TestHenrysOwnWords(PeopleDirCase):
+    """Evidence and mentions come from what Henry wrote or said, not from Copilot or other AIs."""
+
+    def _quote(self, text: str, link: str) -> str:
+        return _page(evidence=f"- **出处** · 支持 1\n  - {text} — [[{link}]]\n")
+
+    def test_a_quote_from_an_ai_message_is_rejected(self) -> None:
+        (self.trace_dir / "2026-09-20-codex-trace.md").write_text(
+            TRACE + "[9/20/26 4:18 PM] Codex: 这是模型自己的分析\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "Henry's own words"):
+            validate_people_page(self._quote("这是模型自己的分析", "2026-09-20-codex-trace"))
+
+    def test_copilot_sections_and_the_merged_capture_are_not_henrys_words(self) -> None:
+        diary = (
+            "#diary\n## 💭 Thoughts & Reflections\nHenry wrote this line.\n"
+            "### 对话补记\n> capture-id: chat-capture-2026-09-20\nCopilot transcribed this line.\n"
+            "> capture-end: chat-capture-2026-09-20\n## What Life Copilot Said\nCopilot said this line.\n"
+        )
+        (self.journal / "2026" / "09" / "2026-09-20.md").write_text(diary, encoding="utf-8")
+        validate_people_page(self._quote("Henry wrote this line.", "2026-09-20"))
+        for line in ("Copilot transcribed this line.", "Copilot said this line."):
+            with self.subTest(line=line), self.assertRaisesRegex(ValueError, "Henry's own words"):
+                validate_people_page(self._quote(line, "2026-09-20"))
+
+    def test_manual_blocks_with_a_narrow_space_before_pm_still_count(self) -> None:
+        (self.trace_dir / "2026-09-20-codex-trace.md").write_text(
+            "[9/20/26 4:17\u202fPM] Henry: 手工补的一句\n", encoding="utf-8"
+        )
+        validate_people_page(self._quote("手工补的一句", "2026-09-20-codex-trace"))
+
+    def test_mentions_count_only_henrys_words(self) -> None:
+        self.people.mkdir(parents=True)
+        (self.people / "zheng-chen.md").write_text(_page(), encoding="utf-8")
+        (self.journal / "2026" / "09" / "2026-09-20.md").write_text(
+            "## 💭 Thoughts & Reflections\n今天见了郑宸。\n## What Life Copilot Said\n郑宸郑宸郑宸\n", encoding="utf-8"
+        )
+        (self.trace_dir / "2026-09-20-codex-trace.md").write_text(
+            "[9/20/26 4:17 PM] Henry: 郑宸说的\n[9/20/26 4:18 PM] Codex: 郑宸郑宸\n", encoding="utf-8"
+        )
+        self.assertEqual(pages_mentioned(date(2026, 9, 20))[0]["mentions"], 2)
 
 
 class TestMaintainPeoplePage(PeopleDirCase):
