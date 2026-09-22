@@ -1,9 +1,9 @@
 # Life Copilot
 
-> Version: v4.4 (2026-07-25)
+> Version: v4.5 (2026-09-22)
 > Runtime: Claude Code / Codex + Obsidian + local files
-> Design note: [[life-copilot-v4.4-rfc]]
-> Current update: merged Chat capture + bedtime closure + constrained rule evolution
+> Design note: [[life-copilot-v4.5-rfc]]
+> Current update: read budget + people pages + closing-greeting rules moved out of memory
 
 Life Copilot is Henry's local personal operating system. It is not a task app, not a scheduler, and not a database. It is a small set of files and scripts that help an AI assistant read the right local evidence, preserve provenance, and suggest the smallest useful next step.
 
@@ -11,7 +11,7 @@ Life Copilot is Henry's local personal operating system. It is not a task app, n
 
 > **Do as much as needed, as little as possible.**
 
-This remains the top-level rule in v4.4. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
+This remains the top-level rule in v4.5. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
 
 In practice:
 
@@ -49,7 +49,7 @@ The old Quant roadmap still exists, but it is no longer the life-wide source of 
 
 ## 2. Daily Operating Loop
 
-The normal v4.4 loop is intentionally small:
+The normal v4.5 loop is intentionally small:
 
 1. Read `life-board.md`.
 2. Read today's diary if it exists.
@@ -113,6 +113,7 @@ The most important safety rule is that different kinds of text go to different p
 | Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai / Claude web / ChatGPT web (incl. Health) daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
+| Cumulative understanding of one person | `journal/people/{slug}.md` (git-ignored) | `maintain-page` |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
 
 Do not use `writeback-thought` for the Copilot response. Do not use `writeback-journal` to imitate Henry's diary voice. The relational response, memory transaction, and target-day direction use separate input files.
@@ -131,6 +132,8 @@ python3 scripts/copilot.py writeback-thought --date YYYY-MM-DD --title "标题" 
 python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file /tmp/suggestion.md
 python3 scripts/copilot.py maintain-memory --date YYYY-MM-DD --input-file /tmp/memory-operations.json --dry-run
 python3 scripts/copilot.py maintain-memory --date YYYY-MM-DD --input-file /tmp/memory-operations.json
+python3 scripts/copilot.py maintain-page --slug SLUG --input-file /tmp/page.md --base-sha256 SHA --dry-run
+python3 scripts/copilot.py check-read-budget --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-memory --date YYYY-MM-DD --kind "pattern" --content "..."
 python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --content "..."
 ```
@@ -253,7 +256,7 @@ The root of `resources/` should normally contain only `00-readme.md`, vault-leve
 
 ## 8. Schedule Projection
 
-v4.4 schedules remain projections, not training-era generated plans.
+v4.5 schedules remain projections, not training-era generated plans.
 
 Default path:
 
@@ -340,7 +343,7 @@ git diff --check
 
 `RFC` means **Request for Comments**.
 
-In this vault, [[life-copilot-v4.4-rfc]] is the current design rationale and migration note. It is not short for "refactor", although this version does refactor rule ownership.
+In this vault, [[life-copilot-v4.5-rfc]] is the current design rationale and migration note; the earlier ones stay as history. It is not short for "refactor", although this version does refactor rule ownership.
 
 Use the RFC when you want to understand why the system changed. Use this README when you want to know how to operate it.
 
@@ -348,7 +351,7 @@ Use the RFC when you want to understand why the system changed. Use this README 
 
 ## 12. Trial Week
 
-v4.4 enters a seven-day observation window after each promoted rule.
+v4.5 enters a seven-day observation window after each promoted rule.
 
 Watch for:
 
