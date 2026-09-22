@@ -25,6 +25,7 @@
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
+| 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md` |
 | 洞察索引 | `journal/insights.jsonl` |
 | Active Board | `life-board.md` |
 | Seeds / Inbox | `seeds/` / `inbox/` |
@@ -52,6 +53,7 @@
 - 默认不新增 Obsidian callout、`![[...]]` embed、block reference、`%%` comment、Dataview/plugin query、iA Content Block、`{{TOC}}`、`+++` page break或 HTML。必须使用单端语法时提供文字 fallback。
 - 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
+- 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划和提到的人物页。
 - `journal/insights.jsonl` 是检索索引，不是主要用户可见引用；历史结论优先引用 `[[YYYY-MM-DD]]`。
 - 找原始日记可用本地语义检索 `python3 tools/recall/recall.py search`：用当时的具体细节、中英文各查一次；结果只是候选，引用前读原文；命中转写、分析或 trace 时按日期回到原始日记；分析某天时加 `--before` 该日。它不是必需证据源，不可用时继续用关键词检索并在执行说明里注明。关键词检索用 `rg --no-ignore` 或 `command grep`，默认工具可能按 `.gitignore` 静默跳过 `journal/`。
 - 外部搜索只校验时效性事实；明确区分事实、他方主张、传言与推断。
@@ -75,6 +77,11 @@
   `python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <file>`
 - 长期记忆 / 洞察：
   `maintain-memory`（默认事务入口）/ `writeback-memory`（低层追加）/ `append-insight`
+- 人物页：
+  `python3 scripts/copilot.py maintain-page --slug <slug> --input-file <file> [--base-sha256 <sha>] [--dry-run]`
+  整页重写；每句原话都要能在所引的日记或 trace 里逐字找到。改写已有页要带读取时的 sha256，被替换的版本存进 `journal/people/.history/`。
+- 读取预算：
+  `python3 scripts/copilot.py check-read-budget [--date YYYY-MM-DD]`
 
 禁止 heredoc 作为 writeback input；先写临时文件，再传 `--input-file`。Capture 不授权 Diary Completion Contract。
 
