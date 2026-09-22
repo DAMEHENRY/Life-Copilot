@@ -45,7 +45,7 @@ Diary Mode 开始与晚安闭合前，从当日 trace 提取尚未进入正文�
 
 1. 先完成尚未落盘的合并 Capture。
 2. 按 `prompts/evolution-policy.md` 运行一次系统规则审计；每次闭合至多处理一个规则族。
-3. 最后只输出恰好一句晚安，不附执行报告。
+3. 先读 `journal/closing-greetings.md`，按其中规则拟好这句晚安，并在它的台账末尾记一行；最后只输出恰好一句晚安，不附执行报告。
 4. `Stop` hook 在回复完成后运行 `finalize-ai-day`，刷新 trace 并验证当前用户请求与最终 assistant message。
 5. 如果当前 Codex Desktop 构建未触发项目 hook，回答前手动构造相同 hook payload 运行 `finalize-ai-day`，再原样输出准备好的同一句晚安。
 
