@@ -53,6 +53,7 @@
 - 新建或实质改写的 reader-facing Markdown 默认使用 iA Writer 与 Obsidian 的交集；完整规范见 [[ia-writer-obsidian-markdown-compatibility]]。
 - 优先使用 ATX 标题、空行分段、普通强调、列表、任务框、普通 blockquote、fenced code、pipe table、reference-style footnote、`$...$` / `$$...$$`、`#tag`、简单 YAML metadata、标准 Markdown 图片及 `[[note]]` / `[[note|label]]`。数学分隔符必须紧贴内容：行内写成 `$x$`，块级写成 `$$x$$`，不要让 `$$` 单独占行；需要视觉换行时，在同一物理行内使用 `$$\begin{aligned}...\end{aligned}$$`。
 - 默认不新增 Obsidian callout、`![[...]]` embed、block reference、`%%` comment、Dataview/plugin query、iA Content Block、`{{TOC}}`、`+++` page break或 HTML。必须使用单端语法时提供文字 fallback。
+- 回复里链接 vault 内的笔记、PDF 等资料时用 `[[vault 相对路径|标题]]`（`.md` 可省；定位用 `#标题`，不带行号）；在 Obsidian 外（如 Codex 桌面 app）要能点开时用 `obsidian://open?vault=Life&file=<URL 编码的 vault 相对路径>`。不用 `/Users/...` 绝对路径，Obsidian 点开会新建空笔记；本条优先于 harness 默认的文件链接格式，代码文件照旧。
 - 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
 - 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划和提到的人物页。
