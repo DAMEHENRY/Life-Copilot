@@ -26,6 +26,7 @@
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md` |
+| Claude Code 补充记忆 | `journal/claude-code-memory-bridge.md`；只按话题跟读，原始日记与人物页优先 |
 | 收尾问候 | `journal/closing-greetings.md`；日记收尾与睡前晚安共用的规则和用过的材料 |
 | 设计记录 | `docs/rfcs/`；只为结构性改动写，标为 implemented 后不再改，修订写进下一份 |
 | 洞察索引 | `journal/insights.jsonl` |
@@ -45,11 +46,12 @@
 - **Quant Mode**：明确围绕 Quant、XP 或 legacy Quant 工件。读 `prompts/quant-mode.md`。`roadmap` 一词本身不是硬触发。
 - **Study Mode**：非 Quant 的阅读、概念理解或练习。读 `prompts/study-mode.md`。
 
-路由需要历史上下文时，按需读 `life-board.md`、`journal/memory.md` 和当日日记；这些上下文不授权带副作用的 Diary Mode。
+路由需要历史上下文时，按需读 `life-board.md`、`journal/memory.md` 和当日日记；这些上下文不授权带副作用的 Diary Mode。Chat 中若回复依赖某个熟人或群的既往背景，先查 `journal/people/00-index.md` 与对应人物页；无页时按需查 Claude Code 补充记忆，再回到原始记录核实。
 
 ## 通用运行护栏
 
-- 日记 / Chat 用简体中文；Quant / Study 默认英文。
+- 日记分析和 Chat 的 Copilot 回应用简体中文；Quant / Study 默认英文。AI 新写的 Henry 视角日记段落（含对话补记）默认英文，`What Life Copilot Said` 与 `Daily Suggestion` 用中文；不翻译或覆盖 Henry 手写原文，明确语言要求优先。
+- Quant 的 XP 学习笔记存入 `quant/arsenal/`，文件名沿用 `xp-{N}-{topic}.md`；数学表达使用 LaTeX。
 - 新建或实质改写的 reader-facing Markdown 默认使用 iA Writer 与 Obsidian 的交集；完整规范见 [[ia-writer-obsidian-markdown-compatibility]]。
 - 优先使用 ATX 标题、空行分段、普通强调、列表、任务框、普通 blockquote、fenced code、pipe table、reference-style footnote、`$...$` / `$$...$$`、`#tag`、简单 YAML metadata、标准 Markdown 图片及 `[[note]]` / `[[note|label]]`。数学分隔符必须紧贴内容：行内写成 `$x$`，块级写成 `$$x$$`，不要让 `$$` 单独占行；需要视觉换行时，在同一物理行内使用 `$$\begin{aligned}...\end{aligned}$$`。
 - 默认不新增 Obsidian callout、`![[...]]` embed、block reference、`%%` comment、Dataview/plugin query、iA Content Block、`{{TOC}}`、`+++` page break或 HTML。必须使用单端语法时提供文字 fallback。
@@ -97,6 +99,8 @@ Diary Completion Contract 中的记忆维护在后台自动执行：先检索和
 ## Active Board / Inbox / Seeds
 
 `life-board.md` 是 slow-variable context map，不是 todo list。每个 track 只有 Active question、Next artifact、Stop condition、Status。Diary Completion Contract 只审计并提出 patch；未经 Henry 确认不 apply。
+
+Henry 说“加到我的 reminder”时，目标是 macOS 提醒事项的 `Backlog` 列表；优先用已配置的 Apple EventKit 工具读写并回查，不把它改写成 Life `inbox/` 项。
 
 `inbox/` 是捕获缓冲区；`seeds/` 是候选项目区；`resources/` 是分主题资料库。默认提出去向，不移动或删除。具体 flush 映射读 `inbox/00-readme.md` 与 `seeds/00-index.md`。
 
