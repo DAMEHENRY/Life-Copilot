@@ -318,6 +318,42 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertIn("warning: web chat sync failed", output.getvalue())
         self.assertTrue((self.trace_dir / "2026-09-12-claude-web-trace.md").exists())
 
+    def _claude_failed(self) -> copilot.WebChatsUnavailable:
+        return copilot.WebChatsUnavailable(
+            "claude: not logged in (HTTP 403) (log in again in Chrome)",
+            {
+                "ok": False,
+                "providers": {
+                    "claude": {"ok": False, "code": "auth_required", "message": "claude: not logged in (HTTP 403)"},
+                    "chatgpt": {"ok": True, "listed": 3, "fetched": 1},
+                },
+                "failed": ["claude"],
+                "warnings": [],
+            },
+        )
+
+    def test_claude_failure_names_the_failed_source_and_keeps_chatgpt_sync(self):
+        output = io.StringIO()
+        with patch.object(copilot, "sync_web_chats", side_effect=self._claude_failed()), \
+             redirect_stdout(output):
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        message = str(caught.exception)
+        self.assertIn("Claude Web sync failed; ChatGPT Web synced to the local archive", message)
+        self.assertIn("--allow-missing-web-chats", message)
+        self.assertIn("web chats: chatgpt listed 3, fetched 1", output.getvalue())
+        self.assertFalse(self.trace_dir.exists())
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), MINIMAL_DIARY)
+
+    def test_allow_missing_skips_only_the_failed_source(self):
+        output = io.StringIO()
+        with patch.object(copilot, "sync_web_chats", side_effect=self._claude_failed()), \
+             redirect_stdout(output):
+            copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True, allow_missing_web_chats=True)
+        self.assertIn("warning: web chat sync failed for Claude Web;", output.getvalue())
+        self.assertTrue((self.trace_dir / "2026-09-12-chatgpt-web-trace.md").exists())
+        self.assertTrue((self.trace_dir / "2026-09-12-claude-web-trace.md").exists())
+
     def test_programmatic_callers_never_sync(self):
         with patch.object(copilot, "export_codex_day_transcript", return_value="[9/12/26 1:00 PM] Henry: hi"), \
              patch.object(copilot, "sync_web_chats", side_effect=AssertionError("must not sync")), \
@@ -360,35 +396,92 @@ class TestSyncWebChats(unittest.TestCase):
         run.assert_not_called()
         quit_chrome.assert_not_called()
 
+    @staticmethod
+    def _per_provider(outcomes: dict):
+        """A host that answers each single-provider sync from `outcomes`."""
+        def reply(payload, timeout):
+            provider = payload["providers"][0]
+            outcome = outcomes[provider]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return {"ok": bool(outcome.get("ok")), "providers": {provider: outcome}, "error": ""}
+        return reply
+
+    def test_each_provider_syncs_in_its_own_request(self):
+        with patch.object(copilot, "web_chats_host_alive", return_value=True), \
+             patch.object(copilot, "web_chats_host_request", return_value=self.ok_response) as request:
+            result = copilot.sync_web_chats()
+        self.assertEqual([c.args[0]["providers"] for c in request.call_args_list], [["claude"], ["chatgpt"]])
+        self.assertEqual(result["failed"], [])
+
     def test_auth_failure_is_reported(self):
-        response = {
-            "ok": False,
-            "providers": {
-                "claude": {"ok": True, "errors": []},
-                "chatgpt": {"ok": False, "code": "auth_required", "message": "chatgpt: not logged in (HTTP 401)"},
-            },
+        outcomes = {
+            "claude": {"ok": True, "errors": []},
+            "chatgpt": {"ok": False, "code": "auth_required", "message": "chatgpt: not logged in (HTTP 401)"},
         }
+        with patch.object(copilot, "web_chats_host_alive", return_value=True), \
+             patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)):
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.sync_web_chats()
+        self.assertEqual(
+            str(caught.exception), "chatgpt: not logged in (HTTP 401) (log in again in Chrome)"
+        )
+
+    def test_claude_failure_does_not_stop_chatgpt(self):
+        outcomes = {
+            "claude": {"ok": False, "code": "auth_required", "message": "claude: not logged in (HTTP 403)"},
+            "chatgpt": {"ok": True, "errors": [], "listed": 275, "fetched": 2},
+        }
+        with patch.object(copilot, "web_chats_host_alive", return_value=True), \
+             patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)) as request:
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.sync_web_chats()
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(str(caught.exception).startswith("claude: not logged in (HTTP 403)"))
+        self.assertNotIn("chatgpt", str(caught.exception))
+        self.assertEqual(caught.exception.result["failed"], ["claude"])
+        self.assertEqual(caught.exception.result["providers"]["chatgpt"]["fetched"], 2)
+
+    def test_dropped_host_is_relaunched_before_the_next_provider(self):
+        # The extension disconnecting mid-sync used to end the whole sync.
+        outcomes = {
+            "claude": copilot.WebChatsUnavailable("web chat host closed the connection without a reply"),
+            "chatgpt": {"ok": True, "errors": [], "listed": 275, "fetched": 2},
+        }
+        with patch.object(copilot, "web_chats_host_alive", return_value=False), \
+             patch.object(copilot, "chrome_is_running", return_value=False), \
+             patch.object(copilot, "wait_for_web_chats_host", return_value=True), \
+             patch.object(copilot.subprocess, "run") as run, \
+             patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)), \
+             patch.object(copilot, "quit_chrome") as quit_chrome:
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.sync_web_chats()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(quit_chrome.call_count, 2)
+        self.assertIn("claude: web chat sync failed: web chat host closed", str(caught.exception))
+        self.assertEqual(caught.exception.result["failed"], ["claude"])
+        self.assertTrue(caught.exception.result["providers"]["chatgpt"]["ok"])
+
+    def test_host_error_without_provider_result_is_reported(self):
+        response = {"ok": False, "providers": {}, "error": "sync did not finish within 600s"}
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", return_value=response):
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
-                copilot.sync_web_chats()
-        self.assertIn("log in again in Chrome", str(caught.exception))
+                copilot.sync_web_chats(["chatgpt"])
+        self.assertEqual(str(caught.exception), "chatgpt: sync did not finish within 600s")
 
-    def _rate_limited(self, newest: str) -> dict:
-        return {
-            "ok": True,
-            "providers": {
-                "claude": {"ok": True, "errors": []},
-                "chatgpt": {"ok": True, "errors": [], "rate_limited": True, "pending": 37,
-                            "pending_newest_update_time": newest},
-            },
-        }
+    def _rate_limited(self, newest: str):
+        return self._per_provider({
+            "claude": {"ok": True, "errors": []},
+            "chatgpt": {"ok": True, "errors": [], "rate_limited": True, "pending": 37,
+                        "pending_newest_update_time": newest},
+        })
 
     def test_rate_limited_leftovers_older_than_target_day_are_a_warning(self):
         day_start = datetime(2026, 9, 12).astimezone()
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request",
-                          return_value=self._rate_limited(_iso(_local(11, 23)))):
+                          side_effect=self._rate_limited(_iso(_local(11, 23)))):
             result = copilot.sync_web_chats(needed_since=day_start)
         self.assertIn("37 older conversation(s)", result["warnings"][0])
 
@@ -396,7 +489,7 @@ class TestSyncWebChats(unittest.TestCase):
         day_start = datetime(2026, 9, 12).astimezone()
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request",
-                          return_value=self._rate_limited(_iso(_local(12, 8)))):
+                          side_effect=self._rate_limited(_iso(_local(12, 8)))):
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.sync_web_chats(needed_since=day_start)
         self.assertIn("may include 2026-09-12", str(caught.exception))

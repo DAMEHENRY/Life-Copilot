@@ -7,10 +7,11 @@
 ## 怎么运转
 
 1. `writeback-ai-day` 先检查扩展在不在线。Chrome 没开就用 `open -g -j -a "Google Chrome" --args --no-startup-window` 在后台启动（不开窗口、不抢焦点），同步完再退出；Chrome 本来开着就不动它。
-2. 扩展收到同步请求后，列出 Claude 全部对话，以及 ChatGPT 普通、星标、归档、Health 和 Projects 里的对话，只下载更新过的那些。
-3. 请求先直接从扩展后台发；如果被拒，就在一个后台标签页（同源的 `robots.txt`，必要时换成完整网页）里发。登录凭证和 token 始终不离开浏览器。
-4. 本地小程序把每条对话写成 `~/.local/share/life-copilot/web-chats/<claude|chatgpt>/<对话 id>.json`，版本记录在同目录的 `index.json`。
-5. `copilot.py` 从这些 JSON 里取当前可见分支的正文，按消息时间分到各天，过滤 thinking、工具调用和返回、隐藏上下文和引用标记。
+2. Claude 和 ChatGPT 分开同步：`copilot.py` 对每一边单独发一次请求，一边失败（登录失效，或扩展中途断开）不影响另一边。本地小程序断开时，先重连再同步下一边；Chrome 是 `copilot.py` 自己启动的，就重启一次。失败的一边照样报错，`writeback-ai-day` 仍然只在 Henry 明确接受时才加 `--allow-missing-web-chats` 继续。
+3. 扩展收到同步请求后，列出 Claude 全部对话，以及 ChatGPT 普通、星标、归档、Health 和 Projects 里的对话，只下载更新过的那些。
+4. 请求先直接从扩展后台发；如果被拒，就在一个后台标签页（同源的 `robots.txt`，必要时换成完整网页）里发。登录凭证和 token 始终不离开浏览器。Chrome 没有窗口时（比如被 `copilot.py` 在后台启动），扩展会开一个最小化窗口放这些标签页，并且一直留着它：无窗口的 Chrome 一旦关掉最后一个窗口，扩展和本地小程序会一起断开。2026-09-24 就是 Claude 同步失败后关了窗口，连带中断了 ChatGPT。`copilot.py` 自己启动的 Chrome 同步完会退出，窗口也就没了。
+5. 本地小程序把每条对话写成 `~/.local/share/life-copilot/web-chats/<claude|chatgpt>/<对话 id>.json`，版本记录在同目录的 `index.json`。
+6. `copilot.py` 从这些 JSON 里取当前可见分支的正文，按消息时间分到各天，过滤 thinking、工具调用和返回、隐藏上下文和引用标记。
 
 扩展每小时也会自己同步一次，但日记流程不依赖这个定时同步。
 
@@ -45,7 +46,7 @@ python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD   # 只读本地存�
 
 ## 出问题时
 
-- **`not logged in` / `auth_required`**：在 Chrome 里重新登录 claude.ai 或 chatgpt.com，再重跑。
+- **`not logged in` / `auth_required`**：在 Chrome 里重新登录 claude.ai 或 chatgpt.com，再重跑。错误信息里带着原因：ChatGPT 的 `/api/auth/session` 没给 token 时，列出它返回的字段名；接口拒绝时，附上接口自己的错误说明。不记录 token。2026-09-24 至 25 日出现过网页已登录、归档器仍报 HTTP 401 的情况，09-25 重新打开 Chrome 后自己恢复了，原因没有确认；再出现时先看 `host.log` 里的原因。
 - **`extension is not connected`**：扩展没加载或被停用了，按上面的安装步骤重新加载；`web-chats-status` 里 `native_host_registered` 应为 `true`。
 - **ChatGPT 弹人机验证**：在 Chrome 里打开 chatgpt.com 手动通过，再重跑。
 - **确实要跳过**：只有 Henry 明确接受不完整归档时，才给 `writeback-ai-day` 加 `--allow-missing-web-chats`，这时会改用上次的本地存档。

@@ -148,8 +148,10 @@ conversations, including ChatGPT Health, before writing
 `YYYY-MM-DD-claude-web-trace.md` and `YYYY-MM-DD-chatgpt-web-trace.md`. The
 sync runs through the Chrome extension in `tools/web-chat-archiver/` using the
 existing browser login; if Chrome is closed it is started in the background and
-quit afterwards. A failed sync (for example an expired login) stops the
-writeback; `--allow-missing-web-chats` falls back to the last local archive.
+quit afterwards. Claude and ChatGPT sync separately, so a failure on one side
+(for example an expired login) does not keep the other from syncing, but it
+still stops the writeback; `--allow-missing-web-chats` falls back to the last
+local archive for the failed side.
 `preview-ai-day` reads that archive without syncing, and `finalize-ai-day`
 never touches the browser. Setup and troubleshooting:
 [tools/web-chat-archiver/00-readme.md](tools/web-chat-archiver/00-readme.md).

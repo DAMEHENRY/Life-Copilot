@@ -109,11 +109,28 @@ async function workerFetch(ctx, path) {
     if (!ctx.token) {
       const session = await rawFetch(`${PROVIDERS.chatgpt.origin}/api/auth/session`, {});
       ctx.token = session.json && session.json.accessToken ? session.json.accessToken : '';
+      if (!ctx.token) return { status: 401, json: null, error: 'no_session', detail: sessionDetail(session) };
     }
-    if (!ctx.token) return { status: 401, json: null, error: 'no_session' };
     headers.Authorization = `Bearer ${ctx.token}`;
   }
   return rawFetch(PROVIDERS[ctx.provider].origin + path, headers);
+}
+
+// Describes a session reply without an access token by its key names only.
+function sessionDetail(result) {
+  const json = result.json;
+  const shape = json && typeof json === 'object' ? `keys: ${Object.keys(json).join(', ') || 'none'}` : 'not JSON';
+  return `/api/auth/session gave no access token (HTTP ${result.status}, ${shape})`;
+}
+
+// A short reason for a failed request: the session problem, the API's own
+// error text, or the fetch error. Never includes tokens.
+function failureDetail(result) {
+  if (result.detail) return result.detail;
+  const body = result.json;
+  const reason = body && typeof body === 'object' ? body.detail || body.error || body.message : '';
+  if (reason) return String(typeof reason === 'string' ? reason : reason.message || JSON.stringify(reason)).slice(0, 200);
+  return result.error || '';
 }
 
 async function rawFetch(url, headers) {
@@ -147,16 +164,30 @@ async function pageFetch(ctx, path) {
         const cached = window.__lifeCopilotSession;
         if (!cached || Date.now() - cached.at > 5 * 60 * 1000) {
           let token = '';
+          let detail = '';
           try {
             const response = await fetch('/api/auth/session', { credentials: 'include' });
-            const session = response.ok ? await response.json() : {};
-            token = session.accessToken || '';
-          } catch (_) {
-            token = '';
+            let session = null;
+            try {
+              session = JSON.parse(await response.text());
+            } catch (_) {
+              session = null;
+            }
+            token = (response.ok && session && session.accessToken) || '';
+            if (!token) {
+              const shape = session && typeof session === 'object'
+                ? `keys: ${Object.keys(session).join(', ') || 'none'}`
+                : 'not JSON';
+              detail = `/api/auth/session gave no access token (HTTP ${response.status}, ${shape})`;
+            }
+          } catch (error) {
+            detail = `/api/auth/session failed: ${error}`;
           }
-          window.__lifeCopilotSession = { token, at: Date.now() };
+          window.__lifeCopilotSession = { token, detail, at: Date.now() };
         }
-        if (!window.__lifeCopilotSession.token) return { status: 401, json: null, error: 'no_session' };
+        if (!window.__lifeCopilotSession.token) {
+          return { status: 401, json: null, error: 'no_session', detail: window.__lifeCopilotSession.detail };
+        }
         headers.Authorization = `Bearer ${window.__lifeCopilotSession.token}`;
       }
       const controller = new AbortController();
@@ -186,18 +217,24 @@ async function openPageTab(ctx, path) {
   if (ctx.tabId) {
     await chrome.tabs.update(ctx.tabId, { url });
   } else {
-    const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
-    if (windows.length) {
-      const tab = await chrome.tabs.create({ windowId: windows[0].id, url, active: false });
-      ctx.tabId = tab.id;
-      ctx.cleanup.push(() => chrome.tabs.remove(tab.id));
-    } else {
-      const win = await chrome.windows.create({ url, focused: false, state: 'minimized' });
-      ctx.tabId = win.tabs[0].id;
-      ctx.cleanup.push(() => chrome.windows.remove(win.id));
-    }
+    const tab = await chrome.tabs.create({ windowId: await pageWindowId(), url, active: false });
+    ctx.tabId = tab.id;
+    ctx.cleanup.push(() => chrome.tabs.remove(tab.id));
   }
   await waitForTabComplete(ctx.tabId, url);
+}
+
+// Page tabs open in the background of an existing window. Chrome started by
+// copilot.py has none, and closing the only window of such a Chrome stopped
+// this worker and dropped the native host mid-sync: on 2026-09-24 a failed
+// Claude sync closed its window before ChatGPT ran. So a window opened here
+// holds a blank tab and stays open, and removing a sync tab never closes it.
+// copilot.py quits a Chrome it launched once the sync is done.
+async function pageWindowId() {
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  if (windows.length) return windows[0].id;
+  const win = await chrome.windows.create({ url: 'about:blank', focused: false, state: 'minimized' });
+  return win.id;
 }
 
 // Resolves once the tab has loaded `url`. The initial check compares paths so
@@ -253,23 +290,25 @@ async function apiGet(ctx, path) {
       await sleep(2000 * transientRetries * transientRetries);
       continue;
     }
+    const detail = failureDetail(result);
+    const reason = `HTTP ${result.status}${detail ? `: ${detail}` : ''}`;
     if (ctx.mode === 'worker') {
-      log('info', `${ctx.provider}: worker fetch got HTTP ${result.status} for ${path}; switching to page context`);
+      log('info', `${ctx.provider}: worker fetch got ${reason} for ${path}; switching to page context`);
       ctx.mode = 'page';
       await openPageTab(ctx, PROVIDERS[ctx.provider].bootstrapPath);
       continue;
     }
     if (!ctx.fullPageTried && (result.json === null || result.status === 403)) {
-      log('info', `${ctx.provider}: page fetch got HTTP ${result.status}; loading the full app page`);
+      log('info', `${ctx.provider}: page fetch got ${reason}; loading the full app page`);
       ctx.fullPageTried = true;
       await openPageTab(ctx, PROVIDERS[ctx.provider].fullPagePath);
       await sleep(3000);
       continue;
     }
     if (result.status === 401 || result.status === 403 || result.error === 'no_session') {
-      throw new SyncError('auth_required', `${ctx.provider}: not logged in (HTTP ${result.status})`);
+      throw new SyncError('auth_required', `${ctx.provider}: not logged in (${reason})`);
     }
-    throw new SyncError('http_error', `${ctx.provider}: HTTP ${result.status} for ${path}${result.error ? ` (${result.error})` : ''}`);
+    throw new SyncError('http_error', `${ctx.provider}: ${reason} for ${path}`);
   }
 }
 

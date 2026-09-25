@@ -2132,7 +2132,15 @@ def preserve_manual_openclaw_blocks(
 # Claude / ChatGPT web chats
 # ---------------------------------------------------------------------------
 class WebChatsUnavailable(RuntimeError):
-    """The browser-backed web chat archive could not be refreshed."""
+    """The browser-backed web chat archive could not be refreshed.
+
+    `result` carries the per-provider outcomes when the sync got that far, so
+    callers can report the providers that did sync.
+    """
+
+    def __init__(self, message: str, result: Optional[dict] = None) -> None:
+        super().__init__(message)
+        self.result = result or {}
 
 
 def web_chats_socket_path() -> Path:
@@ -2230,6 +2238,27 @@ def connect_web_chats_host(connect_timeout: float = 60) -> bool:
     return True
 
 
+def wait_for_chrome_exit(timeout: float = 30) -> bool:
+    deadline = time.monotonic() + timeout
+    while chrome_is_running():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1)
+    return True
+
+
+def reconnect_web_chats_host(launched: bool, connect_timeout: float = 60) -> bool:
+    """Bring the native host back after it dropped during a sync.
+
+    A Chrome launched for this sync is quit and launched again; Henry's own
+    Chrome is only waited for. Returns whether Chrome is ours to quit.
+    """
+    if launched:
+        quit_chrome()
+        wait_for_chrome_exit()
+    return connect_web_chats_host(connect_timeout) or launched
+
+
 def sync_web_chats(
     providers: Optional[List[str]] = None,
     *,
@@ -2243,34 +2272,53 @@ def sync_web_chats(
     window and quit again afterwards, so the diary flow never needs Henry to
     open the browser first. Login problems surface as WebChatsUnavailable.
 
+    Each provider syncs in its own request, so one that fails, even by taking
+    the extension down with it, does not keep the others from syncing: a
+    dropped host is reconnected before the next provider. The error raised
+    afterwards names every failed provider, and its `result` holds each
+    provider's outcome plus the `failed` list.
+
     A rate-limited provider leaves its oldest changed conversations for the
     next sync. That only fails when one of them may hold messages at or after
     `needed_since`; without it, leftovers are reported as warnings.
     """
     wanted = providers or list(WEB_CHAT_SOURCES)
     launched = connect_web_chats_host(connect_timeout)
+    outcomes: Dict[str, dict] = {}
+    host_lost = False
     try:
-        response = web_chats_host_request(
-            {"cmd": "sync", "providers": wanted, "timeout": sync_timeout},
-            timeout=sync_timeout + 30,
-        )
-    except (OSError, ValueError) as exc:
-        raise WebChatsUnavailable(f"web chat sync failed: {exc}") from exc
+        for provider in wanted:
+            try:
+                if host_lost and not web_chats_host_alive():
+                    launched = reconnect_web_chats_host(launched, connect_timeout)
+                host_lost = False
+                response = web_chats_host_request(
+                    {"cmd": "sync", "providers": [provider], "timeout": sync_timeout},
+                    timeout=sync_timeout + 30,
+                )
+            except (OSError, ValueError, WebChatsUnavailable) as exc:
+                host_lost = True
+                outcomes[provider] = {"ok": False, "code": "host_error", "message": f"web chat sync failed: {exc}"}
+                continue
+            outcome = (response.get("providers") or {}).get(provider)
+            if not isinstance(outcome, dict):
+                # A host-side error (e.g. timeout) explains the missing result.
+                outcome = {"ok": False, "code": "no_result", "message": response.get("error") or "no result"}
+            outcomes[provider] = outcome
     finally:
         if launched:
             quit_chrome()
 
-    outcomes = response.get("providers") or {}
     failures: List[str] = []
     warnings: List[str] = []
     for provider in wanted:
-        outcome = outcomes.get(provider)
-        if not isinstance(outcome, dict):
-            failures.append(f"{provider}: no result")
-            continue
+        outcome = outcomes[provider]
         if not outcome.get("ok"):
+            message = str(outcome.get("message") or outcome.get("code") or "failed")
+            # Extension messages already start with the provider name.
+            message = message.split(": ", 1)[1] if message.startswith(f"{provider}: ") else message
             hint = " (log in again in Chrome)" if outcome.get("code") == "auth_required" else ""
-            failures.append(f"{provider}: {outcome.get('message') or outcome.get('code')}{hint}")
+            failures.append(f"{provider}: {message}{hint}")
             continue
         if outcome.get("errors"):
             errors = outcome["errors"]
@@ -2290,13 +2338,11 @@ def sync_web_chats(
                 failures.append(note + f", which may include {needed_since.date().isoformat()}; retry later")
             else:
                 warnings.append(note)
-    if response.get("error"):
-        # A host-side error (e.g. timeout) explains the missing provider results.
-        failures.insert(0, str(response["error"]))
-    if failures or not response.get("ok"):
-        raise WebChatsUnavailable("; ".join(failures) or "web chat sync failed")
-    response["warnings"] = warnings
-    return response
+    failed = [p for p in wanted if any(f.startswith(f"{p}: ") for f in failures)]
+    result = {"ok": not failures, "providers": outcomes, "failed": failed, "warnings": warnings}
+    if failures:
+        raise WebChatsUnavailable("; ".join(failures), result)
+    return result
 
 
 def load_web_chats_index(store_dir: Path) -> dict:
@@ -2535,28 +2581,41 @@ def export_web_chat_day_transcript(
 
 def refresh_web_chats_for_writeback(target: date, allow_missing: bool) -> None:
     day_start = datetime(target.year, target.month, target.day).astimezone()
+    failure: Optional[WebChatsUnavailable] = None
     try:
         result = sync_web_chats(needed_since=day_start)
     except WebChatsUnavailable as exc:
-        if not allow_missing:
-            raise WebChatsUnavailable(
-                "Claude/ChatGPT web chats are required for AI-day writeback; no partial "
-                "writeback was performed. Fix the browser sync (log in again in Chrome if "
-                "asked), or explicitly pass --allow-missing-web-chats if the incomplete "
-                f"archive is intentional. Cause: {exc}"
-            ) from exc
-        print(
-            "  warning: web chat sync failed; using the last local archive because "
-            f"--allow-missing-web-chats was set ({exc})"
-        )
-        return
+        failure, result = exc, exc.result
     for provider, outcome in (result.get("providers") or {}).items():
-        print(
-            f"  web chats: {provider} listed {outcome.get('listed', 0)}, "
-            f"fetched {outcome.get('fetched', 0)}"
-        )
+        if outcome.get("ok"):
+            print(
+                f"  web chats: {provider} listed {outcome.get('listed', 0)}, "
+                f"fetched {outcome.get('fetched', 0)}"
+            )
     for warning in result.get("warnings") or []:
         print(f"  note: {warning}")
+    if failure is None:
+        return
+    # Without per-provider results the sync never reached the extension.
+    failed = result.get("failed") or list(WEB_CHAT_SOURCES)
+    failed_labels = " and ".join(WEB_CHAT_SOURCES[p][2] for p in failed)
+    synced_labels = " and ".join(
+        WEB_CHAT_SOURCES[p][2] for p in result.get("providers") or {} if p not in failed
+    )
+    synced_note = f"; {synced_labels} synced to the local archive" if synced_labels else ""
+    if not allow_missing:
+        raise WebChatsUnavailable(
+            f"{failed_labels} sync failed{synced_note}. Claude/ChatGPT web chats are "
+            "required for AI-day writeback; no partial writeback was performed. Fix the "
+            "browser sync (log in again in Chrome if asked), or explicitly pass "
+            "--allow-missing-web-chats if the incomplete archive is intentional. "
+            f"Cause: {failure}",
+            result,
+        ) from failure
+    print(
+        f"  warning: web chat sync failed for {failed_labels}; using the last local archive "
+        f"for it because --allow-missing-web-chats was set ({failure})"
+    )
 
 
 def install_web_chats(python_executable: Optional[str] = None) -> dict:
@@ -5197,7 +5256,13 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
 
 
 def cmd_sync_web_chats(args: argparse.Namespace) -> None:
-    result = sync_web_chats(args.provider or None)
+    try:
+        result = sync_web_chats(args.provider or None)
+    except WebChatsUnavailable as exc:
+        # Still show the providers that synced before reporting the failure.
+        if exc.result:
+            print(json.dumps(exc.result, ensure_ascii=False, indent=2))
+        raise
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
