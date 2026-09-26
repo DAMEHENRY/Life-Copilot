@@ -209,14 +209,15 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 
 仅在通过 Entry Gate，并已完成“归档 trace → 合并 Chat capture → 读取本地证据 → diary analysis”后，以下六步才是默认收尾动作。普通 Chat 或 Capture 永远不触发本 Contract。除非 Henry 明确说“只调查 / 不要写回 / dry run”。执行细节以 `AGENTS.md` 为全局边界，本节定义 Diary Mode 的内容与顺序。
 
+0. **收尾问候**：需要收尾问候时，写回前先读 `journal/closing-greetings.md`，照其中规则拟好这一句，用完在它的台账末尾加一行。晚安放进第 1 步 input file 的最后一段；早安放进第 5 步 input file 的第一段。该节末尾已有睡前闭合写入的晚安时，重写保留它并继续放在最后。
 1. **Analysis Writeback**：将关系性回应写入 `## What Life Copilot Said`。正文只包含真正对 Henry 的回应；不包含 memory audit、维护状态、工具日志、Board/inbox 报告，也不强制包含历史锚点或微行动。必须先写临时文件，再调用 `writeback-journal`；禁止用 `writeback-thought` 写 Copilot 回应。
 2. **Automatic Memory Maintenance**：在后台完成 `no-op / add / replace / promote / archive / conflict` 判断。先生成临时 JSON，运行 `maintain-memory --dry-run`，校验通过后正式执行并回读。no-op 静默；实际改变只在最终执行说明中简短报告，不进入关系性正文。当天证据碰到已有人物页的人时，在这一步一并重写那一页：重读当前页，按全部证据重写答案，更新支持次数、原话和悬着的问题；先用 `maintain-page --dry-run` 校验（原话必须能在所引原件里逐字找到），再带 `--base-sha256` 正式写入；没有新证据就 no-op。
 3. **Life Board Audit Gate**：运行 `audit-life-board`。若为 `needs_audit`，只提出最小 patch；未经 Henry 确认不修改 Board。
 4. **Inbox Audit / Closure Check**：读取 `inbox/00-readme.md` 并判断待处理文件去向。默认只建议，不移动或删除；Henry 明确授权 flush/move 时才执行。
 5. **Daily Suggestion Writeback**：基于分析和 post-inbox 状态，将短小的目标日方向写入 `## 🧭 Daily Suggestion`。它可以是行动、边界、许可或“不新增任务”，不必把每一天变成优化项目。使用目标日语态；遇到已有不同 provenance 时不自动 `--force`。
-6. **Final Response**：先呈现关系性回应的结果，再用最短必要文字说明真实发生的维护动作。Board/inbox/memory no-op 不制造活动感。执行说明里加一行读取回执：每个必读来源是整读还是只读了哪几段（对照读取计划）。需要收尾问候时，先读 `journal/closing-greetings.md`，照其中规则写，用完在它的台账末尾加一行。
+6. **Final Response**：先呈现关系性回应的结果，再用最短必要文字说明真实发生的维护动作。Board/inbox/memory no-op 不制造活动感。执行说明里加一行读取回执：每个必读来源是整读还是只读了哪几段（对照读取计划）。收尾问候原样给出第 0 步拟好、已写进日记的那一句。
 
-收尾顺序：分析 → 写回关系性回应 → 自动维护长期记忆与人物页 → Life Board audit → inbox audit / closure → 写回 Daily Suggestion → 最终回复。
+收尾顺序：分析 → 拟收尾问候 → 写回关系性回应 → 自动维护长期记忆与人物页 → Life Board audit → inbox audit / closure → 写回 Daily Suggestion → 最终回复。
 
 # Safety Protocol
 
