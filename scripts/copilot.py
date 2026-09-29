@@ -40,6 +40,7 @@ MEMORY_FILE = JOURNAL_DIR / "memory.md"
 MEMORY_ARCHIVE_FILE = JOURNAL_DIR / "memory-archive.md"
 INSIGHTS_FILE = JOURNAL_DIR / "insights.jsonl"
 PEOPLE_DIR = JOURNAL_DIR / "people"
+BOOKS_DIR = JOURNAL_DIR / "books"
 SYSTEM_EVOLUTION_LEDGER = JOURNAL_DIR / "system-evolution.jsonl"
 SYSTEM_EVOLUTION_CANDIDATES_DIR = JOURNAL_DIR / "system-evolution-candidates"
 ROADMAP_FILE = ROOT / "quant" / "roadmap.md"
@@ -3623,9 +3624,15 @@ def cmd_check_read_budget(args: argparse.Namespace) -> None:
             print(line)
 
 
-# People pages (journal/people/): one standing answer per person, rewritten as a
-# whole from the evidence. journal/people/00-index.md describes the shape.
-PEOPLE_PAGE_SECTIONS = ("答案", "证据", "悬着的")
+# People pages (journal/people/) and book pages (journal/books/): one standing
+# answer per person or book, rewritten as a whole from the evidence. Each
+# folder's 00-index.md describes the shape. A book page also keeps a 轨迹, the
+# dated path of the reading, each step linked to the diary or trace it came from.
+PAGE_KINDS: Dict[str, Dict[str, object]] = {
+    "people": {"label": "People", "sections": ("答案", "证据", "悬着的")},
+    "books": {"label": "Book", "sections": ("答案", "轨迹", "证据", "悬着的")},
+}
+PAGE_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
 PEOPLE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PEOPLE_BELIEF_RE = re.compile(r"^- \*\*(.+?)\*\* · 支持 (\d+)")
 PEOPLE_QUOTE_RE = re.compile(r"^\s+- (.+)$")
@@ -3739,8 +3746,31 @@ def quote_in_source(quote: str, source_text: str) -> bool:
     return True
 
 
-def validate_people_page(text: str) -> Dict[str, int]:
+def page_dir(kind: str) -> Path:
+    if kind not in PAGE_KINDS:
+        raise ValueError(f"page kind must be one of {', '.join(PAGE_KINDS)}: {kind!r}")
+    return PEOPLE_DIR if kind == "people" else BOOKS_DIR
+
+
+def trail_problems(trail: str) -> List[str]:
+    """Each 轨迹 step must link at least one diary or trace, and every one it links must exist."""
+    problems: List[str] = []
+    steps = [line for line in trail.splitlines() if line.startswith("- ")]
+    if not steps:
+        return ["## 轨迹 has no steps"]
+    for step in steps:
+        sources = [link for link in PAGE_LINK_RE.findall(step) if PEOPLE_EVIDENCE_LINK_RE.match(link.strip())]
+        if not sources:
+            problems.append(f"轨迹 step without a diary or trace link: {step[:60]}")
+        for link in sources:
+            if not people_evidence_source(link.strip()).exists():
+                problems.append(f"轨迹 step cites [[{link.strip()}]], which does not exist")
+    return problems
+
+
+def validate_people_page(text: str, kind: str = "people") -> Dict[str, int]:
     """Check a page's shape and that every quote is Henry's own words, verbatim, in its source."""
+    page_dir(kind)
     fields, sections = split_people_page(text)
     problems: List[str] = []
     for key in ("name", "question", "updated"):
@@ -3759,11 +3789,13 @@ def validate_people_page(text: str) -> Dict[str, int]:
             issue = people_alias_problem(alias)
             if issue:
                 problems.append(f"alias {alias!r} {issue}")
-    for title in PEOPLE_PAGE_SECTIONS:
+    for title in PAGE_KINDS[kind]["sections"]:  # type: ignore[union-attr]
         if title not in sections:
             problems.append(f"missing section ## {title}")
     if "答案" in sections and not sections["答案"].strip():
         problems.append("## 答案 is empty")
+    if kind == "books" and "轨迹" in sections:
+        problems += trail_problems(sections["轨迹"])
 
     beliefs: List[Tuple[str, int, List[str]]] = []
     for line in sections.get("证据", "").splitlines():
@@ -3800,14 +3832,15 @@ def validate_people_page(text: str) -> Dict[str, int]:
                     f"{title}: quote not found verbatim in Henry's own words in [[{link}]]: {quote[:60]}"
                 )
     if problems:
-        raise ValueError("people page is invalid:\n- " + "\n- ".join(problems))
+        label = str(PAGE_KINDS[kind]["label"]).lower()
+        raise ValueError(f"{label} page is invalid:\n- " + "\n- ".join(problems))
     return {"beliefs": len(beliefs), "quotes": sum(len(q) for _, _, q in beliefs)}
 
 
-def people_page_path(slug: str) -> Path:
+def people_page_path(slug: str, kind: str = "people") -> Path:
     if not PEOPLE_SLUG_RE.match(slug):
         raise ValueError(f"slug must be lowercase kebab-case: {slug!r}")
-    return PEOPLE_DIR / f"{slug}.md"
+    return page_dir(kind) / f"{slug}.md"
 
 
 def maintain_people_page(
@@ -3815,14 +3848,16 @@ def maintain_people_page(
     text: str,
     base_sha256: Optional[str] = None,
     dry_run: bool = False,
+    kind: str = "people",
 ) -> Dict[str, object]:
-    """Create or rewrite one people page, keeping the version it replaces."""
-    path = people_page_path(slug)
+    """Create or rewrite one people or book page, keeping the version it replaces."""
+    path = people_page_path(slug, kind)
     result: Dict[str, object] = {
         "slug": slug,
+        "kind": kind,
         "path": str(path),
         "dry_run": dry_run,
-        **validate_people_page(text),
+        **validate_people_page(text, kind),
         "history": None,
     }
     if not path.exists():
@@ -3850,7 +3885,7 @@ def maintain_people_page(
             old_updated = str(split_people_page(current)[0].get("updated") or "undated")
         except ValueError:
             old_updated = "undated"
-        history = PEOPLE_DIR / ".history" / slug / f"{old_updated}.md"
+        history = path.parent / ".history" / slug / f"{old_updated}.md"
         suffix = 2
         while history.exists():
             history = history.with_name(f"{old_updated}-{suffix}.md")
@@ -3871,6 +3906,7 @@ def cmd_maintain_page(args: argparse.Namespace) -> None:
         text,
         base_sha256=args.base_sha256,
         dry_run=bool(args.dry_run),
+        kind=args.kind,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -3885,41 +3921,47 @@ def people_alias_pattern(names: List[str]) -> "re.Pattern[str]":
 
 
 def pages_mentioned(target: date) -> List[Dict[str, object]]:
-    """People pages whose name or an alias appears in Henry's own words that day."""
-    if not PEOPLE_DIR.is_dir():
-        return []
-    pages = sorted(p for p in PEOPLE_DIR.glob("*.md") if p.name != "00-index.md")
+    """People and book pages whose name or an alias appears in Henry's own words that day."""
+    pages = [
+        (kind, p)
+        for kind in PAGE_KINDS
+        if page_dir(kind).is_dir()
+        for p in sorted(page_dir(kind).glob("*.md"))
+        if p.name != "00-index.md"
+    ]
     if not pages:
         return []
     sources = [journal_path_for_date(target)]
     sources += sorted(ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md"))
     text = "\n".join(henry_owned_text(source) for source in sources if source.exists())
     found: List[Dict[str, object]] = []
-    for page in pages:
+    for kind, page in pages:
         try:
             fields, _ = split_people_page(read_text(page))
             names = [str(fields["name"])] + [str(a) for a in fields.get("aliases") or []]
             names = [n for n in names if not people_alias_problem(n)]
             mentions = len(people_alias_pattern(names).findall(text)) if names else 0
         except (KeyError, ValueError) as exc:
-            found.append({"slug": page.stem, "path": page, "error": str(exc) or type(exc).__name__})
+            found.append({"kind": kind, "slug": page.stem, "path": page, "error": str(exc) or type(exc).__name__})
             continue
         if mentions:
-            found.append({"slug": page.stem, "path": page, "name": fields["name"], "mentions": mentions})
+            found.append({"kind": kind, "slug": page.stem, "path": page, "name": fields["name"], "mentions": mentions})
     return sorted(found, key=lambda item: -int(item.get("mentions", 0)))  # type: ignore[arg-type]
 
 
 def format_pages_mentioned(found: List[Dict[str, object]]) -> List[str]:
     lines = []
-    readable = [item for item in found if "error" not in item]
-    if readable:
-        lines.append(
-            "People pages mentioned today (read before the analysis): "
-            + ", ".join(f"{item['slug']} ({item['name']} ×{item['mentions']})" for item in readable)
-        )
-    for item in found:
-        if "error" in item:
-            lines.append(f"People page {item['slug']} could not be read: {item['error']}")
+    for kind, spec in PAGE_KINDS.items():
+        of_kind = [item for item in found if item.get("kind", "people") == kind]
+        readable = [item for item in of_kind if "error" not in item]
+        if readable:
+            lines.append(
+                f"{spec['label']} pages mentioned today (read before the analysis): "
+                + ", ".join(f"{item['slug']} ({item['name']} ×{item['mentions']})" for item in readable)
+            )
+        for item in of_kind:
+            if "error" in item:
+                lines.append(f"{spec['label']} page {item['slug']} could not be read: {item['error']}")
     return lines
 
 
@@ -6461,7 +6503,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_maintain_memory)
 
     s = sub.add_parser("maintain-page")
-    s.add_argument("--slug", required=True, help="Page file name under journal/people/, lowercase kebab-case.")
+    s.add_argument("--kind", choices=list(PAGE_KINDS), default="people", help="people (journal/people/) or books (journal/books/).")
+    s.add_argument("--slug", required=True, help="Page file name under the kind's folder, lowercase kebab-case.")
     s.add_argument("--input-file", required=True, help="The complete rewritten page.")
     s.add_argument("--base-sha256", help="sha256 of the page as it was read; required to rewrite an existing page.")
     s.add_argument("--dry-run", action="store_true")

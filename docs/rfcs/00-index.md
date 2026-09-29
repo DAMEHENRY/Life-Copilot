@@ -7,6 +7,7 @@ Design records for Life Copilot. The rules an agent follows live in `AGENTS.md` 
 | [[life-copilot-v4.3-rfc]] | implemented 2026-06-05 | From a Quant roadmap executor to a life-wide system: seeds, index-guided routing, the Active Board, schedules as projections |
 | [[life-copilot-v4.4-rfc]] | implemented 2026-07-25 | One merged Chat capture, an explicit bedtime close, constrained rule evolution |
 | [[life-copilot-v4.5-rfc]] | implemented 2026-09-22, except the chat-mode promotion | Read budget, people pages, closing-greeting rules moved out of memory |
+| [[life-copilot-v4.6-rfc]] | in progress | Book pages: a people page for a book, plus a linked reading trail |
 
 ## Conventions
 

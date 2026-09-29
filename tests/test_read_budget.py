@@ -93,6 +93,7 @@ class TestAuditReadBudget(unittest.TestCase):
             patch.object(copilot_module, "MEMORY_FILE", journal / "memory.md"),
             patch.object(copilot_module, "AI_CONVERSATIONS_DIR", journal / "ai-conversations"),
             patch.object(copilot_module, "PEOPLE_DIR", journal / "people"),
+            patch.object(copilot_module, "BOOKS_DIR", journal / "books"),
         ]
         for patcher in self.patchers:
             patcher.start()

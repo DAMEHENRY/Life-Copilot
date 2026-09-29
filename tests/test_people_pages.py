@@ -66,6 +66,7 @@ class PeopleDirCase(unittest.TestCase):
             patch.object(copilot_module, "JOURNAL_DIR", self.journal),
             patch.object(copilot_module, "AI_CONVERSATIONS_DIR", self.journal / "ai-conversations"),
             patch.object(copilot_module, "PEOPLE_DIR", self.people),
+            patch.object(copilot_module, "BOOKS_DIR", self.journal / "books"),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -241,6 +242,62 @@ class TestPagesMentioned(PeopleDirCase):
             paths = read_budget_paths(date(2026, 9, 20))
         self.assertIn(self.people / "zheng-chen.md", paths)
         self.assertNotIn(self.people / "zheng-chen.md", read_budget_paths())
+
+
+def _book(trail: str = "- 06-01 睡前读了十分钟 — [[2026-09-20-codex-trace]]\n- 读到高频那段 — [[2026-09-20]]\n") -> str:
+    return (
+        "---\nname: Zen and the Art of Motorcycle Maintenance\naliases:\n  - motorcycle\n  - 摩托车维修\n"
+        "question: 这本书对 Henry 做了什么？\nupdated: 2026-09-20\n---\n\n# Zen\n\n## 答案\n\n它一直在。\n\n"
+        f"## 轨迹\n\n{trail}\n## 证据\n\n- **读起来放松** · 支持 1\n"
+        "  - 他说不一定，这种很多时候都是尝试出来的 — [[2026-09-20-codex-trace]]\n\n## 悬着的\n\n- 读完以后呢。\n"
+    )
+
+
+class TestBookPages(PeopleDirCase):
+    """Book pages share the people-page rules and add a linked 轨迹."""
+
+    def test_valid_book_page(self) -> None:
+        self.assertEqual(validate_people_page(_book(), kind="books"), {"beliefs": 1, "quotes": 1})
+
+    def test_a_book_page_needs_a_trail(self) -> None:
+        with self.assertRaisesRegex(ValueError, "book page is invalid:\n- missing section ## 轨迹"):
+            validate_people_page(_book().replace("## 轨迹", "## 其他"), kind="books")
+
+    def test_every_trail_step_links_an_existing_diary_or_trace(self) -> None:
+        trail = "- 没有出处的一步\n- 链到别的笔记 — [[jit-finance-denoising-seed]]\n- 链到不存在的一天 — [[2026-09-21]]\n"
+        with self.assertRaises(ValueError) as caught:
+            validate_people_page(_book(trail=trail), kind="books")
+        message = str(caught.exception)
+        self.assertEqual(message.count("without a diary or trace link"), 2)
+        self.assertIn("[[2026-09-21]], which does not exist", message)
+
+    def test_book_pages_live_in_their_own_folder(self) -> None:
+        result = maintain_people_page("zen", _book(), kind="books")
+        self.assertEqual(result["action"], "created")
+        self.assertTrue((self.journal / "books" / "zen.md").exists())
+        self.assertFalse(self.people.exists())
+
+    def test_mentions_are_reported_per_kind(self) -> None:
+        self.people.mkdir(parents=True)
+        (self.people / "zheng-chen.md").write_text(_page(), encoding="utf-8")
+        maintain_people_page("zen", _book(), kind="books")
+        (self.journal / "2026" / "09" / "2026-09-20.md").write_text(
+            "- [ ] Reading: zen and the art of motorcycle maintenance\n和郑宸聊了摩托车维修那本书\n", encoding="utf-8"
+        )
+        (self.trace_dir / "2026-09-20-codex-trace.md").write_text("", encoding="utf-8")
+        found = pages_mentioned(date(2026, 9, 20))
+        self.assertEqual([(f["kind"], f["slug"], f["mentions"]) for f in found], [("books", "zen", 2), ("people", "zheng-chen", 1)])
+        self.assertEqual(
+            format_pages_mentioned(found),
+            [
+                "People pages mentioned today (read before the analysis): zheng-chen (郑宸 ×1)",
+                "Book pages mentioned today (read before the analysis): zen (Zen and the Art of Motorcycle Maintenance ×2)",
+            ],
+        )
+
+    def test_unknown_kind_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "page kind must be one of people, books"):
+            maintain_people_page("zen", _book(), kind="films")
 
 
 if __name__ == "__main__":
