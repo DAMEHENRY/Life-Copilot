@@ -31,7 +31,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 # Context & Evidence Rules
 
 **要读的文件（按顺序）：**
-0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 Codex、原生 Claude Code CLI、Life Claude Renderer，以及通过 Tailscale SSH 只读取得的 Windows OpenClaw/Kai Telegram 与微信私聊归档到 `journal/ai-conversations/YYYY/MM/` 下的独立 trace 文件，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引。Telegram 与微信均是当前入口；归档按当天实际存在的私聊收集，不要求两个渠道每天都产生消息。OpenClaw/Kai 是必需证据源：若 Windows/OpenClaw 暂时不可达，停止分析并修复或重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。同一命令会先经 Chrome 扩展同步 Claude 网页版与 ChatGPT 网页版（含 Health）对话并写入 `claude-web` / `chatgpt-web` trace；Chrome 未打开时脚本会后台启动并在同步后退出，无需 Henry 手动打开。网页对话也是必需证据源：若同步失败（例如登录过期或出现人机验证），停止分析并请 Henry 在 Chrome 中处理后重试；只有 Henry 明确接受不完整归档时才使用 `--allow-missing-web-chats`。若日记文件不存在，说明后跳过；若当天确实没有 OpenClaw 私聊或网页对话，零消息是正常结果。
+0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 AI 对话归档为 `journal/ai-conversations/YYYY/MM/` 下的独立 trace，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引；覆盖哪些来源、Chrome 同步方式和 `--allow-missing-*` 何时可用，以 `AGENTS.md` 的结构化写回为准。OpenClaw/Kai（经 Tailscale SSH 只读取得的 Windows Telegram 与微信私聊）或网页对话是必需证据源，不可达或同步失败时停止分析：前者修复或重试，后者（如登录过期、人机验证）请 Henry 在 Chrome 中处理后重试。若日记文件不存在，说明后跳过；当天某一渠道或全部私聊、网页对话为零消息都是正常结果。
 0.5. 跟读当日 trace，提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
 1.5. 当天提到的人物页（`writeback-ai-day` 会列出）：派生的累积理解，引用细节仍回原件。
