@@ -32,7 +32,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 
 **要读的文件（按顺序）：**
 0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 AI 对话归档为 `journal/ai-conversations/YYYY/MM/` 下的独立 trace，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引；覆盖哪些来源、Chrome 同步方式和 `--allow-missing-*` 何时可用，以 `AGENTS.md` 的结构化写回为准。OpenClaw/Kai（经 Tailscale SSH 只读取得的 Windows Telegram 与微信私聊）或网页对话是必需证据源，不可达或同步失败时停止分析：前者修复或重试，后者（如登录过期、人机验证）请 Henry 在 Chrome 中处理后重试。若日记文件不存在，说明后跳过；当天某一渠道或全部私聊、网页对话为零消息都是正常结果。
-0.5. 跟读当日 trace，提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
+0.5. 按 `writeback-ai-day` 列出的 trace 清单整读当天每份 trace，每份只读一次，之后核对原话用 `grep -F`，不重读；提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）
 1.5. 当天提到的人物页（`writeback-ai-day` 会列出）：派生的累积理解，引用细节仍回原件。
 2. `journal/memory.md` 全文（长期记忆）：按 `writeback-ai-day` 打印的读取计划分段整读，Stable Profile 每次必读，不要只读 Active Hypotheses。
@@ -64,9 +64,9 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 - 不得把推断写成已证实事实；若有不确定性，要在语气中体现，或给出验证方向。
 
 **💬 From Kai 证据层：**
-- `## 💬 From Kai` 是当天 AI 原始对话流的索引层。它包含指向每日 AI trace 文件的 wikilink，例如 `[[2026-06-01-codex-trace]]`、`[[2026-06-01-claude-code-trace]]`、`[[2026-06-01-life-claude-renderer-trace]]`、`[[2026-06-01-openclaw-trace]]`、`[[2026-06-01-claude-web-trace]]` 和 `[[2026-06-01-chatgpt-web-trace]]`。
+- `## 💬 From Kai` 是当天 AI 原始对话流的索引层。每个来源一条指向当日 trace 的 wikilink，如 `[[2026-06-01-codex-trace]]`。
 - 完整对话在 `journal/ai-conversations/YYYY/MM/` 下各来源的 trace 里，由 `writeback-ai-day` 归档；各导入器保留和过滤什么，以 `AGENTS.md` 的结构化写回说明和脚本为准。读 trace 时记住：只保留双方可见正文，图片记为 `[Image]` 占位，客户端或平台自己写入的上下文、提示与报错不算任何一方的话；Henry 手工补的完整记录优先于远端残留；网页对话按每条消息的时间归日，ChatGPT Health 对话的标题带 `[Health]`。
-- 分析时需跟读 wikilink 读取完整 trace 文件，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Claude Code/Life Claude Renderer 当场反照了什么、晚上日记正文又如何重构这一天。
+- 分析依据第 0.5 步读过的完整 trace，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Claude Code/Life Claude Renderer 当场反照了什么、晚上日记正文又如何重构这一天。
 - 不要把 AI 的回答直接复述成夜间分析；夜间分析要做二阶工作：提炼主线、校验 AI 的判断、补本地历史证据、指出对话流里反复出现的结构。
 - 如果 AI 在 trace 文件里声称”找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
 - `writeback-ai-day` 按 wikilink 去重；重复分析同一天时先执行该命令，不应重复写入已经存在的 wikilink。
@@ -215,7 +215,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 3. **Life Board Audit Gate**：运行 `audit-life-board`。若为 `needs_audit`，只提出最小 patch；未经 Henry 确认不修改 Board。
 4. **Inbox Audit / Closure Check**：读取 `inbox/00-readme.md` 并判断待处理文件去向。默认只建议，不移动或删除；Henry 明确授权 flush/move 时才执行。
 5. **Daily Suggestion Writeback**：基于分析和 post-inbox 状态，将短小的目标日方向写入 `## 🧭 Daily Suggestion`。它可以是行动、边界、许可或“不新增任务”，不必把每一天变成优化项目。使用目标日语态；遇到已有不同 provenance 时不自动 `--force`。
-6. **Final Response**：先呈现关系性回应的结果，再用最短必要文字说明真实发生的维护动作。Board/inbox/memory no-op 不制造活动感。执行说明里加一行读取回执：每个必读来源是整读还是只读了哪几段（对照读取计划）。收尾问候原样给出第 0 步拟好、已写进日记的那一句。
+6. **Final Response**：先呈现关系性回应的结果，再用最短必要文字说明真实发生的维护动作。Board/inbox/memory no-op 不制造活动感。执行说明里加一行读取回执：每个必读来源（含每份 trace）是整读还是只读了哪几段（对照读取计划），第 0.5 步 capture 是写入还是 no-op。收尾问候原样给出第 0 步拟好、已写进日记的那一句。
 
 收尾顺序：分析 → 拟收尾问候 → 写回关系性回应 → 自动维护长期记忆与人物页 → Life Board audit → inbox audit / closure → 写回 Daily Suggestion → 最终回复。
 

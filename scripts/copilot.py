@@ -3538,6 +3538,10 @@ def read_budget_status(size: int) -> str:
     return "over"
 
 
+def day_trace_paths(target: date) -> List[Path]:
+    return sorted(ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md"))
+
+
 def read_budget_paths(target: Optional[date] = None) -> List[Path]:
     """Files an agent is expected to read in full, plus one day's diary and traces."""
     paths = [ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
@@ -3545,15 +3549,14 @@ def read_budget_paths(target: Optional[date] = None) -> List[Path]:
     paths += [LIFE_BOARD_FILE, MEMORY_FILE]
     if target is not None:
         paths.append(journal_path_for_date(target))
-        paths += sorted(
-            ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md")
-        )
+        paths += day_trace_paths(target)
         paths += [item["path"] for item in pages_mentioned(target) if "error" not in item]
     return paths
 
 
 def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
     files: List[Dict[str, object]] = []
+    traces = set(day_trace_paths(target)) if target is not None else set()
     for path in read_budget_paths(target):
         shown = path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
         if not path.exists():
@@ -3575,6 +3578,7 @@ def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
             "reads": len(ranges) if planned else 1,
             "ranges": labels if planned else [],
             "oversize_lines": oversize,
+            "trace": path in traces,
         })
     counts = {
         status: sum(1 for item in files if item["status"] == status)
@@ -3589,25 +3593,62 @@ def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
     }
 
 
+def format_read_parts(item: Dict[str, object]) -> str:
+    text = ""
+    if item["ranges"]:
+        text += f"; read in {item['reads']} parts, lines " + ", ".join(item["ranges"])  # type: ignore[arg-type]
+    if item["oversize_lines"]:
+        text += "; lines too long to read whole: " + ", ".join(map(str, item["oversize_lines"]))  # type: ignore[call-overload]
+    return text
+
+
 def format_read_budget(result: Dict[str, object], include_ok: bool = True) -> List[str]:
-    counts = result["counts"]
+    files = result["files"]
+    others = [item for item in files if not item.get("trace")]  # type: ignore[union-attr]
+    counts = {
+        status: sum(1 for item in others if item["status"] == status)
+        for status in ("over", "near", "ok", "missing")
+    }
     lines = [
-        f"Read budget: {counts['over']} over cap, {counts['near']} near cap, "  # type: ignore[index]
-        f"{counts['ok']} ok, {counts['missing']} missing "  # type: ignore[index]
+        f"Read budget: {counts['over']} over cap, {counts['near']} near cap, "
+        f"{counts['ok']} ok, {counts['missing']} missing "
         f"(one read holds {READ_CAP_BYTES:,} bytes; plans use {READ_BUDGET_BYTES:,})"
     ]
-    for item in result["files"]:  # type: ignore[union-attr]
+    for item in others:
         if item["status"] == "ok" and not include_ok:
             continue
         if item["status"] == "missing":
             lines.append(f"- missing {item['path']}")
             continue
-        text = f"- {item['status']:<4} {item['path']}  {item['bytes']:,} bytes ({item['percent_of_cap']}% of cap)"
-        if item["ranges"]:
-            text += f"; read in {item['reads']} parts, lines " + ", ".join(item["ranges"])
-        if item["oversize_lines"]:
-            text += "; lines too long to read whole: " + ", ".join(map(str, item["oversize_lines"]))
-        lines.append(text)
+        lines.append(
+            f"- {item['status']:<4} {item['path']}  {item['bytes']:,} bytes ({item['percent_of_cap']}% of cap)"
+            + format_read_parts(item)
+        )
+    if result.get("date"):
+        lines += format_trace_plan([item for item in files if item.get("trace")])  # type: ignore[union-attr]
+    return lines
+
+
+def format_trace_plan(traces: List[Dict[str, object]]) -> List[str]:
+    """Every trace of the day, small ones too, with the total load up front.
+
+    Each trace is a must-read, and otherwise only the diary's From Kai links
+    name the small ones. One short line each, the folder named once, keeps
+    the list cheap to print.
+    """
+    if not traces:
+        return ["Traces to read before the analysis: none"]
+    size = sum(int(item["bytes"]) for item in traces)  # type: ignore[call-overload]
+    reads = sum(int(item["reads"]) for item in traces)  # type: ignore[call-overload]
+    folder = str(traces[0]["path"]).rpartition("/")[0]
+    files = f"{len(traces)} file" + ("s" if len(traces) > 1 else "")
+    lines = [
+        f"Traces to read before the analysis, in {folder}/ "
+        f"({files}, {size:,} bytes, {reads} read" + ("s" if reads > 1 else "") + "):"
+    ]
+    for item in traces:
+        name = str(item["path"]).rpartition("/")[2]
+        lines.append(f"- {name}  {item['bytes']:,} bytes" + (format_read_parts(item) or "; one read"))
     return lines
 
 
@@ -3932,7 +3973,7 @@ def pages_mentioned(target: date) -> List[Dict[str, object]]:
     if not pages:
         return []
     sources = [journal_path_for_date(target)]
-    sources += sorted(ai_conversation_dir_for_date(target).glob(f"{target.isoformat()}-*-trace.md"))
+    sources += day_trace_paths(target)
     text = "\n".join(henry_owned_text(source) for source in sources if source.exists())
     found: List[Dict[str, object]] = []
     for kind, page in pages:

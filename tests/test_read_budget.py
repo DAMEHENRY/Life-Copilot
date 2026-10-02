@@ -23,6 +23,7 @@ from scripts.copilot import (
     READ_CAP_BYTES,
     audit_read_budget,
     cmd_writeback_ai_day,
+    format_read_budget,
     read_budget_plan,
     read_budget_status,
 )
@@ -133,6 +134,27 @@ class TestAuditReadBudget(unittest.TestCase):
             paths,
             ["AGENTS.md", "CLAUDE.md", "prompts/diary-mode.md", "life-board.md", "journal/memory.md"],
         )
+        self.assertFalse(any(line.startswith("Traces") for line in format_read_budget(audit_read_budget())))
+
+    def test_every_trace_is_listed_even_when_it_fits_one_read(self) -> None:
+        trace_dir = self.root / "journal" / "ai-conversations" / "2026" / "09"
+        (trace_dir / "2026-09-20-claude-code-trace.md").write_text("对话\n" * 6000, encoding="utf-8")
+        lines = format_read_budget(audit_read_budget(date(2026, 9, 20)), include_ok=False)
+        # Traces have their own section, so the other files' counts leave them out.
+        self.assertEqual(lines[0].split(" (")[0], "Read budget: 1 over cap, 1 near cap, 3 ok, 1 missing")
+        start = lines.index(
+            "Traces to read before the analysis, in journal/ai-conversations/2026/09/ "
+            "(2 files, 42,006 bytes, 3 reads):"
+        )
+        self.assertFalse(any("trace" in line for line in lines[:start]))
+        self.assertEqual(lines[start + 1:], [
+            "- 2026-09-20-claude-code-trace.md  42,000 bytes; read in 2 parts, lines 1-3428, 3429-end",
+            "- 2026-09-20-codex-trace.md  6 bytes; one read",
+        ])
+
+    def test_a_day_without_traces_says_so(self) -> None:
+        lines = format_read_budget(audit_read_budget(date(2026, 9, 21)), include_ok=False)
+        self.assertEqual(lines[-1], "Traces to read before the analysis: none")
 
 
 class TestWritebackAiDayReadBudget(unittest.TestCase):
@@ -165,6 +187,26 @@ class TestWritebackAiDayReadBudget(unittest.TestCase):
         pages = [{"slug": "zheng-chen", "path": Path("p"), "name": "郑宸", "mentions": 3}]
         lines = self._run(pages=pages, return_value=result)
         self.assertEqual(lines[1], "People pages mentioned today (read before the analysis): zheng-chen (郑宸 ×3)")
+        self.assertEqual(lines[-1], "/vault/journal/day.md")
+
+    def test_small_traces_are_listed_though_ok_files_are_not(self) -> None:
+        result = {
+            "date": "2026-09-20",
+            "counts": {"over": 0, "near": 0, "ok": 2, "missing": 0},
+            "files": [
+                {"path": "AGENTS.md", "status": "ok", "bytes": 100, "percent_of_cap": 0,
+                 "reads": 1, "ranges": [], "oversize_lines": [], "trace": False},
+                {"path": "journal/ai-conversations/2026/09/2026-09-20-codex-trace.md", "status": "ok",
+                 "bytes": 900, "percent_of_cap": 3, "reads": 1, "ranges": [], "oversize_lines": [],
+                 "trace": True},
+            ],
+        }
+        lines = self._run(return_value=result)
+        self.assertEqual(lines[1:3], [
+            "Traces to read before the analysis, in journal/ai-conversations/2026/09/ (1 file, 900 bytes, 1 read):",
+            "- 2026-09-20-codex-trace.md  900 bytes; one read",
+        ])
+        self.assertFalse(any("AGENTS.md" in line for line in lines))
         self.assertEqual(lines[-1], "/vault/journal/day.md")
 
     def test_a_failed_budget_check_does_not_fail_the_archive(self) -> None:
