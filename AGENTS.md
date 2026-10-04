@@ -25,7 +25,7 @@
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
-| 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md` |
+| 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md`。一次读不完的页拆出同目录的轨迹 `{slug}-trail.md`：一天一节，只追加 |
 | 书页 | `journal/books/{slug}.md`；同人物页，另有带出处的阅读轨迹，规则见 `journal/books/00-index.md` |
 | Claude Code 补充记忆 | `journal/claude-code-memory-bridge.md`；只按话题跟读，原始日记与人物页优先 |
 | 收尾问候 | `journal/closing-greetings.md`；日记收尾与睡前晚安共用的规则和用过的材料 |
@@ -59,7 +59,7 @@
 - 回复里链接 vault 内的笔记、PDF 等资料时用 `[[vault 相对路径|标题]]`（`.md` 可省；定位用 `#标题`，不带行号）；在 Obsidian 外（如 Codex 桌面 app）要能点开时用 `obsidian://open?vault=Life&file=<URL 编码的 vault 相对路径>`。不用 `/Users/...` 绝对路径，Obsidian 点开会新建空笔记；本条优先于 harness 默认的文件链接格式，代码文件照旧。
 - 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
-- 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划（当天每份 trace 都单列，附总量）和提到的人物页、书页。
+- 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划（当天每份 trace 都单列，附总量）和提到的人物页、书页。有轨迹的页另列轨迹的行段：页整读，轨迹读这一段，更早的按日期或判断编号（如 `J12`）检索。
 - `journal/insights.jsonl` 是检索索引，不是主要用户可见引用；历史结论优先引用 `[[YYYY-MM-DD]]`。
 - 找原始日记可用本地语义检索 `python3 tools/recall/recall.py search`：用当时的具体细节、中英文各查一次；结果只是候选，引用前读原文；命中转写、分析或 trace 时按日期回到原始日记；分析某天时加 `--before` 该日。它不是必需证据源，不可用时继续用关键词检索并在执行说明里注明。关键词检索用 `rg --no-ignore` 或 `command grep`，默认工具可能按 `.gitignore` 静默跳过 `journal/`。
 - 外部搜索只校验时效性事实；明确区分事实、他方主张、传言与推断。
@@ -86,6 +86,7 @@
 - 人物页：
   `python3 scripts/copilot.py maintain-page --slug <slug> --input-file <file> [--base-sha256 <sha>] [--dry-run]`
   整页重写；每句原话都要能在所引的日记或 trace 里逐字找到。改写已有页要带读取时的 sha256，被替换的版本存进 `journal/people/.history/`。
+  有轨迹的页不整页重写：每晚用 `--day YYYY-MM-DD --day-file <file>` 只写当天那一节（当天经过，加标了判断编号的原话），页上的支持次数由脚本按轨迹填写；答案、判断或悬着的问题变了，才同时带 `--input-file` 重写页。页必须一次读得完，写不下的进轨迹。
   书页加 `--kind books`，存在 `journal/books/`，另校验轨迹每步都链到存在的日记或 trace。
 - 读取预算：
   `python3 scripts/copilot.py check-read-budget [--date YYYY-MM-DD]`
