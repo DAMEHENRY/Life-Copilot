@@ -3680,6 +3680,19 @@ PEOPLE_QUOTE_RE = re.compile(r"^\s+- (.+)$")
 PEOPLE_QUOTE_SOURCE = " — [["
 PEOPLE_EVIDENCE_LINK_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-([a-z-]+)-trace)?$")
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+# A page's trail ({slug}-trail.md, next to the page) holds what accumulates: one
+# section per day, written once. The page keeps what changes and fits in one
+# read. Beliefs are tied to trail occasions by id (J12); `J12+` adds words to an
+# occasion that is already counted.
+TRAIL_SUFFIX = "-trail"
+TRAIL_DAY_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
+TRAIL_OCCASION_RE = re.compile(r"^- \*\*J(\d+)(\+?)\*\*(.*)$")
+TRAIL_READ_DAYS = 3
+TRAIL_PAGE_HINT = (
+    "\nThis page has a trail. Write the day with --day and --day-file; on the page a belief is "
+    "`- **title** · J12 · 支持 N` and its count comes from the trail. See the folder's 00-index.md."
+)
+PAGE_KEYED_BELIEF_RE = re.compile(r"^- \*\*(.+?)\*\* \u00b7 (J\d+(?: J\d+)*) \u00b7 \u652f\u6301 \d+(?:\uff08[^\uff09]*\uff09)?(.*)$")
 COPILOT_OWNED_SECTIONS = ("What Life Copilot Said", "Daily Suggestion")
 
 
@@ -3809,8 +3822,12 @@ def trail_problems(trail: str) -> List[str]:
     return problems
 
 
-def validate_people_page(text: str, kind: str = "people") -> Dict[str, int]:
-    """Check a page's shape and that every quote is Henry's own words, verbatim, in its source."""
+def validate_people_page(text: str, kind: str = "people", trail: Optional[str] = None) -> Dict[str, int]:
+    """Check a page's shape and that every quote is Henry's own words, verbatim, in its source.
+
+    A page with a trail is checked against the trail instead: its beliefs carry
+    ids, its counts and quotes come from the trail, and it fits in one read.
+    """
     page_dir(kind)
     fields, sections = split_people_page(text)
     problems: List[str] = []
@@ -3837,6 +3854,14 @@ def validate_people_page(text: str, kind: str = "people") -> Dict[str, int]:
         problems.append("## 答案 is empty")
     if kind == "books" and "轨迹" in sections:
         problems += trail_problems(sections["轨迹"])
+
+    if trail is not None:
+        stats, keyed_problems = keyed_evidence_check(text, sections.get("证据", ""), trail)
+        problems += keyed_problems
+        if problems:
+            label = str(PAGE_KINDS[kind]["label"]).lower()
+            raise ValueError(f"{label} page is invalid:\n- " + "\n- ".join(problems) + TRAIL_PAGE_HINT)
+        return stats
 
     beliefs: List[Tuple[str, int, List[str]]] = []
     for line in sections.get("证据", "").splitlines():
@@ -3878,10 +3903,221 @@ def validate_people_page(text: str, kind: str = "people") -> Dict[str, int]:
     return {"beliefs": len(beliefs), "quotes": sum(len(q) for _, _, q in beliefs)}
 
 
+def quote_line_problem(quote_line: str) -> Optional[str]:
+    """Why a `quote — [[source]]` line is not acceptable evidence, or None."""
+    cut = quote_line.rfind(PEOPLE_QUOTE_SOURCE)
+    if cut < 0:
+        return f"quote without a dated source: {quote_line[:60]}"
+    quote = quote_line[:cut].strip()
+    link = quote_line[cut + len(PEOPLE_QUOTE_SOURCE):].split("]]", 1)[0].split("|", 1)[0]
+    try:
+        source = people_evidence_source(link)
+    except ValueError as exc:
+        return str(exc)
+    if not source.exists():
+        return f"source [[{link}]] not found"
+    if not quote_in_source(quote, henry_owned_text(source)):
+        return f"quote not found verbatim in Henry's own words in [[{link}]]: {quote[:60]}"
+    return None
+
+
+def split_trail(text: str) -> Tuple[List[str], List[Tuple[str, int, int]]]:
+    """A trail's lines and its day sections as (day, heading line, end line), 0-based, end exclusive."""
+    lines = text.split("\n")
+    starts = [(m.group(1), i) for i, line in enumerate(lines) for m in [TRAIL_DAY_RE.match(line)] if m]
+    sections = [
+        (day, start, starts[index + 1][1] if index + 1 < len(starts) else len(lines))
+        for index, (day, start) in enumerate(starts)
+    ]
+    return lines, sections
+
+
+def trail_occasions(text: str) -> List[Dict[str, object]]:
+    """Every occasion in a trail: its day, belief id, whether it counts, its note and its quote lines."""
+    lines, sections = split_trail(text)
+    found: List[Dict[str, object]] = []
+    for day, start, end in sections:
+        current: Optional[Dict[str, object]] = None
+        for line in lines[start + 1:end]:
+            occasion = TRAIL_OCCASION_RE.match(line)
+            if occasion:
+                current = {
+                    "day": day,
+                    "id": int(occasion.group(1)),
+                    "counts": not occasion.group(2),
+                    "note": occasion.group(3).strip(),
+                    "quotes": [],
+                }
+                found.append(current)
+            elif current is not None and PEOPLE_QUOTE_RE.match(line):
+                current["quotes"].append(line.strip()[2:])  # type: ignore[union-attr]
+            elif line.strip():
+                current = None
+    return found
+
+
+def trail_day_problems(day: str, body: str) -> List[str]:
+    """One day's section: quotes are Henry's own words in their source, and every occasion is anchored."""
+    if not body.strip():
+        return [f"{day}: the section is empty"]
+    problems: List[str] = []
+    label: Optional[str] = None
+    note, quotes = "", 0
+
+    def close() -> None:
+        if label is None or quotes:
+            return
+        links = [link.strip() for link in PAGE_LINK_RE.findall(note) if PEOPLE_EVIDENCE_LINK_RE.match(link.strip())]
+        if not links:
+            problems.append(f"{day} {label}: an occasion needs a quote or a link to a diary or trace")
+        for link in links:
+            if not people_evidence_source(link).exists():
+                problems.append(f"{day} {label}: cites [[{link}]], which does not exist")
+
+    for line in body.split("\n"):
+        occasion = TRAIL_OCCASION_RE.match(line)
+        if occasion:
+            close()
+            label, note, quotes = f"J{occasion.group(1)}{occasion.group(2)}", occasion.group(3), 0
+        elif re.match(r"^- \*\*J\d", line):
+            problems.append(f"{day}: write an occasion as `- **J12** note` (or `- **J12+** note`): {line[:60]}")
+        elif PEOPLE_QUOTE_RE.match(line) and label is not None:
+            quotes += 1
+            issue = quote_line_problem(line.strip()[2:])
+            if issue:
+                problems.append(f"{day} {label}: {issue}")
+        elif PEOPLE_QUOTE_RE.match(line) and PEOPLE_QUOTE_SOURCE in line:
+            problems.append(f"{day}: quote outside an occasion: {line.strip()[:60]}")
+        elif line.strip():
+            close()
+            label = None
+    close()
+    return problems
+
+
+def trail_with_day(text: str, day: str, body: str) -> Tuple[str, Optional[str]]:
+    """The trail with one day's section set, and the section it replaced. No other line changes."""
+    block = [f"## {day}", ""] + body.strip("\n").split("\n") + [""]
+    lines, sections = split_trail(text)
+    for found_day, start, end in sections:
+        if found_day == day:
+            old = "\n".join(lines[start:end]).rstrip("\n")
+            return "\n".join(lines[:start] + block + lines[end:]), old
+        if found_day > day:
+            return "\n".join(lines[:start] + block + lines[start:]), None
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines + [""] + block), None
+
+
+def format_support_days(days: List[str]) -> str:
+    """（09-21、10-02）for a belief line; full dates when the occasions span more than one year."""
+    unique = sorted(set(days))
+    if not unique:
+        return ""
+    short = len({day[:4] for day in unique}) == 1
+    return "（" + "、".join(day[5:] if short else day for day in unique) + "）"
+
+
+def fill_page_support(text: str, trail: str) -> str:
+    """Set each keyed belief's count and dates from the occasions the trail holds for its ids."""
+    counted: Dict[int, List[str]] = {}
+    for occasion in trail_occasions(trail):
+        if occasion["counts"]:
+            counted.setdefault(int(occasion["id"]), []).append(str(occasion["day"]))  # type: ignore[arg-type]
+    lines = text.split("\n")
+    in_evidence = False
+    for index, line in enumerate(lines):
+        if line.startswith("## "):
+            in_evidence = line.strip() == "## 证据"
+            continue
+        belief = PAGE_KEYED_BELIEF_RE.match(line) if in_evidence else None
+        if belief:
+            days = [day for key in belief.group(2).split() for day in counted.get(int(key[1:]), [])]
+            lines[index] = (
+                f"- **{belief.group(1)}** · {belief.group(2)} · 支持 {len(days)}"
+                + format_support_days(days)
+                + belief.group(3)
+            )
+    return "\n".join(lines)
+
+
+def keyed_evidence_check(text: str, evidence: str, trail: str) -> Tuple[Dict[str, int], List[str]]:
+    """Check a page against its trail: ids, counts, copied quotes, and the one-read budget."""
+    problems: List[str] = []
+    occasions = trail_occasions(trail)
+    counted: Dict[int, int] = {}
+    quotes_by_id: Dict[int, set] = {}
+    for occasion in occasions:
+        key = int(occasion["id"])  # type: ignore[arg-type]
+        counted[key] = counted.get(key, 0) + (1 if occasion["counts"] else 0)
+        quotes_by_id.setdefault(key, set()).update(occasion["quotes"])  # type: ignore[arg-type]
+    seen: Dict[int, str] = {}
+    beliefs = page_quotes = 0
+    title, ids = "", None  # type: Tuple[str, Optional[List[int]]]
+    for line in evidence.splitlines():
+        belief = PAGE_KEYED_BELIEF_RE.match(line)
+        if belief:
+            beliefs += 1
+            title, ids = belief.group(1), [int(key[1:]) for key in belief.group(2).split()]
+            for key in ids:
+                if key in seen:
+                    problems.append(f"J{key} is listed on two beliefs: {seen[key]} / {title}")
+                seen[key] = title
+            total = sum(counted.get(key, 0) for key in ids)
+            stated = int(re.search(r"· 支持 (\d+)", line).group(1))  # type: ignore[union-attr]
+            if total < 1:
+                problems.append(f"{title}: no counted occasion in the trail for {belief.group(2)}")
+            elif stated != total:
+                problems.append(f"{title}: 支持 {stated}, but the trail holds {total} occasions")
+        elif line.startswith("- "):
+            problems.append(f"belief without an id (- **title** · J12 · 支持 N): {line[:60]}")
+            ids = None
+        elif PEOPLE_QUOTE_RE.match(line) and ids is not None:
+            page_quotes += 1
+            quote = line.strip()[2:]
+            if not any(quote in quotes_by_id.get(key, ()) for key in ids):
+                keys = " ".join(f"J{key}" for key in ids)
+                problems.append(f"{title}: quote is not in the trail under {keys}: {quote[:60]}")
+    if not beliefs:
+        problems.append("## 证据 has no beliefs")
+    for key in sorted(set(counted) - set(seen)):
+        problems.append(f"J{key} is used in the trail but is on no belief of the page")
+    size = len(text.encode("utf-8"))
+    if size > READ_BUDGET_BYTES:
+        problems.append(
+            f"the page is {size:,} bytes, over the one-read budget of {READ_BUDGET_BYTES:,}: "
+            "move dated detail into the trail, merge beliefs, or close answered questions into the trail"
+        )
+    stats = {
+        "beliefs": beliefs,
+        "quotes": page_quotes,
+        "trail_days": len(split_trail(trail)[1]),
+        "trail_quotes": sum(len(o["quotes"]) for o in occasions),  # type: ignore[arg-type]
+    }
+    return stats, problems
+
+
 def people_page_path(slug: str, kind: str = "people") -> Path:
     if not PEOPLE_SLUG_RE.match(slug):
         raise ValueError(f"slug must be lowercase kebab-case: {slug!r}")
+    if slug.endswith(TRAIL_SUFFIX):
+        raise ValueError(f"slug must not end in {TRAIL_SUFFIX}; that name is the page's trail: {slug!r}")
     return page_dir(kind) / f"{slug}.md"
+
+
+def page_trail_path(slug: str, kind: str = "people") -> Path:
+    return people_page_path(slug, kind).with_name(f"{slug}{TRAIL_SUFFIX}.md")
+
+
+def page_history_path(path: Path, slug: str, stem: str) -> Path:
+    """A free name under the page folder's .history/{slug}/ for a version about to be replaced."""
+    history = path.parent / ".history" / slug / f"{stem}.md"
+    suffix = 2
+    while history.exists():
+        history = history.with_name(f"{stem}-{suffix}.md")
+        suffix += 1
+    return history
 
 
 def maintain_people_page(
@@ -3891,14 +4127,22 @@ def maintain_people_page(
     dry_run: bool = False,
     kind: str = "people",
 ) -> Dict[str, object]:
-    """Create or rewrite one people or book page, keeping the version it replaces."""
+    """Create or rewrite one people or book page, keeping the version it replaces.
+
+    When the page has a trail, its belief counts and dates are filled in from
+    the trail before it is checked and written.
+    """
     path = people_page_path(slug, kind)
+    trail_path = page_trail_path(slug, kind)
+    trail = read_text(trail_path) if trail_path.exists() else None
+    if trail is not None:
+        text = fill_page_support(text, trail)
     result: Dict[str, object] = {
         "slug": slug,
         "kind": kind,
         "path": str(path),
         "dry_run": dry_run,
-        **validate_people_page(text, kind),
+        **validate_people_page(text, kind, trail=trail),
         "history": None,
     }
     if not path.exists():
@@ -3926,11 +4170,7 @@ def maintain_people_page(
             old_updated = str(split_people_page(current)[0].get("updated") or "undated")
         except ValueError:
             old_updated = "undated"
-        history = path.parent / ".history" / slug / f"{old_updated}.md"
-        suffix = 2
-        while history.exists():
-            history = history.with_name(f"{old_updated}-{suffix}.md")
-            suffix += 1
+        history = page_history_path(path, slug, old_updated)
         result.update(action="updated", history=str(history))
         if not dry_run:
             write_text(history, current)
@@ -3940,15 +4180,366 @@ def maintain_people_page(
     return result
 
 
-def cmd_maintain_page(args: argparse.Namespace) -> None:
-    text = read_text(Path(args.input_file).expanduser())
-    result = maintain_people_page(
-        args.slug,
-        text,
-        base_sha256=args.base_sha256,
-        dry_run=bool(args.dry_run),
-        kind=args.kind,
+def new_trail_text(slug: str, page_text: str) -> str:
+    """The head of a new trail: which page it belongs to and how it is written."""
+    name = split_people_page(page_text)[0].get("name") or slug
+    return (
+        f"---\npage: {slug}\n---\n\n# {name} · 轨迹\n\n"
+        f"> 一天一节，只追加，不改旧的；更正写进新的一节。现状和判断清单在 [[{slug}]]。\n"
     )
+
+
+def write_page_day(
+    slug: str,
+    day: str,
+    body: str,
+    page_text: Optional[str] = None,
+    base_sha256: Optional[str] = None,
+    dry_run: bool = False,
+    kind: str = "people",
+) -> Dict[str, object]:
+    """Write one day's section of a page's trail.
+
+    The page is rewritten too when `page_text` is given; otherwise only its
+    counts follow the trail. Everything is checked before anything is written,
+    and no other day's section changes.
+    """
+    path = people_page_path(slug, kind)
+    trail_path = page_trail_path(slug, kind)
+    day = parse_date_str(day).isoformat()
+    body = body.strip("\n")
+    heading = TRAIL_DAY_RE.match(body.split("\n", 1)[0])
+    if heading:
+        if heading.group(1) != day:
+            raise ValueError(f"the section is headed {heading.group(1)}, not {day}")
+        body = body.partition("\n")[2].strip("\n")
+    problems = trail_day_problems(day, body)
+    if problems:
+        raise ValueError("trail section is invalid:\n- " + "\n- ".join(problems))
+
+    current_page = read_text(path) if path.exists() else None
+    if trail_path.exists():
+        trail = read_text(trail_path)
+    elif current_page is not None:
+        raise ValueError(f"{path.name} has no trail yet; split it first with migrate-page-trail")
+    elif page_text is None:
+        raise ValueError(f"{path.name} does not exist; pass --input-file to create the page with its trail")
+    else:
+        trail = new_trail_text(slug, page_text)
+    if page_text is not None and current_page is not None:
+        current_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        if base_sha256 is None:
+            raise ValueError(
+                f"{path.name} exists; pass --base-sha256 with the sha256 of the version you read "
+                f"(shasum -a 256 {shlex.quote(str(path))})"
+            )
+        if base_sha256 != current_sha:
+            raise ValueError(
+                f"{path.name} changed since it was read (now {current_sha[:12]}); read it again before rewriting"
+            )
+
+    new_trail, replaced = trail_with_day(trail, day, body)
+    new_page = fill_page_support(page_text if page_text is not None else current_page, new_trail)  # type: ignore[arg-type]
+    stats = validate_people_page(new_page, kind, trail=new_trail)
+    if replaced == f"## {day}\n\n{body}":
+        trail_action = "no-op"
+    elif replaced is not None:
+        trail_action = "replaced"
+    else:
+        trail_action = "added" if trail_path.exists() else "created"
+    if current_page is None:
+        page_action = "created"
+    elif new_page == current_page:
+        page_action = "unchanged"
+    else:
+        page_action = "rewritten" if page_text is not None else "counts refreshed"
+    result: Dict[str, object] = {
+        "slug": slug,
+        "kind": kind,
+        "day": day,
+        "dry_run": dry_run,
+        "trail": str(trail_path),
+        "trail_action": trail_action,
+        "page_action": page_action,
+        **stats,
+        "history": [],
+    }
+    if dry_run:
+        return result
+    history: List[str] = []
+    if trail_action != "no-op":
+        if replaced is not None:
+            kept = page_history_path(path, slug, f"trail-{day}")
+            write_text(kept, replaced + "\n")
+            history.append(str(kept))
+        write_text(trail_path, new_trail)
+    if page_action != "unchanged":
+        if current_page is not None:
+            try:
+                old_updated = str(split_people_page(current_page)[0].get("updated") or "undated")
+            except ValueError:
+                old_updated = "undated"
+            kept = page_history_path(path, slug, old_updated)
+            write_text(kept, current_page)
+            history.append(str(kept))
+        write_text(path, new_page)
+    if read_text(trail_path) != new_trail or read_text(path) != new_page:
+        raise RuntimeError(f"read-back of {path.name} or its trail does not match what was written")
+    result["history"] = history
+    return result
+
+
+def trail_tail_plan(trail_path: Path, days: int = TRAIL_READ_DAYS) -> Optional[Dict[str, object]]:
+    """Where the last few days of a trail start, kept within one read."""
+    if not trail_path.exists():
+        return None
+    lines, sections = split_trail(read_text(trail_path))
+    if not sections:
+        return None
+    for count in range(min(days, len(sections)), 0, -1):
+        start = sections[-count][1]
+        size = len("\n".join(lines[start:]).encode("utf-8"))
+        if size <= READ_BUDGET_BYTES or count == 1:
+            break
+    shown = trail_path.relative_to(ROOT).as_posix() if trail_path.is_relative_to(ROOT) else str(trail_path)
+    return {"path": shown, "start": start + 1, "days": count, "bytes": size, "total_days": len(sections)}
+
+
+def quote_line_day(quote_line: str) -> Optional[str]:
+    """The date of the diary or trace a quote line cites."""
+    cut = quote_line.rfind(PEOPLE_QUOTE_SOURCE)
+    if cut < 0:
+        return None
+    link = quote_line[cut + len(PEOPLE_QUOTE_SOURCE):].split("]]", 1)[0].split("|", 1)[0]
+    m = PEOPLE_EVIDENCE_LINK_RE.match(link.strip())
+    return m.group(1) if m else None
+
+
+def migrate_page_to_trail(slug: str, text: str, plan: Dict[str, object], today: str) -> Dict[str, object]:
+    """Split a page that was rewritten whole into a page and a trail, dropping nothing.
+
+    Answer paragraphs that open with a date become that day's account; the plan
+    says where the others go ("page", "preamble" or a date). Each belief gets an
+    id in page order. Its quotes move to the day of the source they cite, and
+    the days named in its support note are the occasions that count, unless the
+    plan lists them. The old belief lines are kept verbatim at the head of the
+    trail. Every non-empty line of the old page must reappear in the new page or
+    the trail.
+    """
+    fields = split_people_page(text)[0]
+    lines = text.split("\n")
+    marks = {title: i for i, line in enumerate(lines) for title in ("答案", "证据", "悬着的") if line.strip() == f"## {title}"}
+    if sorted(marks, key=marks.get) != ["答案", "证据", "悬着的"]:  # type: ignore[arg-type]
+        raise ValueError("page needs ## 答案, ## 证据 and ## 悬着的, in that order")
+    head = lines[:marks["答案"]]
+    answer = lines[marks["答案"] + 1:marks["证据"]]
+    evidence = lines[marks["证据"] + 1:marks["悬着的"]]
+    tail = lines[marks["悬着的"]:]
+    year = str(fields.get("updated") or today)[:4]
+    paragraph_plan = {str(k): str(v) for k, v in dict(plan.get("paragraphs") or {}).items()}  # type: ignore[call-overload]
+    occasion_plan = dict(plan.get("occasions") or {})  # type: ignore[call-overload]
+    page_quotes = int(plan.get("page_quotes") or 0)  # type: ignore[call-overload]
+
+    paragraphs: List[List[str]] = []
+    for line in answer:
+        if not line.strip():
+            paragraphs.append([])
+        elif paragraphs and paragraphs[-1]:
+            paragraphs[-1].append(line)
+        else:
+            paragraphs.append([line])
+    paragraphs = [p for p in paragraphs if p]
+    undecided: List[str] = []
+    on_page: List[str] = []
+    preamble: List[str] = []
+    narrative: Dict[str, List[str]] = {}
+    for number, paragraph in enumerate(paragraphs, 1):
+        body = "\n".join(paragraph)
+        opening = re.match(r"^\[\[(\d{4}-\d{2}-\d{2})\]\]", paragraph[0])
+        target = paragraph_plan.get(str(number)) or (opening.group(1) if opening else None)
+        if target == "page":
+            on_page.append(body)
+        elif target == "preamble":
+            preamble.append(body)
+        elif target and re.fullmatch(r"\d{4}-\d{2}-\d{2}", target):
+            narrative.setdefault(parse_date_str(target).isoformat(), []).append(body)
+        else:
+            undecided.append(f"{number}: {paragraph[0][:40]}")
+    if undecided:
+        raise ValueError(
+            "the plan must place these answer paragraphs (page, preamble, or a date):\n- " + "\n- ".join(undecided)
+        )
+
+    intro: List[str] = []
+    beliefs: List[Dict[str, object]] = []
+    for line in evidence:
+        belief = PEOPLE_BELIEF_RE.match(line)
+        if belief:
+            beliefs.append({
+                "line": line,
+                "title": belief.group(1),
+                "stated": int(belief.group(2)),
+                "note": line[belief.end():],
+                "quotes": [],
+            })
+        elif PEOPLE_QUOTE_RE.match(line) and beliefs:
+            beliefs[-1]["quotes"].append(line.strip()[2:])  # type: ignore[union-attr]
+        elif line.strip() and not beliefs:
+            intro.append(line)
+        elif line.strip():
+            raise ValueError(f"evidence line is neither a belief nor a quote: {line[:60]}")
+
+    occasions: Dict[str, List[Tuple[int, bool, str, List[str]]]] = {}
+    mismatches: List[Dict[str, object]] = []
+    belief_lines: List[str] = []
+    for key, belief in enumerate(beliefs, 1):
+        by_day: Dict[str, List[str]] = {}
+        for quote in belief["quotes"]:  # type: ignore[union-attr]
+            day = quote_line_day(quote)
+            if day is None:
+                raise ValueError(f"{belief['title']}: quote without a dated source: {quote[:60]}")
+            by_day.setdefault(day, []).append(quote)
+        planned = occasion_plan.get(f"J{key}") or {}
+        anchors = dict(planned.get("anchors") or {})  # type: ignore[union-attr]
+        if planned.get("count") is not None:  # type: ignore[union-attr]
+            counted = [parse_date_str(str(day)).isoformat() for day in planned["count"]]  # type: ignore[index]
+        else:
+            named = []
+            for month, dom in re.findall(r"(?<![\d-])(\d{2})-(\d{2})(?![\d-])", str(belief["note"])):
+                if 1 <= int(month) <= 12 and 1 <= int(dom) <= 31 and f"{year}-{month}-{dom}" not in named:
+                    named.append(f"{year}-{month}-{dom}")
+            counted = named or list(by_day)
+        if len(counted) != belief["stated"]:
+            mismatches.append({
+                "id": f"J{key}",
+                "title": belief["title"],
+                "stated": belief["stated"],
+                "counted": counted,
+                "quote_days": sorted(by_day),
+            })
+        for day in sorted(set(counted) | set(by_day)):
+            quotes = by_day.get(day, [])
+            note = str(belief["title"])
+            unquoted = f"{note}（拆页时按旧页的支持说明记这一次，没有摘原话）[[{anchors.get(day, day)}]]"
+            occasions.setdefault(day, []).append((key, day in counted, note if quotes else unquoted, quotes))
+            # A day the plan lists more than once held that many separate occasions.
+            for _ in range(counted.count(day) - 1):
+                occasions[day].append((key, True, unquoted.replace("记这一次", "记同一天的另一次"), []))
+        belief_lines.append(f"- **{belief['title']}** · J{key} · 支持 0")
+        belief_lines += [f"  - {quote}" for quote in belief["quotes"][:page_quotes]]  # type: ignore[index]
+
+    trail_lines = new_trail_text(slug, text).split("\n")
+    for body in preamble:
+        trail_lines += [body, ""]
+    trail_lines += [
+        "## 拆页前的判断清单",
+        "",
+        f"> {today} 把整页拆成页和轨迹时，旧页「证据」里每条判断的原文，按 J1、J2… 的顺序，留作回查。",
+        "",
+    ]
+    for key, belief in enumerate(beliefs, 1):
+        trail_lines += [f"J{key}", str(belief["line"])]
+    trail_lines.append("")
+    trail = "\n".join(trail_lines)
+    for day in sorted(set(narrative) | set(occasions)):
+        section: List[str] = []
+        for body in narrative.get(day, []):
+            section += [body, ""]
+        for key, counts, note, quotes in sorted(occasions.get(day, []), key=lambda item: item[0]):
+            section.append(f"- **J{key}{'' if counts else '+'}** {note}")
+            section += [f"  - {quote}" for quote in quotes]
+        trail = trail_with_day(trail, day, "\n".join(section).strip("\n"))[0]
+
+    page_lines = head + ["## 答案", ""]
+    for body in on_page:
+        page_lines += [body, ""]
+    page_lines += ["## 证据", ""] + (intro + [""] if intro else []) + belief_lines + [""] + tail
+    page = fill_page_support("\n".join(page_lines), trail)
+
+    kept = {line.rstrip() for line in (page + "\n" + trail).split("\n")}
+    lost = [line for line in lines if line.strip() and line.rstrip() not in kept]
+    problems: List[str] = []
+    trail_all, sections = split_trail(trail)
+    for day, start, end in sections:
+        problems += trail_day_problems(day, "\n".join(trail_all[start + 1:end]))
+    stats: Dict[str, int] = {}
+    try:
+        stats = validate_people_page(page, trail=trail)
+    except ValueError as exc:
+        problems += str(exc).replace(TRAIL_PAGE_HINT, "").split("\n- ")[1:]
+    return {
+        "page": page,
+        "trail": trail,
+        "lost_lines": lost,
+        "mismatches": mismatches,
+        "problems": problems,
+        "stats": stats,
+        "bytes": {
+            "old_page": len(text.encode("utf-8")),
+            "page": len(page.encode("utf-8")),
+            "trail": len(trail.encode("utf-8")),
+        },
+    }
+
+
+def cmd_migrate_page_trail(args: argparse.Namespace) -> None:
+    path = people_page_path(args.slug)
+    trail_path = page_trail_path(args.slug)
+    if not path.exists():
+        raise FileNotFoundError(f"page not found: {path}")
+    if trail_path.exists():
+        raise ValueError(f"{trail_path.name} already exists; this page has been split")
+    text = read_text(path)
+    plan = json.loads(read_text(Path(args.plan).expanduser())) if args.plan else {}
+    result = migrate_page_to_trail(args.slug, text, plan, datetime.now().date().isoformat())
+    page, trail = str(result.pop("page")), str(result.pop("trail"))
+    blocked = bool(result["lost_lines"] or result["mismatches"] or result["problems"])
+    result["dry_run"] = bool(args.dry_run)
+    if args.out_dir:
+        out = Path(args.out_dir).expanduser()
+        out.mkdir(parents=True, exist_ok=True)
+        write_text(out / path.name, page)
+        write_text(out / trail_path.name, trail)
+        result["written_to"] = str(out)
+    elif not args.dry_run:
+        if blocked:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            raise ValueError("nothing written: resolve lost lines, count mismatches and problems first (see the plan file)")
+        old_updated = str(split_people_page(text)[0].get("updated") or "undated")
+        history = page_history_path(path, args.slug, old_updated)
+        write_text(history, text)
+        write_text(trail_path, trail)
+        write_text(path, page)
+        if read_text(path) != page or read_text(trail_path) != trail:
+            raise RuntimeError(f"read-back of {path.name} or its trail does not match what was written")
+        result["history"] = str(history)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_maintain_page(args: argparse.Namespace) -> None:
+    page_text = read_text(Path(args.input_file).expanduser()) if args.input_file else None
+    if bool(args.day) != bool(args.day_file):
+        raise ValueError("--day and --day-file go together")
+    if args.day:
+        result = write_page_day(
+            args.slug,
+            args.day,
+            read_text(Path(args.day_file).expanduser()),
+            page_text=page_text,
+            base_sha256=args.base_sha256,
+            dry_run=bool(args.dry_run),
+            kind=args.kind,
+        )
+    elif page_text is None:
+        raise ValueError("pass --input-file (the page), or --day with --day-file (one trail section), or both")
+    else:
+        result = maintain_people_page(
+            args.slug,
+            page_text,
+            base_sha256=args.base_sha256,
+            dry_run=bool(args.dry_run),
+            kind=args.kind,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -3968,7 +4559,7 @@ def pages_mentioned(target: date) -> List[Dict[str, object]]:
         for kind in PAGE_KINDS
         if page_dir(kind).is_dir()
         for p in sorted(page_dir(kind).glob("*.md"))
-        if p.name != "00-index.md"
+        if p.name != "00-index.md" and not p.stem.endswith(TRAIL_SUFFIX)
     ]
     if not pages:
         return []
@@ -4003,6 +4594,14 @@ def format_pages_mentioned(found: List[Dict[str, object]]) -> List[str]:
         for item in of_kind:
             if "error" in item:
                 lines.append(f"{spec['label']} page {item['slug']} could not be read: {item['error']}")
+        for item in readable:
+            page = Path(str(item["path"]))
+            tail = trail_tail_plan(page.with_name(f"{page.stem}{TRAIL_SUFFIX}.md"))
+            if tail:
+                lines.append(
+                    f"- {item['slug']} has a trail: after the page, read {tail['path']} lines {tail['start']}-end "
+                    f"(last {tail['days']} of {tail['total_days']} days, {tail['bytes']:,} bytes)"
+                )
     return lines
 
 
@@ -6546,10 +7145,19 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("maintain-page")
     s.add_argument("--kind", choices=list(PAGE_KINDS), default="people", help="people (journal/people/) or books (journal/books/).")
     s.add_argument("--slug", required=True, help="Page file name under the kind's folder, lowercase kebab-case.")
-    s.add_argument("--input-file", required=True, help="The complete rewritten page.")
+    s.add_argument("--input-file", help="The complete rewritten page.")
     s.add_argument("--base-sha256", help="sha256 of the page as it was read; required to rewrite an existing page.")
+    s.add_argument("--day", help="Write this day's section of the page's trail (YYYY-MM-DD); needs --day-file.")
+    s.add_argument("--day-file", help="The day's trail section: the account, then `- **J12** note` occasions with quotes.")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_maintain_page)
+
+    s = sub.add_parser("migrate-page-trail")
+    s.add_argument("--slug", required=True, help="The people page to split into a page and a trail.")
+    s.add_argument("--plan", help="JSON: where undated answer paragraphs go, and which days count for a belief.")
+    s.add_argument("--out-dir", help="Write the two files here for review instead of into the vault.")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_migrate_page_trail)
 
     s = sub.add_parser("append-insight")
     s.add_argument("--date", required=True)
