@@ -1,6 +1,6 @@
 # Life Copilot v4.7 RFC
 
-> Status: in progress. Henry approved the design and its first four steps on 2026-10-04; each step is marked in Migration as it lands.
+> Status: in progress. Steps 1 to 4 landed on 2026-10-04 at Henry's request; the week of observation runs to 2026-10-11.
 > Date: 2026-10-04
 > Extends: [[life-copilot-v4.5-rfc]], [[life-copilot-v4.6-rfc]]
 
@@ -86,10 +86,10 @@ The diary and traces remain the source of truth. Book pages keep their in-page `
 
 Each step is one commit. If work stops between two steps, Diary Mode still runs.
 
-1. **Code and tests**: trail sections, the `--day` write, count refresh, the read-plan line, `migrate-page-trail`. No page has a trail yet, so behaviour does not change.
-2. **Pilot**: migrate the largest page with a dry run first. Henry reads the result before it is applied. `00-index.md` describes both shapes from this step on.
-3. **AGENTS.md**: manual L2 commit.
-4. **diary-mode.md**: candidate, review, `promote-system-rule`.
+1. **Code and tests**: trail sections, the `--day` write, count refresh, the read-plan line, `migrate-page-trail`. No page has a trail yet, so behaviour does not change. Done (392b54b).
+2. **Pilot**: migrate the largest page with a dry run first. Henry reads the result before it is applied. `00-index.md` describes both shapes from this step on. Done 2026-10-04: the page and trail written to the vault are byte-identical to the dry run Henry read; the old page and the plan file are in its `.history/` folder.
+3. **AGENTS.md**: manual L2 commit. Done (5bd932f).
+4. **diary-mode.md**: candidate, review, `promote-system-rule`. Done: `page-maintenance-follows-the-page-index` (d7f7e10), on probation until 2026-10-11; the prompt is 69 bytes shorter.
 5. **Observe for a week**, then migrate the next-largest page and decide on the rest; book pages after that.
 
 ## Pilot dry run (2026-10-04)

@@ -8,7 +8,7 @@ Design records for Life Copilot. The rules an agent follows live in `AGENTS.md` 
 | [[life-copilot-v4.4-rfc]] | implemented 2026-07-25 | One merged Chat capture, an explicit bedtime close, constrained rule evolution |
 | [[life-copilot-v4.5-rfc]] | implemented 2026-09-22, except the chat-mode promotion | Read budget, people pages, closing-greeting rules moved out of memory |
 | [[life-copilot-v4.6-rfc]] | in progress | Book pages: a people page for a book, plus a linked reading trail |
-| [[life-copilot-v4.7-rfc]] | in progress | A page and its trail: the page holds what changes and fits in one read, a dated append-only trail holds what accumulates |
+| [[life-copilot-v4.7-rfc]] | in progress: code, pilot page and rules landed 2026-10-04, observing until 2026-10-11 | A page and its trail: the page holds what changes and fits in one read, a dated append-only trail holds what accumulates |
 
 ## Conventions
 
