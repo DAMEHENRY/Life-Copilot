@@ -14,6 +14,7 @@ quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -89,6 +90,11 @@ OPENCLAW_SSH_HOST = os.environ.get("LIFE_OPENCLAW_SSH_HOST", "mechrevo")
 OPENCLAW_WSL_DISTRO = os.environ.get("LIFE_OPENCLAW_WSL_DISTRO", "Ubuntu")
 OPENCLAW_WSL_USER = os.environ.get("LIFE_OPENCLAW_WSL_USER", "henry")
 OPENCLAW_SESSIONS_DIR = "/home/henry/.openclaw/agents/main/sessions"
+# Since OpenClaw 2026.9 the session index and the live transcripts are rows in
+# the agent database; ``sessions.json`` and ``<id>.jsonl`` are gone. The JSONL
+# files that upgrade imported were moved, renamed, into the import archive.
+OPENCLAW_AGENT_DB = "/home/henry/.openclaw/agents/main/agent/openclaw-agent.sqlite"
+OPENCLAW_IMPORT_ARCHIVE_DIR = "/home/henry/.openclaw/agents/main/session-sqlite-import-archive"
 OPENCLAW_DIRECT_CHANNEL_LABELS = {
     "telegram": "Telegram",
     "openclaw-weixin": "WeChat",
@@ -1845,6 +1851,339 @@ def list_openclaw_remote_direct_session_paths(
     )
 
 
+# Runs on the OpenClaw host with nothing but the standard library and prints
+# one JSON document. It opens the database read-only and never writes a file.
+# Records are filtered there, a day either side of the requested one, so a
+# night's import does not haul months of tool output across the link; the
+# exact day filter stays on this side. zstd payloads come back untouched,
+# because the host's Python cannot decompress them.
+OPENCLAW_STORE_READER = r"""
+import base64, json, os, re, sqlite3, sys
+from datetime import datetime
+
+P = json.loads(base64.b64decode(PARAMS_B64))
+DAY_MS = 86400000
+LO, HI = P["lo_ms"] - DAY_MS, P["hi_ms"] + DAY_MS
+CHANNELS = P["channels"]
+IMPORTED = re.compile(
+    r"^.+?\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"\.jsonl\.imported-(\d{10,})$", re.I)
+COMPRESSED = re.compile(
+    r"^([0-9a-f-]{36})\.jsonl\.(?:reset|deleted)\.(\d{4}-\d{2}-\d{2})T.*\.zst$", re.I)
+out = {"version": 1, "store": False, "index": {}, "transcripts": [], "cold": []}
+
+
+def b64(data):
+    return base64.b64encode(data).decode("ascii")
+
+
+def direct_key(key):
+    # (channel, True for the owner's own chat / False for a sub-session of it)
+    for channel in CHANNELS:
+        prefix = "agent:main:%s:direct:" % channel
+        if isinstance(key, str) and key.startswith(prefix):
+            peer = key[len(prefix):]
+            return channel, bool(peer) and ":" not in peer
+    return None, False
+
+
+def message(text):
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return None, None
+    if not isinstance(record, dict) or record.get("type") != "message":
+        return None, None
+    body = record.get("message")
+    return (record, body) if isinstance(body, dict) else (None, None)
+
+
+def in_window(record):
+    try:
+        stamp = datetime.fromisoformat(str(record.get("timestamp")).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return LO <= stamp.timestamp() * 1000 < HI
+
+
+def compressed_kind(navigation_json):
+    # A compressed event keeps its type and role readable beside the payload.
+    try:
+        navigation = json.loads(navigation_json)["navigation"]
+        return navigation.get("type"), (navigation.get("message") or {}).get("role")
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return None, None
+
+
+def sniff_channel(con, session_id):
+    query = (
+        "select event_json from transcript_events where session_id = ?"
+        " and event_json like '%sourceChannel%' order by seq limit 50"
+    )
+    for (text,) in con.execute(query, (session_id,)):
+        _, body = message(text)
+        if body is not None and body.get("sourceChannel") in CHANNELS:
+            return body["sourceChannel"]
+    return None
+
+
+def read_store(path):
+    published = set()
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=20)
+    try:
+        con.execute("pragma query_only = on")
+        tables = set(row[0] for row in con.execute(
+            "select name from sqlite_master where type = 'table'"))
+        if not {"session_nodes", "session_windows", "transcript_events"} <= tables:
+            return published
+        out["store"] = True
+        for key, session_id in con.execute(
+                "select session_key, current_session_id from session_nodes"):
+            out["index"][key] = session_id
+        windows = con.execute(
+            "select session_id, session_key, coalesce(updated_at, 0),"
+            " coalesce(transcript_updated_at, 0) from session_windows").fetchall()
+        for session_id, key, updated, transcript_updated in windows:
+            # A window last touched before the day began holds none of it.
+            if max(updated, transcript_updated) < LO:
+                continue
+            channel, own = direct_key(key)
+            if channel and not own:
+                continue
+            if not channel:
+                channel = sniff_channel(con, session_id)
+                if channel is None:
+                    continue
+            rows = []
+            events = con.execute(
+                "select event_json, event_zstd, navigation_json from transcript_events"
+                " where session_id = ? and created_at >= ? and created_at < ? order by seq",
+                (session_id, LO, HI))
+            for event_json, event_zstd, navigation_json in events:
+                if event_json is not None:
+                    _, body = message(event_json)
+                    if body is not None and body.get("role") in ("user", "assistant"):
+                        rows.append(["j", event_json])
+                else:
+                    kind, role = compressed_kind(navigation_json)
+                    if kind in (None, "message") and role in (None, "user", "assistant"):
+                        rows.append(["z", b64(event_zstd)])
+            if rows:
+                out["transcripts"].append({
+                    "origin": "store", "session_id": session_id, "channel": channel,
+                    "name": key, "rows": rows})
+        if "session_transcript_archives" in tables:
+            # A reset or delete leaves the whole transcript here as one blob.
+            archives = con.execute(
+                "select session_id, session_key, encoding, archive_name, archive_blob"
+                " from session_transcript_archives where created_at >= ?", (LO,))
+            for session_id, key, encoding, name, blob in archives:
+                channel, own = direct_key(key)
+                if channel and not own:
+                    continue
+                published.add(name)
+                out["transcripts"].append({
+                    "origin": "store-archive", "session_id": session_id, "channel": channel,
+                    "name": name, "encoding": encoding, "blob": b64(blob)})
+        if "session_transcript_cold_archives" in tables:
+            cold = con.execute(
+                "select c.session_id, c.archive_name, w.session_key, coalesce(w.updated_at, 0)"
+                " from session_transcript_cold_archives c"
+                " join session_windows w on w.session_id = c.session_id")
+            for session_id, name, key, updated in cold:
+                channel, own = direct_key(key)
+                if updated >= LO and not (channel and not own):
+                    out["cold"].append({"session_id": session_id, "name": name, "direct": own})
+    finally:
+        con.close()
+    return published
+
+
+def listing(directory):
+    try:
+        return sorted(os.listdir(directory))
+    except OSError:
+        return []
+
+
+def read_imported(directory):
+    for name in listing(directory):
+        found = IMPORTED.match(name)
+        if not found:
+            continue
+        path = os.path.join(directory, name)
+        try:
+            # Imported files never change again; the margin covers timezones.
+            if os.path.getmtime(path) * 1000 < LO - DAY_MS:
+                continue
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except FileNotFoundError:
+            continue
+        if b"sourceChannel" not in data:
+            continue
+        channel, rows = None, []
+        for line in data.decode("utf-8", "replace").splitlines():
+            record, body = message(line)
+            if body is None:
+                continue
+            if channel is None and body.get("sourceChannel") in CHANNELS:
+                channel = body["sourceChannel"]
+            if body.get("role") in ("user", "assistant") and in_window(record):
+                rows.append(["j", line])
+        if channel and rows:
+            out["transcripts"].append({
+                "origin": "imported", "session_id": found.group(1), "channel": channel,
+                "name": name, "rows": rows})
+
+
+def read_compressed(directory, published):
+    for name in listing(directory):
+        found = COMPRESSED.match(name)
+        if not found or name in published or found.group(2) < P["closed_before"]:
+            continue
+        try:
+            with open(os.path.join(directory, name), "rb") as handle:
+                data = handle.read()
+        except FileNotFoundError:
+            continue
+        out["transcripts"].append({
+            "origin": "archive-file", "session_id": found.group(1), "channel": None,
+            "name": name, "encoding": "zstd", "blob": b64(data)})
+
+
+published = read_store(P["db"]) if os.path.exists(P["db"]) else set()
+read_imported(P["import_dir"])
+read_compressed(P["sessions_dir"], published)
+sys.stdout.write(json.dumps(out))
+"""
+
+
+def read_openclaw_store(d: date, timeout: int = 180, attempts: int = 3) -> dict:
+    """Read what OpenClaw 2026.9+ keeps outside plain session files for day ``d``.
+
+    That is the session index and the live transcripts in the agent database,
+    transcripts a reset or delete left there or as a compressed file, and the
+    JSONL files the upgrade imported and moved aside. ``store`` is false on a
+    host that still runs the file-only layout. Still read-only: the host runs
+    ``OPENCLAW_STORE_READER`` from stdin and only prints.
+    """
+    day_start = datetime.combine(d, datetime.min.time()).astimezone()
+    day_end = datetime.combine(d + timedelta(days=1), datetime.min.time()).astimezone()
+    params = {
+        "db": OPENCLAW_AGENT_DB,
+        "sessions_dir": OPENCLAW_SESSIONS_DIR,
+        "import_dir": OPENCLAW_IMPORT_ARCHIVE_DIR,
+        "channels": sorted(OPENCLAW_DIRECT_CHANNEL_LABELS),
+        "lo_ms": int(day_start.timestamp() * 1000),
+        "hi_ms": int(day_end.timestamp() * 1000),
+        # Same margin as openclaw_archive_closed_before.
+        "closed_before": (d - timedelta(days=1)).isoformat(),
+    }
+    encoded = base64.b64encode(json.dumps(params).encode("utf-8")).decode("ascii")
+    script = f'PARAMS_B64 = "{encoded}"\n{OPENCLAW_STORE_READER}'
+    command = openclaw_ssh_command("python3", "-")
+    failures: List[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                command,
+                input=script.encode("utf-8"),
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(str(exc))
+        else:
+            if result.returncode == 0:
+                try:
+                    payload = json.loads(result.stdout.decode("utf-8"))
+                except ValueError as exc:
+                    # A truncated or mangled reply is a transport failure.
+                    failures.append(f"unreadable reply: {exc}")
+                else:
+                    if isinstance(payload, dict) and payload.get("version") == 1:
+                        return payload
+                    failures.append("unexpected reply from the store reader")
+            else:
+                stderr = result.stderr.decode("utf-8", "replace").strip()
+                failures.append(stderr.splitlines()[-1] if stderr else f"ssh exited {result.returncode}")
+        if attempt < attempts:
+            time.sleep(attempt)
+    detail = failures[-1] if failures else "unknown SSH failure"
+    raise OpenClawImportUnavailable(
+        f"cannot read the OpenClaw session store from {OPENCLAW_SSH_HOST} "
+        f"after {attempts} attempts: {detail}"
+    )
+
+
+def openclaw_zstd_decompress(data: bytes) -> bytes:
+    """Decompress a zstd payload with whatever this machine has for it.
+
+    OpenClaw 2026.9 compresses every event over about 2 KB, which includes
+    Kai's longer replies, so a missing decoder must stop the import rather
+    than drop them.
+    """
+    try:
+        from compression import zstd as stdlib_zstd  # Python 3.14+
+    except ImportError:
+        stdlib_zstd = None
+    try:
+        if stdlib_zstd is not None:
+            return stdlib_zstd.decompress(data)
+        try:
+            import zstandard
+        except ImportError:
+            zstandard = None
+        if zstandard is not None:
+            return zstandard.ZstdDecompressor().decompressobj().decompress(data)
+    except Exception as exc:  # each decoder has its own error type
+        raise OpenClawImportUnavailable(f"corrupt zstd payload from OpenClaw: {exc}") from exc
+    binary = shutil.which("zstd") or next(
+        (path for path in ("/opt/homebrew/bin/zstd", "/usr/local/bin/zstd") if Path(path).exists()),
+        None,
+    )
+    if binary is None:
+        raise OpenClawImportUnavailable(
+            "OpenClaw compresses long messages with zstd and this Python cannot read them; "
+            "install the 'zstandard' package or the zstd command"
+        )
+    result = subprocess.run([binary, "-dc"], input=data, capture_output=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise OpenClawImportUnavailable(f"corrupt zstd payload from OpenClaw: {detail}")
+    return result.stdout
+
+
+def openclaw_store_transcript_text(entry: dict) -> str:
+    """Rebuild the JSONL text of one transcript returned by the store reader."""
+    if "blob" in entry:
+        data = base64.b64decode(entry["blob"])
+        if entry.get("encoding") == "zstd":
+            data = openclaw_zstd_decompress(data)
+        return data.decode("utf-8", "replace")
+    lines: List[str] = []
+    for kind, payload in entry.get("rows") or []:
+        if kind == "z":
+            payload = openclaw_zstd_decompress(base64.b64decode(payload)).decode("utf-8", "replace")
+        lines.append(payload)
+    return "\n".join(lines)
+
+
+def openclaw_direct_session_peer(key: object) -> Optional[Tuple[str, str]]:
+    """Return (channel, peer) when ``key`` is the owner's direct chat with Kai."""
+    if not isinstance(key, str):
+        return None
+    for channel in OPENCLAW_DIRECT_CHANNEL_LABELS:
+        prefix = f"agent:main:{channel}:direct:"
+        if key.startswith(prefix):
+            peer = key[len(prefix):]
+            # Sub-sessions such as "<peer>:heartbeat" carry OpenClaw's own polls.
+            return (channel, peer) if peer and ":" not in peer else None
+    return None
+
+
 def openclaw_message_text(content: object) -> str:
     """Return visible message text while excluding thinking and tool payloads."""
     if isinstance(content, str):
@@ -1988,41 +2327,55 @@ def export_openclaw_day_transcript(
 ) -> Tuple[str, int, int]:
     """Read retained Telegram/WeChat direct sessions and build a daily Kai trace.
 
-    Active direct chats are discovered from ``sessions.json``. Retained JSONL
-    files are also scanned because lifecycle resets and database rebuilds can
-    remove historical chats from the active index without deleting transcripts.
-    Group/heartbeat, cron, explicit test, and trajectory files remain excluded.
-    ``retained`` collects (session id, JSONL text) for every file read, so the
-    writeback can check the existing trace against them without another SSH
-    round trip.
+    Up to OpenClaw 2026.7 active direct chats are discovered from
+    ``sessions.json`` and read from ``<id>.jsonl``; from 2026.9 on both live in
+    the agent database, which ``read_openclaw_store`` reads. Retained JSONL
+    files are scanned under either layout because lifecycle resets and
+    database rebuilds can remove historical chats from the active index
+    without deleting transcripts. A session reached through more than one of
+    these is archived once. Group/heartbeat, cron, explicit test, and
+    trajectory files remain excluded.
+    ``retained`` collects (session id, JSONL text) for every transcript read,
+    so the writeback can check the existing trace against them without another
+    SSH round trip.
     """
+    store = read_openclaw_store(d)
     index_path = f"{OPENCLAW_SESSIONS_DIR}/sessions.json"
     try:
         index = json.loads(read_openclaw_remote_text(index_path))
+    except OpenClawRemoteFileMissing:
+        if not store.get("store"):
+            raise
+        index = {}
     except json.JSONDecodeError as exc:
         raise OpenClawImportUnavailable("OpenClaw sessions.json is malformed") from exc
     if not isinstance(index, dict):
         raise OpenClawImportUnavailable("OpenClaw sessions.json is not an object")
 
+    cold = [entry for entry in store.get("cold") or [] if isinstance(entry, dict)]
+    cold_direct = sorted(str(entry.get("name")) for entry in cold if entry.get("direct"))
+    if cold_direct:
+        raise OpenClawImportUnavailable(
+            "OpenClaw moved a direct chat that may cover this day into a cold "
+            f"archive, which this importer cannot read yet: {', '.join(cold_direct)}"
+        )
+    if cold:
+        print(
+            f"  note: {len(cold)} OpenClaw session(s) with no channel in their key "
+            "were moved to a cold archive and not inspected"
+        )
+
     candidates: Dict[str, Tuple[str, str]] = {}
     owner_targets: set[str] = set()
+    for key in store.get("index") or {}:
+        direct = openclaw_direct_session_peer(key)
+        if direct:
+            owner_targets.add(direct[1])
     for key, metadata in index.items():
-        if not isinstance(key, str):
+        direct = openclaw_direct_session_peer(key)
+        if direct is None:
             continue
-        channel = next(
-            (
-                channel_id
-                for channel_id in OPENCLAW_DIRECT_CHANNEL_LABELS
-                if key.startswith(f"agent:main:{channel_id}:direct:")
-            ),
-            None,
-        )
-        if channel is None:
-            continue
-        peer = key[len(f"agent:main:{channel}:direct:"):]
-        # Sub-sessions such as "<peer>:heartbeat" carry OpenClaw's own polls.
-        if not peer or ":" in peer:
-            continue
+        channel, peer = direct
         owner_targets.add(peer)
         if not isinstance(metadata, dict):
             continue
@@ -2042,8 +2395,8 @@ def export_openclaw_day_transcript(
 
     session_texts = read_openclaw_remote_texts(sorted(candidates))
 
-    grouped: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
-    seen_messages: set[Tuple[str, str, str, str, str]] = set()
+    # (session id, channel when the index names it, JSONL text)
+    transcripts: List[Tuple[str, str, str]] = []
     for session_path, (session_id, indexed_channel) in sorted(candidates.items()):
         raw = session_texts.get(session_path)
         if raw is None:
@@ -2059,6 +2412,19 @@ def export_openclaw_day_transcript(
                 "transcript yet (no messages since it was created); skipped"
             )
             continue
+        transcripts.append((session_id, indexed_channel, raw))
+    for entry in store.get("transcripts") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("session_id"), str):
+            continue
+        transcripts.append((
+            entry["session_id"],
+            str(entry.get("channel") or ""),
+            openclaw_store_transcript_text(entry),
+        ))
+
+    grouped: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
+    seen_messages: set[Tuple[str, str, str, str, str]] = set()
+    for session_id, indexed_channel, raw in transcripts:
         if retained is not None:
             retained.append((session_id, raw))
         channel = indexed_channel or openclaw_session_direct_channel(raw)

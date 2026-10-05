@@ -1,9 +1,15 @@
+import base64
 import io
 import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,7 +43,31 @@ def batched(remote_read):
     return read_many
 
 
+FILE_ONLY_STORE = {"version": 1, "store": False, "index": {}, "transcripts": [], "cold": []}
+
+
+def zstd_compress(data, content_size=True):
+    """Compress a fixture, or return None when this machine has no zstd."""
+    try:
+        import zstandard
+    except ImportError:
+        zstandard = None
+    if zstandard is not None:
+        return zstandard.ZstdCompressor(write_content_size=content_size).compress(data)
+    binary = shutil.which("zstd")
+    if binary is None:
+        return None
+    flags = ["-c"] if content_size else ["-c", "--no-content-size"]
+    return subprocess.run([binary, *flags], input=data, capture_output=True, check=True).stdout
+
+
 class TestOpenClawTranscript(unittest.TestCase):
+    def setUp(self):
+        # These tests describe a host on the file-only layout (OpenClaw <= 2026.7).
+        patcher = patch.object(copilot, "read_openclaw_store", return_value=dict(FILE_ONLY_STORE))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_remote_read_retries_transient_ssh_failure(self):
         failed = type("Result", (), {"returncode": 255, "stderr": "timed out"})()
         succeeded = type("Result", (), {"returncode": 0, "stdout": "contents"})()
@@ -694,6 +724,448 @@ class TestOpenClawTranscript(unittest.TestCase):
                 / "2026-07-26-codex-trace.md"
             )
             self.assertTrue(trace.exists())
+
+
+DAY = date(2026, 10, 5)
+SESSION = "99999999-9999-4999-8999-999999999999"
+OWNER_KEY = "agent:main:telegram:direct:100000001"
+
+
+def local_time(day, hour, minute=0):
+    return datetime.combine(day, datetime.min.time()).replace(hour=hour, minute=minute).astimezone()
+
+
+def stamp(moment):
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def millis(moment):
+    return int(moment.timestamp() * 1000)
+
+
+def owner_record(text, moment, channel="telegram"):
+    return json.dumps(
+        {
+            "type": "message",
+            "timestamp": stamp(moment),
+            "message": {
+                "role": "user",
+                "sourceChannel": channel,
+                "content": text,
+                "__openclaw": {"senderIsOwner": True},
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def kai_record(text, moment):
+    return record("assistant", [{"type": "text", "text": text}], stamp(moment))
+
+
+def sessions_json_is_gone(path):
+    raise copilot.OpenClawRemoteFileMissing(f"{path} does not exist")
+
+
+class TestOpenClawStoreExport(unittest.TestCase):
+    """Day export on a host whose sessions live in the agent database."""
+
+    def export(self, store, day=DAY):
+        with patch.object(copilot, "read_openclaw_store", return_value=store), \
+             patch.object(copilot, "read_openclaw_remote_text", side_effect=sessions_json_is_gone), \
+             patch.object(copilot, "read_openclaw_remote_texts", return_value={}), \
+             patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]):
+            retained = []
+            return (*copilot.export_openclaw_day_transcript(day, retained=retained), retained)
+
+    def test_day_export_reads_the_store_when_sessions_json_is_gone(self):
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "cold": [],
+            "transcripts": [
+                {
+                    "origin": "store",
+                    "session_id": SESSION,
+                    "channel": "telegram",
+                    "name": OWNER_KEY,
+                    "rows": [
+                        ["j", owner_record("下午到家了", local_time(DAY, 19, 34))],
+                        ["j", kai_record("到了就好。", local_time(DAY, 19, 35))],
+                        ["j", owner_record("明天的话", local_time(DAY + timedelta(days=1), 9))],
+                    ],
+                },
+            ],
+        }
+
+        text, message_count, session_count, retained = self.export(store)
+
+        self.assertEqual((message_count, session_count), (2, 1))
+        self.assertIn(f"### Kai / Telegram Session {SESSION}", text)
+        self.assertIn("Henry: 下午到家了", text)
+        self.assertIn("Kai: 到了就好。", text)
+        self.assertNotIn("明天的话", text)
+        self.assertEqual([session_id for session_id, _ in retained], [SESSION])
+
+    def test_session_held_by_store_and_imported_file_is_archived_once(self):
+        rows = [
+            ["j", owner_record("你好", local_time(DAY, 19, 34))],
+            ["j", kai_record("你好，Henry。", local_time(DAY, 19, 34))],
+        ]
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "cold": [],
+            "transcripts": [
+                {"origin": "store", "session_id": SESSION, "channel": "telegram", "rows": rows},
+                {"origin": "imported", "session_id": SESSION, "channel": "telegram", "rows": rows},
+            ],
+        }
+
+        text, message_count, session_count, _ = self.export(store)
+
+        self.assertEqual((message_count, session_count), (2, 1))
+        self.assertEqual(text.count("Henry: 你好"), 1)
+
+    def test_sends_to_the_owner_named_only_in_the_store_index_are_kept(self):
+        send = record(
+            "assistant",
+            [{
+                "type": "toolCall",
+                "name": "message",
+                "arguments": {"action": "send", "target": "100000001", "message": "到家了吗"},
+            }],
+            stamp(local_time(DAY, 20)),
+        )
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "cold": [],
+            "transcripts": [
+                {"origin": "store", "session_id": SESSION, "channel": "telegram", "rows": [["j", send]]},
+            ],
+        }
+
+        text, message_count, _, _ = self.export(store)
+
+        self.assertEqual(message_count, 1)
+        self.assertIn("Kai: 到家了吗", text)
+
+    def test_archive_without_a_known_channel_is_classified_by_its_content(self):
+        direct = "\n".join([
+            owner_record("重置前说的话", local_time(DAY, 10), channel="openclaw-weixin"),
+            kai_record("收到。", local_time(DAY, 10, 1)),
+        ])
+        cron = kai_record("索引任务完成", local_time(DAY, 7))
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {},
+            "cold": [],
+            "transcripts": [
+                {
+                    "origin": "store-archive",
+                    "session_id": "11111111-1111-1111-1111-111111111111",
+                    "channel": None,
+                    "encoding": "identity",
+                    "blob": base64.b64encode(direct.encode("utf-8")).decode("ascii"),
+                },
+                {
+                    "origin": "store-archive",
+                    "session_id": "22222222-2222-2222-2222-222222222222",
+                    "channel": None,
+                    "encoding": "identity",
+                    "blob": base64.b64encode(cron.encode("utf-8")).decode("ascii"),
+                },
+            ],
+        }
+
+        text, message_count, session_count, _ = self.export(store)
+
+        self.assertEqual((message_count, session_count), (2, 1))
+        self.assertIn("### Kai / WeChat Session 11111111-1111-1111-1111-111111111111", text)
+        self.assertNotIn("索引任务完成", text)
+
+    def test_compressed_rows_and_archives_are_decoded(self):
+        long_reply = kai_record("想听。" + "这一段路你慢慢讲。" * 300, local_time(DAY, 19, 38))
+        archived = "\n".join([
+            owner_record("重置前的一句", local_time(DAY, 9)),
+            kai_record("记下了。", local_time(DAY, 9, 1)),
+        ])
+        row = zstd_compress(long_reply.encode("utf-8"))
+        # Node writes archives as a stream, so the frame carries no content size.
+        blob = zstd_compress(archived.encode("utf-8"), content_size=False)
+        if row is None or blob is None:
+            self.skipTest("no zstd compressor on this machine")
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "cold": [],
+            "transcripts": [
+                {
+                    "origin": "store",
+                    "session_id": SESSION,
+                    "channel": "telegram",
+                    "rows": [
+                        ["j", owner_record("路上的事你想听吗", local_time(DAY, 19, 36))],
+                        ["z", base64.b64encode(row).decode("ascii")],
+                    ],
+                },
+                {
+                    "origin": "archive-file",
+                    "session_id": "33333333-3333-3333-3333-333333333333",
+                    "channel": None,
+                    "encoding": "zstd",
+                    "blob": base64.b64encode(blob).decode("ascii"),
+                },
+            ],
+        }
+
+        text, message_count, session_count, _ = self.export(store)
+
+        self.assertEqual((message_count, session_count), (4, 2))
+        self.assertIn("这一段路你慢慢讲。" * 300, text)
+        self.assertIn("Henry: 重置前的一句", text)
+
+    def test_corrupt_compressed_row_stops_the_import(self):
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "cold": [],
+            "transcripts": [
+                {
+                    "origin": "store",
+                    "session_id": SESSION,
+                    "channel": "telegram",
+                    "rows": [["z", base64.b64encode(b"not a zstd frame").decode("ascii")]],
+                },
+            ],
+        }
+
+        with self.assertRaises(copilot.OpenClawImportUnavailable):
+            self.export(store)
+
+    def test_cold_archived_direct_chat_stops_the_import(self):
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "transcripts": [],
+            "cold": [{"session_id": SESSION, "name": f"{SESSION}.cold", "direct": True}],
+        }
+
+        with self.assertRaisesRegex(copilot.OpenClawImportUnavailable, "cold archive"):
+            self.export(store)
+
+    def test_missing_index_still_fails_on_a_file_only_host(self):
+        with self.assertRaises(copilot.OpenClawRemoteFileMissing):
+            self.export(dict(FILE_ONLY_STORE))
+
+
+class TestOpenClawStoreReader(unittest.TestCase):
+    """Run the host-side reader here, against a database built for the test."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.db = root / "agent" / "openclaw-agent.sqlite"
+        self.sessions = root / "sessions"
+        self.imported = root / "session-sqlite-import-archive"
+        for directory in (self.db.parent, self.sessions, self.imported):
+            directory.mkdir(parents=True)
+        for name, value in (
+            ("OPENCLAW_AGENT_DB", str(self.db)),
+            ("OPENCLAW_SESSIONS_DIR", str(self.sessions)),
+            ("OPENCLAW_IMPORT_ARCHIVE_DIR", str(self.imported)),
+            # Stand in for ssh + wsl.exe: run the same script with this Python.
+            ("openclaw_ssh_command", lambda *args: [sys.executable, *args[1:]]),
+        ):
+            patcher = patch.object(copilot, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def build_database(self):
+        con = sqlite3.connect(self.db)
+        con.executescript(
+            """
+            create table session_nodes (session_key text primary key, current_session_id text not null);
+            create table session_windows (
+                session_id text primary key, session_key text not null,
+                updated_at integer, transcript_updated_at integer);
+            create table transcript_events (
+                session_id text not null, seq integer not null, event_json text,
+                created_at integer not null, event_zstd blob, navigation_json text,
+                primary key (session_id, seq));
+            create table session_transcript_archives (
+                session_id text, session_key text, encoding text, archive_blob blob,
+                archive_name text, created_at integer);
+            create table session_transcript_cold_archives (session_id text primary key, archive_name text);
+            """
+        )
+        return con
+
+    def add_session(self, con, session_id, key, events, updated):
+        con.execute("insert or replace into session_nodes values (?, ?)", (key, session_id))
+        con.execute(
+            "insert into session_windows values (?, ?, ?, ?)",
+            (session_id, key, millis(updated), millis(updated)),
+        )
+        for seq, (moment, event_json, event_zstd, navigation) in enumerate(events):
+            con.execute(
+                "insert into transcript_events values (?, ?, ?, ?, ?, ?)",
+                (session_id, seq, event_json, millis(moment), event_zstd, navigation),
+            )
+
+    def test_host_without_the_database_is_reported_as_file_only(self):
+        store = copilot.read_openclaw_store(DAY)
+
+        self.assertFalse(store["store"])
+        self.assertEqual(store["transcripts"], [])
+
+    def test_reader_returns_the_days_direct_chats_and_nothing_else(self):
+        noon = local_time(DAY, 12)
+        last_week = local_time(DAY - timedelta(days=7), 12)
+        tool_result = json.dumps({
+            "type": "message",
+            "timestamp": stamp(noon),
+            "message": {"role": "toolResult", "content": "tool output"},
+        })
+        compressed_reply = json.dumps({"navigation": {"type": "message", "message": {"role": "assistant"}}})
+        compressed_tool = json.dumps({"navigation": {"type": "message", "message": {"role": "toolResult"}}})
+        con = self.build_database()
+        self.add_session(con, SESSION, OWNER_KEY, [
+            (last_week, owner_record("上周的话", last_week), None, None),
+            (noon, json.dumps({"type": "session", "timestamp": stamp(noon)}), None, None),
+            (noon, owner_record("中午好", noon), None, None),
+            (noon, tool_result, None, None),
+            (noon, None, b"reply-frame", compressed_reply),
+            (noon, None, b"tool-frame", compressed_tool),
+        ], updated=noon)
+        self.add_session(con, "heartbeat-session", OWNER_KEY + ":heartbeat", [
+            (noon, owner_record("[OpenClaw heartbeat poll]", noon), None, None),
+        ], updated=noon)
+        self.add_session(con, "cron-session", "agent:main:cron:0001", [
+            (noon, kai_record("索引任务完成", noon), None, None),
+        ], updated=noon)
+        self.add_session(con, "recovered-session", "agent:main:recovered:0002", [
+            (noon, owner_record("索引丢了的微信对话", noon, channel="openclaw-weixin"), None, None),
+        ], updated=noon)
+        self.add_session(con, "stale-session", "agent:main:telegram:direct:200000002", [
+            (last_week, owner_record("早就结束的会话", last_week), None, None),
+        ], updated=last_week)
+        con.execute(
+            "insert into session_transcript_archives values (?, ?, ?, ?, ?, ?)",
+            ("reset-session", OWNER_KEY, "zstd", b"archive-frame", "reset-session.jsonl.reset.x.zst", millis(noon)),
+        )
+        con.execute(
+            "insert into session_transcript_archives values (?, ?, ?, ?, ?, ?)",
+            ("old-reset", OWNER_KEY, "zstd", b"old-frame", "old-reset.jsonl.reset.y.zst", millis(last_week)),
+        )
+        con.execute("insert into session_transcript_cold_archives values (?, ?)", (SESSION, "cold-name"))
+        con.commit()
+        con.close()
+
+        store = copilot.read_openclaw_store(DAY)
+
+        self.assertTrue(store["store"])
+        self.assertEqual(store["index"][OWNER_KEY], SESSION)
+        by_session = {entry["session_id"]: entry for entry in store["transcripts"]}
+        self.assertEqual(
+            sorted(by_session),
+            sorted(["recovered-session", "reset-session", SESSION]),
+        )
+        main = by_session[SESSION]
+        self.assertEqual((main["origin"], main["channel"]), ("store", "telegram"))
+        self.assertEqual([kind for kind, _ in main["rows"]], ["j", "z"])
+        self.assertIn("中午好", main["rows"][0][1])
+        self.assertEqual(base64.b64decode(main["rows"][1][1]), b"reply-frame")
+        self.assertEqual(by_session["recovered-session"]["channel"], "openclaw-weixin")
+        archive = by_session["reset-session"]
+        self.assertEqual((archive["origin"], archive["encoding"]), ("store-archive", "zstd"))
+        self.assertEqual(base64.b64decode(archive["blob"]), b"archive-frame")
+        self.assertEqual(store["cold"], [{"session_id": SESSION, "name": "cold-name", "direct": True}])
+
+    def test_reader_finds_imported_and_compressed_files(self):
+        noon = local_time(DAY, 12)
+        direct = "\n".join([owner_record("迁移前的对话", noon), kai_record("在。", noon)])
+        imported_name = f"agent_main_telegram_direct_100000001.{SESSION}.jsonl.imported-1790000000640"
+        (self.imported / imported_name).write_text(direct, encoding="utf-8")
+        cron_id = "44444444-4444-4444-4444-444444444444"
+        (self.imported / f"archive-tier.{cron_id}.jsonl.imported-1790000000650").write_text(
+            kai_record("索引任务完成", noon), encoding="utf-8"
+        )
+        # Trajectories and macOS resource forks share the directory.
+        (self.imported / f"agent_main_x.{SESSION}.trajectory.jsonl.imported-1790000000641").write_text(
+            direct, encoding="utf-8"
+        )
+        (self.imported / f"archive-tier.._{SESSION}.jsonl.imported-1790000000651").write_text(
+            direct, encoding="utf-8"
+        )
+        old_id = "55555555-5555-5555-5555-555555555555"
+        old = self.imported / f"archive-tier.{old_id}.jsonl.imported-1790000000652"
+        old.write_text(direct, encoding="utf-8")
+        week_ago = (local_time(DAY, 12) - timedelta(days=7)).timestamp()
+        os.utime(old, (week_ago, week_ago))
+
+        fresh_id = "66666666-6666-6666-6666-666666666666"
+        fresh = f"{fresh_id}.jsonl.reset.{DAY.isoformat()}T11-32-10.961Z.0123456789abcdef0123456789abcdef.zst"
+        (self.sessions / fresh).write_bytes(b"compressed-archive")
+        stale_id = "77777777-7777-7777-7777-777777777777"
+        (self.sessions / f"{stale_id}.jsonl.reset.2026-09-01T00-00-00.000Z.zst").write_bytes(b"stale")
+        (self.sessions / f"{stale_id}.jsonl.reset.{DAY.isoformat()}T00-00-00.000Z").write_text(direct, encoding="utf-8")
+
+        store = copilot.read_openclaw_store(DAY)
+
+        self.assertFalse(store["store"])
+        by_name = {entry["name"]: entry for entry in store["transcripts"]}
+        self.assertEqual(sorted(by_name), sorted([imported_name, fresh]))
+        self.assertEqual(
+            (by_name[imported_name]["origin"], by_name[imported_name]["session_id"], by_name[imported_name]["channel"]),
+            ("imported", SESSION, "telegram"),
+        )
+        self.assertEqual(len(by_name[imported_name]["rows"]), 2)
+        self.assertEqual(
+            (by_name[fresh]["origin"], by_name[fresh]["session_id"], by_name[fresh]["encoding"]),
+            ("archive-file", fresh_id, "zstd"),
+        )
+        self.assertEqual(base64.b64decode(by_name[fresh]["blob"]), b"compressed-archive")
+
+    def test_reader_output_feeds_the_day_export(self):
+        con = self.build_database()
+        self.add_session(con, SESSION, OWNER_KEY, [
+            (local_time(DAY, 19, 34), owner_record("你好", local_time(DAY, 19, 34)), None, None),
+            (local_time(DAY, 19, 35), kai_record("你好，Henry。", local_time(DAY, 19, 35)), None, None),
+        ], updated=local_time(DAY, 19, 35))
+        con.commit()
+        con.close()
+
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=sessions_json_is_gone), \
+             patch.object(copilot, "read_openclaw_remote_texts", return_value={}), \
+             patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]):
+            text, message_count, session_count = copilot.export_openclaw_day_transcript(DAY)
+
+        self.assertEqual((message_count, session_count), (2, 1))
+        self.assertIn("Henry: 你好", text)
+        self.assertIn("Kai: 你好，Henry。", text)
+
+    def test_reader_failure_is_reported_after_all_attempts(self):
+        failed = type("Result", (), {"returncode": 1, "stdout": b"", "stderr": b"Traceback\ndatabase is locked\n"})()
+
+        with patch.object(copilot.subprocess, "run", return_value=failed) as run, \
+             patch.object(copilot.time, "sleep"):
+            with self.assertRaisesRegex(
+                copilot.OpenClawImportUnavailable,
+                "session store .* after 3 attempts: database is locked",
+            ):
+                copilot.read_openclaw_store(DAY)
+
+        self.assertEqual(run.call_count, 3)
 
 
 if __name__ == "__main__":
