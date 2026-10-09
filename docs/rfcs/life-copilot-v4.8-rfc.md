@@ -1,6 +1,6 @@
 # Life Copilot v4.8 RFC
 
-> Status: in progress. Steps 1 to 4 requested by Henry on 2026-10-09; the week of observation runs to 2026-10-16.
+> Status: in progress. Steps 1 to 4 landed on 2026-10-09 at Henry's request; the week of observation runs to 2026-10-16.
 > Date: 2026-10-09
 > Extends: [[life-copilot-v4.5-rfc]]
 
@@ -91,10 +91,10 @@ Traces, importers, the trace guard, and the From Kai index of one link per sourc
 
 Each step is one commit. If work stops between two steps, Diary Mode still runs.
 
-1. **This RFC.**
-2. **Code and tests**: the timeline, `day-timeline`, the read-plan line, the recall filter. From this step every `writeback-ai-day` writes the file, and nothing yet tells a reader to open it.
-3. **AGENTS.md**: manual commit.
-4. **diary-mode.md**: candidate, review, `promote-system-rule`.
+1. **This RFC.** Done (1efa224).
+2. **Code and tests**: the timeline, `day-timeline`, the read-plan line, the recall filter. From this step every `writeback-ai-day` writes the file, and nothing yet tells a reader to open it. Done (f58c111).
+3. **AGENTS.md**: manual commit. Done (73f036c).
+4. **diary-mode.md**: candidate, review, `promote-system-rule`. Done: `diary-reads-the-day-timeline-first` (d74f595), on probation until 2026-10-16; the prompt grew by 116 bytes and stays under its baseline. The v4.7 rule on the same file is on probation until 2026-10-11, so a rollback of that one has to roll this one back first.
 5. **Observe for a week**, then decide on the picture and the other lanes. Old days get a timeline when they are looked at, with `day-timeline`; there is no bulk backfill.
 
 ## Acceptance
