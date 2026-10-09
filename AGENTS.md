@@ -24,7 +24,7 @@
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
-| 当日时间轴 | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md`；派生，`writeback-ai-day` 每次从当天 trace 重建：各会话按时间排在一条轴上，标出并行和空白。是索引不是证据，原话仍引 trace；空白只说明没有 AI 对话。旧日期用 `day-timeline --date YYYY-MM-DD` 从已有 trace 生成 |
+| 当日时间轴 | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md`；派生，`writeback-ai-day` 每次从当天 trace 和日记正文里贴的微信记录重建：各会话和各段聊天按时间排在一条轴上，标出并行和空白。是索引不是证据，原话仍引 trace 和日记；空白只说明没有 AI 对话、日记里也没贴聊天。旧日期用 `day-timeline --date YYYY-MM-DD` 从已有 trace 生成 |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md`。一次读不完的页拆出同目录的轨迹 `{slug}-trail.md`：一天一节，只追加 |
 | 书页 | `journal/books/{slug}.md`；同人物页，另有带出处的阅读轨迹，规则见 `journal/books/00-index.md` |

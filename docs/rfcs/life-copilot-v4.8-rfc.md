@@ -20,7 +20,7 @@ Three things the diary analysis needs only show on a time axis:
 
 ### A timeline per day, derived from the traces
 
-`journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md` puts every session of the day on one time axis. It is built from the day's trace files, not from the sources, so it includes what the trace guard merged back and what Henry pasted by hand, and it can be built for a day whose sources are long gone. It is rebuilt on every `writeback-ai-day`. It is not a trace: the trace glob does not match it, the diary's From Kai section does not link it, a people or book page cannot cite it, and local recall does not index it.
+`journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md` puts every session of the day on one time axis. Its AI lines are built from the day's trace files, not from the sources, so it includes what the trace guard merged back and what Henry pasted by hand, and it can be built for a day whose sources are long gone. It is rebuilt on every `writeback-ai-day`. It is not a trace: the trace glob does not match it, the diary's From Kai section does not link it, a people or book page cannot cite it, and local recall does not index it.
 
 A **segment** is a run of messages in one session with no silence over 20 minutes. One line per segment, in order of start time:
 
@@ -40,16 +40,35 @@ A **segment** is a run of messages in one session with no silence over 20 minute
 
 - **The session** is named by its source and the first eight characters of its id, then its title where the source gives one.
 - **The topic** is the first line Henry typed in that segment, cut to 48 characters. It is his text, not a summary: nothing in the file is written by a model. Text a client put into his turn (a page-open marker, pasted content, the file list in front of a request) is stepped over. Titles and topics are inline code, so a wikilink inside them links nothing.
-- **A quiet line** marks 60 minutes or more with no message in any session.
+- **A quiet line** marks 60 minutes or more with no message in any session or pasted chat.
 - **Side by side** lists the minutes in which two or more sessions had a segment open.
 - **The header** says what the file is and gives the day in one line: first and last message, sessions, segments, minutes inside a segment and how many of them were shared.
 
-The 2026-10-08 timeline is 4,340 bytes for 198 KB of traces.
+The 2026-10-08 timeline was 4,340 bytes for 198 KB of traces.
+
+### Chats pasted into the diary
+
+Added on 2026-10-09, the same day, at Henry's request. AI conversations are mostly reactions to something else, and the something else is often a WeChat chat that Henry pastes into the diary. On 2026-10-08 three of the four quiet lines had such a chat inside them, and the order "chat, then a question to an AI about it, then back to the chat" could only be seen by matching times between the diary and a trace.
+
+The export pastes each message as a name line, a line holding only `YYYY/MM/DD H:MM`, and the text. Henry's part of the diary (not the sections Copilot writes, not the merged capture) is scanned for that shape, where it stands; no separate section is needed. In the diaries since July, 1,070 of 1,076 pasted messages have a clean name line, and the other six have the first name at the end of the sentence the paste followed, which is recovered from the names seen elsewhere in the diary.
+
+```markdown
+- 11:59–12:08 · WeChat `Rowan` · Henry 2, others 1 · `look at this view`
+- 16:59–17:00 · WeChat `Ash`, `Birch`, `Cedar` +1 · Henry 0, others 8 · (no message from Henry)
+```
+
+- **A chat is named by who else spoke** in that segment. The export has no chat or group name.
+- **A paste is in time order**, so a time that runs backwards starts another chat.
+- **Only messages dated that day count.** Older messages quoted for context are left out, and the header says how many.
+- **Only Henry's first line is shown**, as for an AI session. What the other person wrote stays in the diary.
+- **The header says what could not be read**: a sender that is neither a name line nor a known name.
+
+These lines show only the chats Henry chose to paste. The file says so.
 
 ### What the script guarantees
 
-1. The timeline is a function of the day's trace files. The same traces give the same bytes, and an unchanged file is not rewritten.
-2. Building it reads the traces and writes one file. It cannot change a trace or the diary, and a failure to build it prints a warning and does not fail the archive.
+1. The timeline is a function of the day's trace files and Henry's part of the day's diary. The same inputs give the same bytes, and an unchanged file is not rewritten.
+2. Building it reads the traces and the diary and writes one file. It cannot change a trace or the diary, and a failure to build it prints a warning and does not fail the archive.
 3. Every timestamped message under a session heading is counted in exactly one segment.
 4. A session opens only at a heading whose id looks like an id, and a message counts only when a known speaker wrote it. A heading quoted inside an answer, or a line of a pasted chat, starts nothing.
 
@@ -59,8 +78,8 @@ The read plan that `writeback-ai-day` and `check-read-budget --date` print names
 
 Two limits are written into every timeline file, where each reader meets them:
 
-- **It is an index.** Quotes and claims come from the traces.
-- **A silence only means no AI conversation.** It does not say nothing happened.
+- **It is an index.** Quotes and claims come from the traces and the diary.
+- **A silence only means no AI conversation and no pasted chat.** It does not say nothing happened.
 
 ### Not changed
 
@@ -69,7 +88,7 @@ Traces, importers, the trace guard, and the From Kai index of one link per sourc
 ### Left out of this version
 
 - **A picture.** The same segments could feed a drawing of parallel lanes around a time axis. It would help Henry see a day; the model reading the day gains nothing from it over the list. Decide after the list has been in use.
-- **Other lanes.** Pasted chat exports carry their own times, and so do workout records. They could sit on the same axis.
+- **Other lanes.** Workout records carry their own times and could sit on the same axis. Chats pasted into an AI conversation rather than the diary are not read: they are usually the same chat again.
 - **Topics written by a model.** They would make the file something other than a function of the traces.
 - **Importer drift the audit surfaced.** Recent Codex traces keep a page-open marker and a file list in Henry's turn. The timeline steps over them; removing them is the importer's job and a separate change.
 
