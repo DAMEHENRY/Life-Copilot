@@ -301,6 +301,120 @@ class TestWritebackAiDay(TimelineCase):
         self.assertIn("[[2026-08-13-codex-trace]]", self.journal.read_text(encoding="utf-8"))
 
 
+class TestPastedChats(TimelineCase):
+    """WeChat messages in Henry's part of the diary go on the same axis."""
+
+    def diary(self, *parts: str) -> None:
+        journal = self.root / "journal" / "2026" / "08" / "2026-08-13.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("\n".join(parts) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def chat(*messages: tuple) -> str:
+        return "\n".join(f"{who}\n2026/08/{day} {clock}\n{text}\n" for who, day, clock, text in messages)
+
+    def test_a_chat_fills_what_the_traces_call_a_silence(self) -> None:
+        self.trace(
+            "codex", CODEX_A,
+            _msg(9, 0, "Henry", "a question"),
+            _msg(12, 55, "Henry", "is this a good moment to ask"),
+            _msg(13, 5, "Codex", "yes"),
+        )
+        self.diary(
+            "## 💭 Thoughts & Reflections",
+            "",
+            # Pasted straight after a sentence: the first name ends that sentence.
+            "We talked at noon and it went well.Henry",
+            "2026/08/13 11:59",
+            "look at this view",
+            "",
+            self.chat(
+                ("Rowan", 13, "12:07", "where is that"),
+                ("Henry", 13, "12:08", "by the lake"),
+                ("Rowan", 13, "12:59", "[Sticker]"),
+                ("Henry", 13, "13:00", "coming over"),
+            ),
+            "Then I went back to work and wrote this paragraph after the chat.",
+        )
+        self.assertEqual(self.rows(), [
+            "- 09:00 · Codex aaaaaaaa · Henry 1, AI 0 · `a question`",
+            "- 09:00–11:59 · no messages for 2h 59m",
+            "- 11:59–12:08 · WeChat `Rowan` · Henry 2, others 1 · `look at this view`",
+            "- 12:55–13:05 · Codex aaaaaaaa · Henry 1, AI 1 · `is this a good moment to ask`",
+            "- 12:59–13:00 · WeChat `Rowan` · Henry 1, others 1 · `coming over`",
+        ])
+        self.assertEqual(self.rows("## Side by side"), ["- 12:59–13:00 · Codex aaaaaaaa + WeChat `Rowan`"])
+        self.assertIn(
+            "First message 09:00, last 13:05. 1 session in 2 segments; 22m inside a segment, "
+            "2m of it in two or more at once. WeChat: 5 messages from the diary in 2 segments.",
+            copilot.render_day_timeline(DAY),
+        )
+
+    def test_a_time_that_runs_backwards_starts_another_chat(self) -> None:
+        self.diary(
+            "## 💭 Thoughts & Reflections",
+            "",
+            self.chat(("Henry", 13, "21:30", "see you tomorrow"), ("Rowan", 13, "21:31", "see you")),
+            self.chat(
+                ("Ash", 13, "21:25", "who is in"),
+                ("Birch", 13, "21:25", "me"),
+                ("Cedar", 13, "21:26", "me too"),
+                ("Dale", 13, "21:26", ""),  # a picture: the export leaves the text out
+                ("Ash", 13, "21:27", "good"),
+            ),
+        )
+        self.assertEqual(self.rows(), [
+            "- 21:25–21:27 · WeChat `Ash`, `Birch`, `Cedar` +1 · Henry 0, others 5 · (no message from Henry)",
+            "- 21:30–21:31 · WeChat `Rowan` · Henry 1, others 1 · `see you tomorrow`",
+        ])
+        # Two chats, one after the other: nothing ran side by side.
+        self.assertNotIn("## Side by side", copilot.render_day_timeline(DAY))
+
+    def test_only_this_days_messages_in_henrys_own_text_count(self) -> None:
+        self.diary(
+            "## 💭 Thoughts & Reflections",
+            "",
+            self.chat(
+                ("Rowan", 12, "23:50", "an older message quoted for context"),
+                ("Henry", 13, "08:00", "good morning"),
+                ("Henry", 13, "08:00", "good morning"),  # pasted twice
+            ),
+            "### 对话补记",
+            "",
+            "> [!info] 对话转写",
+            "> capture-id: chat-capture-2026-08-13",
+            "> Rowan",
+            "> 2026/08/13 10:00",
+            "> a chat Copilot transcribed, not Henry's own paste",
+            "> capture-end: chat-capture-2026-08-13",
+            "",
+            "## What Life Copilot Said",
+            "",
+            self.chat(("Rowan", 13, "11:00", "quoted inside the analysis")),
+        )
+        text = copilot.render_day_timeline(DAY)
+        self.assertEqual(self.rows(), ["- 08:00 · WeChat · Henry 1, others 0 · `good morning`"])
+        self.assertIn(
+            "First message 08:00, last 08:00. 1m inside a segment. WeChat: 1 message from the diary "
+            "in 1 segment. Pasted WeChat messages dated another day, left out: 1.",
+            text,
+        )
+
+    def test_a_sender_that_cannot_be_read_is_reported(self) -> None:
+        self.diary(
+            "A long sentence that runs straight into a name nobody else in this diary has, Quill",
+            "2026/08/13 15:00",
+            "hello",
+        )
+        text = copilot.render_day_timeline(DAY)
+        self.assertEqual(self.rows(), ["- 15:00 · WeChat · Henry 0, others 1 · (no message from Henry)"])
+        self.assertIn("WeChat messages whose sender could not be read: 1.", text)
+
+    def test_a_date_line_in_prose_is_not_a_message(self) -> None:
+        self.diary("On 2026/08/13 10:00 I left the house.", "", "2026/08/13", "10:00")
+        self.assertEqual(copilot.render_day_timeline(DAY), "")
+
+
 class TestEarlierDay(TimelineCase):
     """A day is archived when its analysis starts; the next night's run takes it along."""
 

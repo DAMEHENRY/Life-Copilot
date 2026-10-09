@@ -6036,8 +6036,9 @@ def web_chat_day_source_records(
 
 # Day timeline: every conversation of a day on one time axis. A trace holds one
 # source, session after session, so what ran side by side and when nothing ran
-# only shows once the day's messages are put in time order. The file is rebuilt
-# from the trace files on every run and holds nothing they do not.
+# only shows once the day's messages are put in time order. WeChat messages
+# Henry pasted into the diary go on the same axis. The file is rebuilt from the
+# trace files and the diary on every run and holds nothing they do not.
 TIMELINE_GAP_MINUTES = 20  # a silence longer than this ends a segment
 TIMELINE_QUIET_MINUTES = 60  # a silence at least this long gets a line of its own
 TIMELINE_TOPIC_CHARS = 48
@@ -6104,6 +6105,64 @@ def day_timeline_messages(target: date) -> List[dict]:
     return messages
 
 
+# A WeChat message as the export pastes it into the diary: the sender's name,
+# a line holding only the time, then the text. Pasting straight after a
+# sentence leaves the first name at the end of that sentence.
+TIMELINE_WECHAT_STAMP_RE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2}) (\d{1,2}):(\d{2})$")
+TIMELINE_WECHAT_NAME_CHARS = 24
+TIMELINE_WECHAT_BLOCK = 1_000_000  # block numbers above this are pasted chats
+
+
+def day_timeline_wechat_messages(target: date) -> Tuple[List[dict], int, int]:
+    """WeChat messages of ``target`` in Henry's part of the diary.
+
+    Also returns how many pasted messages carry another day's date, and how
+    many have a sender that could not be read. A paste is in time order, so a
+    time that runs backwards starts another pasted chat.
+    """
+    journal = journal_path_for_date(target)
+    if not journal.exists():
+        return [], 0, 0
+    lines = [re.sub(r"^(?:> ?)+", "", line).strip() for line in henry_owned_text(journal).split("\n")]
+    stamps = [index for index in range(1, len(lines)) if TIMELINE_WECHAT_STAMP_RE.match(lines[index])]
+    stamp_set = set(stamps)
+    names = {TRACE_USER} | {
+        lines[index - 1] for index in stamps
+        if 0 < len(lines[index - 1]) <= TIMELINE_WECHAT_NAME_CHARS
+    }
+    messages: List[dict] = []
+    seen: set = set()
+    other_day = unread = 0
+    block = TIMELINE_WECHAT_BLOCK
+    previous: Optional[datetime] = None
+    for index in stamps:
+        year, month, day, hour, minute = map(int, TIMELINE_WECHAT_STAMP_RE.match(lines[index]).groups())  # type: ignore[union-attr]
+        try:
+            at = datetime(year, month, day, hour, minute)
+        except ValueError:
+            continue
+        who = lines[index - 1]
+        if not 0 < len(who) <= TIMELINE_WECHAT_NAME_CHARS:
+            who = max((name for name in names if who.endswith(name)), key=len, default="")
+        # The line after the time is the text, unless it is the next sender's name.
+        text = lines[index + 1] if index + 1 < len(lines) and index + 2 not in stamp_set else ""
+        if previous is not None and at < previous:
+            block += 1
+        previous = at
+        if at.date() != target:
+            other_day += 1
+            continue
+        if (at, who, text) in seen:
+            continue
+        seen.add((at, who, text))
+        unread += not who
+        messages.append({
+            "at": at, "henry": who == TRACE_USER, "text": text, "block": block,
+            "label": "WeChat", "session": "", "title": "", "who": who,
+        })
+    return messages, other_day, unread
+
+
 def timeline_code_span(text: str) -> str:
     """Henry's words as inline code, so they make no link and break no list."""
     text = re.sub(r"\s+", " ", text).strip().replace("`", "'")
@@ -6136,10 +6195,14 @@ def day_timeline_segments(messages: List[dict]) -> List[dict]:
                     "start": message["at"], "end": message["at"], "block": block,
                     "label": message["label"], "session": message["session"],
                     "title": message["title"], "henry": 0, "assistant": 0, "topic": "",
+                    "others": [],
                 }
                 segments.append(segment)
             segment["end"] = message["at"]
             segment["henry" if message["henry"] else "assistant"] += 1
+            who = message.get("who")
+            if who and not message["henry"] and who not in segment["others"]:
+                segment["others"].append(who)
             if message["henry"] and not segment["topic"]:
                 segment["topic"] = timeline_topic(message["text"])
     return sorted(segments, key=lambda item: (item["start"], item["end"], item["block"]))
@@ -6151,8 +6214,9 @@ def format_timeline_minutes(minutes: int) -> str:
 
 
 def render_day_timeline(target: date) -> str:
-    """The day's timeline file, or "" when no trace has a timestamped message."""
-    segments = day_timeline_segments(day_timeline_messages(target))
+    """The day's timeline file, or "" when the day has no timestamped message."""
+    wechat, other_day, unread = day_timeline_wechat_messages(target)
+    segments = day_timeline_segments(day_timeline_messages(target) + wechat)
     if not segments:
         return ""
     minute = timedelta(minutes=1)
@@ -6164,8 +6228,16 @@ def render_day_timeline(target: date) -> str:
     def span(start: datetime, end: datetime) -> str:
         return clock(start) if start == end else f"{clock(start)}–{clock(end)}"
 
+    def pasted(segment: dict) -> bool:
+        return segment["block"] >= TIMELINE_WECHAT_BLOCK
+
     def name(segment: dict) -> str:
-        return f"{segment['label']} {segment['session']}".strip()
+        if not pasted(segment):
+            return f"{segment['label']} {segment['session']}".strip()
+        # A pasted chat is named by who else spoke in it.
+        others = [timeline_code_span(who) for who in segment["others"]]
+        more = f" +{len(others) - 3}" if len(others) > 3 else ""
+        return ("WeChat " + ", ".join(others[:3]) + more).strip()
 
     rows: List[str] = []
     latest: Optional[datetime] = None
@@ -6182,12 +6254,15 @@ def render_day_timeline(target: date) -> str:
             # Some sources title a session with its first message; say it once.
             if title and topic.strip("`…").startswith(title.strip("`….")):
                 title = ""
+        elif pasted(segment):
+            topic = "(no text from Henry)" if segment["henry"] else "(no message from Henry)"
         else:
             topic = "(no text from Henry)" if segment["henry"] else "(reply only)"
         rows.append(
             f"- {span(segment['start'], segment['end'])} · {name(segment)}"
             + (f" {title}" if title else "")
-            + f" · Henry {segment['henry']}, AI {segment['assistant']} · {topic}"
+            + f" · Henry {segment['henry']}, {'others' if pasted(segment) else 'AI'} "
+            + f"{segment['assistant']} · {topic}"
         )
 
     # Which sessions have a segment open in each minute of the day.
@@ -6208,7 +6283,31 @@ def render_day_timeline(target: date) -> str:
             together.append([moment, moment, names])
     shared = sum(1 for sessions in open_at.values() if len(sessions) > 1)
 
-    count = len({segment["block"] for segment in segments})
+    sessions = [segment for segment in segments if not pasted(segment)]
+    count = len({segment["block"] for segment in sessions})
+    chats = [segment for segment in segments if pasted(segment)]
+    summary = (
+        f"First message {clock(segments[0]['start'])}, last "
+        f"{clock(max(segment['end'] for segment in segments))}. "
+    )
+    if sessions:
+        summary += (
+            f"{count} session" + ("s" if count > 1 else "") + f" in {len(sessions)} segment"
+            + ("s" if len(sessions) > 1 else "") + "; "
+        )
+    summary += (
+        f"{format_timeline_minutes(len(open_at))} inside a segment"
+        + (f", {format_timeline_minutes(shared)} of it in two or more at once." if shared else ".")
+    )
+    if chats:
+        summary += (
+            f" WeChat: {len(wechat)} message" + ("s" if len(wechat) > 1 else "")
+            + f" from the diary in {len(chats)} segment" + ("s" if len(chats) > 1 else "") + "."
+        )
+    if other_day:
+        summary += f" Pasted WeChat messages dated another day, left out: {other_day}."
+    if unread:
+        summary += f" WeChat messages whose sender could not be read: {unread}."
     lines = [
         "---",
         f"date: {target.isoformat()}",
@@ -6216,20 +6315,18 @@ def render_day_timeline(target: date) -> str:
         "generated_by: scripts/copilot.py writeback-ai-day",
         "---",
         "",
-        f"# {target.isoformat()} AI Conversation Timeline",
+        f"# {target.isoformat()} Day Timeline",
         "",
-        "Rebuilt from the day's traces on every run. It is an index: quote from the traces, "
-        "and a silence here only means no AI conversation.",
+        "Rebuilt on every run from the day's traces and from the WeChat messages Henry pasted "
+        "into the diary. It is an index: quote from the traces and the diary. A silence here "
+        "only means no AI conversation and no pasted chat.",
         "",
-        f"A segment is a run of messages in one session with no silence over {TIMELINE_GAP_MINUTES} "
-        "minutes; times are to the minute. Each line gives the session, how many messages "
-        "Henry and the AI sent, and Henry's first words in the segment.",
+        "A segment is a run of messages in one session, or in one pasted chat, with no silence "
+        f"over {TIMELINE_GAP_MINUTES} minutes; times are to the minute. Each line gives the session "
+        "or who else was in the chat, how many messages Henry and the other side sent, and "
+        "Henry's first words in the segment.",
         "",
-        f"First message {clock(segments[0]['start'])}, last "
-        f"{clock(max(segment['end'] for segment in segments))}. "
-        f"{count} session" + ("s" if count > 1 else "") + f" in {len(segments)} segment"
-        + ("s" if len(segments) > 1 else "") + f"; {format_timeline_minutes(len(open_at))} inside a segment"
-        + (f", {format_timeline_minutes(shared)} of it in two or more at once." if shared else "."),
+        summary,
         "",
         "## Timeline",
         "",
