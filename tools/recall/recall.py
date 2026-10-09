@@ -63,6 +63,9 @@ def list_sources():
             if not name.endswith(".md"):
                 continue
             rel = (Path(dirpath) / name).relative_to(ROOT).as_posix()
+            # A day timeline only repeats first lines of that day's traces.
+            if rel.endswith("-timeline.md"):
+                continue
             if DIARY_RE.match(rel) or rel.startswith("journal/ai-conversations/"):
                 files.append(rel)
     return sorted(files)

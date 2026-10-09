@@ -97,6 +97,15 @@ def test_only_diaries_and_traces_are_sources() -> None:
     assert not recall.DIARY_RE.match("journal/disconfirmation/2026-01-02-sheet.md")
 
 
+def test_a_day_timeline_is_not_indexed_next_to_its_traces(monkeypatch, tmp_path) -> None:
+    folder = tmp_path / "journal" / "ai-conversations" / "2026" / "01"
+    folder.mkdir(parents=True)
+    (folder / "2026-01-02-codex-trace.md").write_text(TRACE, encoding="utf-8")
+    (folder / "2026-01-02-timeline.md").write_text("- 09:00 · Codex one · `hello there`\n", encoding="utf-8")
+    monkeypatch.setattr(recall, "ROOT", tmp_path)
+    assert recall.list_sources() == ["journal/ai-conversations/2026/01/2026-01-02-codex-trace.md"]
+
+
 def test_merge_hits_combines_overlapping_chunks_from_one_file() -> None:
     chunks = [
         {"path": "a.md", "date": "2026-01-01", "kind": "handwritten", "section": "", "line_start": 1, "line_end": 3, "text": "x"},

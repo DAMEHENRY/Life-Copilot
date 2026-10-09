@@ -5,7 +5,7 @@ Life Copilot — lean orchestration utilities.
 Only structural write commands that are unsafe for the model to do freehand:
 writeback-journal, writeback-thought, writeback-chat-capture,
 writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
-finalize-ai-day, sync-web-chats, web-chats-status, install-web-chats,
+day-timeline, finalize-ai-day, sync-web-chats, web-chats-status, install-web-chats,
 writeback-memory, maintain-memory, maintain-page, append-insight, compact-memory,
 audit-system-rules, promote-system-rule, rollback-system-rule, quant-mission,
 quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
@@ -3915,6 +3915,8 @@ def read_budget_paths(target: Optional[date] = None) -> List[Path]:
     paths += [LIFE_BOARD_FILE, MEMORY_FILE]
     if target is not None:
         paths.append(journal_path_for_date(target))
+        if day_timeline_path(target).exists():
+            paths.append(day_timeline_path(target))
         paths += day_trace_paths(target)
         paths += [item["path"] for item in pages_mentioned(target) if "error" not in item]
     return paths
@@ -3923,6 +3925,7 @@ def read_budget_paths(target: Optional[date] = None) -> List[Path]:
 def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
     files: List[Dict[str, object]] = []
     traces = set(day_trace_paths(target)) if target is not None else set()
+    timeline = day_timeline_path(target) if target is not None else None
     for path in read_budget_paths(target):
         shown = path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
         if not path.exists():
@@ -3945,6 +3948,7 @@ def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
             "ranges": labels if planned else [],
             "oversize_lines": oversize,
             "trace": path in traces,
+            "timeline": path == timeline,
         })
     counts = {
         status: sum(1 for item in files if item["status"] == status)
@@ -3970,7 +3974,7 @@ def format_read_parts(item: Dict[str, object]) -> str:
 
 def format_read_budget(result: Dict[str, object], include_ok: bool = True) -> List[str]:
     files = result["files"]
-    others = [item for item in files if not item.get("trace")]  # type: ignore[union-attr]
+    others = [item for item in files if not item.get("trace") and not item.get("timeline")]  # type: ignore[union-attr]
     counts = {
         status: sum(1 for item in others if item["status"] == status)
         for status in ("over", "near", "ok", "missing")
@@ -3991,6 +3995,13 @@ def format_read_budget(result: Dict[str, object], include_ok: bool = True) -> Li
             + format_read_parts(item)
         )
     if result.get("date"):
+        # The timeline orders the traces, so it is read before them.
+        for item in files:  # type: ignore[union-attr]
+            if item.get("timeline"):
+                lines.append(
+                    "Day timeline, read before the traces (an index of them, not evidence): "
+                    f"{item['path']}  {item['bytes']:,} bytes" + format_read_parts(item)
+                )
         lines += format_trace_plan([item for item in files if item.get("trace")])  # type: ignore[union-attr]
     return lines
 
@@ -5973,6 +5984,234 @@ def web_chat_day_source_records(
     return records
 
 
+# Day timeline: every conversation of a day on one time axis. A trace holds one
+# source, session after session, so what ran side by side and when nothing ran
+# only shows once the day's messages are put in time order. The file is rebuilt
+# from the trace files on every run and holds nothing they do not.
+TIMELINE_GAP_MINUTES = 20  # a silence longer than this ends a segment
+TIMELINE_QUIET_MINUTES = 60  # a silence at least this long gets a line of its own
+TIMELINE_TOPIC_CHARS = 48
+# The id has to look like one: a message that quotes the heading format
+# ("### Codex Thread <id>") must not open a session. Web chats put tags such
+# as [Health] between the id and the title.
+TIMELINE_SESSION_HEADING_RE = re.compile(
+    r"^### (?P<label>Codex|Claude Code|Life Claude Renderer|Claudian|Kai / \S+"
+    r"|(?:Claude|ChatGPT|Gemini) Web) (?:Thread|Session|Conversation) "
+    r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)(?P<tags>(?: \[[^\]\n]+\])*)(?: - (?P<title>.+))?$"
+)
+TIMELINE_ASSISTANTS = frozenset({*TRACE_ASSISTANTS.values(), "Claudian", "Gemini"})
+# What a client wrote into Henry's turn: a page-open marker, pasted content
+# (whose closing tag repeats the id), an HTML comment, and the file list Codex
+# puts before the request. Old traces keep these, so the topic line has to
+# step over them.
+TIMELINE_MACHINE_BLOCK_RE = re.compile(
+    r"<!--.*?-->|<(?P<tag>[a-z][\w-]*)\b[^>]*>.*?</(?P=tag)\b[^>]*>", re.DOTALL
+)
+TIMELINE_REQUEST_HEADING_RE = re.compile(r"(?m)^## My request\b[^\n]*:[ \t]*$")
+
+
+def day_timeline_path(target: date) -> Path:
+    return ai_conversation_dir_for_date(target) / f"{target.isoformat()}-timeline.md"
+
+
+def day_timeline_messages(target: date) -> List[dict]:
+    """Every timestamped message in the day's trace files, in file order."""
+    messages: List[dict] = []
+    block = 0
+    for path in day_trace_paths(target):
+        source = path.stem[len(target.isoformat()) + 1:].removesuffix("-trace")
+        label, session, title, manual = source, "", "", False
+        block += 1
+        for line in read_text(path).split("\n"):
+            marker = TRACE_MANUAL_MARKER_RE.match(line)
+            heading = None if manual or marker else TIMELINE_SESSION_HEADING_RE.match(line)
+            if marker:
+                # Henry's pasted record is a session of its own, as in the trace guard.
+                manual = marker.group("edge") == "begin"
+                label, session, title = ("Kai", "manual", "") if manual else (source, "", "")
+                block += 1
+                continue
+            if heading:
+                label, session = heading.group("label"), heading.group("session")[:8]
+                title = f"{heading.group('tags')} {heading.group('title') or ''}".strip()
+                block += 1
+                continue
+            message = TRACE_MESSAGE_RE.match(line)
+            if message and message.group("speaker") in (TRACE_USER, *TIMELINE_ASSISTANTS):
+                messages.append({
+                    "at": datetime.strptime(
+                        re.sub(r"\s", " ", message.group("ts")), "%m/%d/%y %I:%M %p"
+                    ),
+                    "henry": message.group("speaker") == TRACE_USER,
+                    "text": line[message.end():],
+                    "block": block,
+                    "label": label,
+                    "session": session,
+                    "title": title,
+                })
+            elif messages and messages[-1]["block"] == block:
+                messages[-1]["text"] += "\n" + line
+    return messages
+
+
+def timeline_code_span(text: str) -> str:
+    """Henry's words as inline code, so they make no link and break no list."""
+    text = re.sub(r"\s+", " ", text).strip().replace("`", "'")
+    if len(text) > TIMELINE_TOPIC_CHARS:
+        text = text[:TIMELINE_TOPIC_CHARS].rstrip() + "…"
+    return f"`{text}`" if text else ""
+
+
+def timeline_topic(text: str) -> str:
+    """The first line Henry typed, past what the client or importer put there."""
+    text = TIMELINE_REQUEST_HEADING_RE.split(text)[-1]
+    for line in TIMELINE_MACHINE_BLOCK_RE.sub("\n", text).split("\n"):
+        if line.strip() and not TRACE_ANNOTATION_RE.fullmatch(line.strip()):
+            return timeline_code_span(line)
+    return ""
+
+
+def day_timeline_segments(messages: List[dict]) -> List[dict]:
+    """Runs of one session's messages with no silence over the gap, by start time."""
+    sessions: Dict[int, List[dict]] = {}
+    for message in messages:
+        sessions.setdefault(message["block"], []).append(message)
+    gap = timedelta(minutes=TIMELINE_GAP_MINUTES)
+    segments: List[dict] = []
+    for block, items in sessions.items():
+        segment: Optional[dict] = None
+        for message in sorted(items, key=lambda item: item["at"]):
+            if segment is None or message["at"] - segment["end"] > gap:
+                segment = {
+                    "start": message["at"], "end": message["at"], "block": block,
+                    "label": message["label"], "session": message["session"],
+                    "title": message["title"], "henry": 0, "assistant": 0, "topic": "",
+                }
+                segments.append(segment)
+            segment["end"] = message["at"]
+            segment["henry" if message["henry"] else "assistant"] += 1
+            if message["henry"] and not segment["topic"]:
+                segment["topic"] = timeline_topic(message["text"])
+    return sorted(segments, key=lambda item: (item["start"], item["end"], item["block"]))
+
+
+def format_timeline_minutes(minutes: int) -> str:
+    hours, rest = divmod(minutes, 60)
+    return (f"{hours}h " if hours else "") + f"{rest}m"
+
+
+def render_day_timeline(target: date) -> str:
+    """The day's timeline file, or "" when no trace has a timestamped message."""
+    segments = day_timeline_segments(day_timeline_messages(target))
+    if not segments:
+        return ""
+    minute = timedelta(minutes=1)
+
+    def clock(moment: datetime) -> str:
+        # A session that runs past midnight keeps its date visible.
+        return moment.strftime("%H:%M" if moment.date() == target else "%m-%d %H:%M")
+
+    def span(start: datetime, end: datetime) -> str:
+        return clock(start) if start == end else f"{clock(start)}–{clock(end)}"
+
+    def name(segment: dict) -> str:
+        return f"{segment['label']} {segment['session']}".strip()
+
+    rows: List[str] = []
+    latest: Optional[datetime] = None
+    for segment in segments:
+        if latest is not None and segment["start"] - latest >= timedelta(minutes=TIMELINE_QUIET_MINUTES):
+            quiet = int((segment["start"] - latest) / minute)
+            rows.append(
+                f"- {span(latest, segment['start'])} · no messages for {format_timeline_minutes(quiet)}"
+            )
+        latest = max(latest or segment["end"], segment["end"])
+        title = timeline_code_span(segment["title"])
+        if segment["topic"]:
+            topic = segment["topic"]
+            # Some sources title a session with its first message; say it once.
+            if title and topic.strip("`…").startswith(title.strip("`….")):
+                title = ""
+        else:
+            topic = "(no text from Henry)" if segment["henry"] else "(reply only)"
+        rows.append(
+            f"- {span(segment['start'], segment['end'])} · {name(segment)}"
+            + (f" {title}" if title else "")
+            + f" · Henry {segment['henry']}, AI {segment['assistant']} · {topic}"
+        )
+
+    # Which sessions have a segment open in each minute of the day.
+    open_at: Dict[datetime, Dict[int, str]] = {}
+    for segment in segments:
+        moment = segment["start"]
+        while moment <= segment["end"]:
+            open_at.setdefault(moment, {})[segment["block"]] = name(segment)
+            moment += minute
+    together: List[List[object]] = []  # [start, end, names]
+    for moment in sorted(open_at):
+        names = [open_at[moment][block] for block in sorted(open_at[moment])]
+        if len(names) < 2:
+            continue
+        if together and together[-1][2] == names and together[-1][1] == moment - minute:
+            together[-1][1] = moment
+        else:
+            together.append([moment, moment, names])
+    shared = sum(1 for sessions in open_at.values() if len(sessions) > 1)
+
+    count = len({segment["block"] for segment in segments})
+    lines = [
+        "---",
+        f"date: {target.isoformat()}",
+        "source: timeline",
+        "generated_by: scripts/copilot.py writeback-ai-day",
+        "---",
+        "",
+        f"# {target.isoformat()} AI Conversation Timeline",
+        "",
+        "Rebuilt from the day's traces on every run. It is an index: quote from the traces, "
+        "and a silence here only means no AI conversation.",
+        "",
+        f"A segment is a run of messages in one session with no silence over {TIMELINE_GAP_MINUTES} "
+        "minutes; times are to the minute. Each line gives the session, how many messages "
+        "Henry and the AI sent, and Henry's first words in the segment.",
+        "",
+        f"First message {clock(segments[0]['start'])}, last "
+        f"{clock(max(segment['end'] for segment in segments))}. "
+        f"{count} session" + ("s" if count > 1 else "") + f" in {len(segments)} segment"
+        + ("s" if len(segments) > 1 else "") + f"; {format_timeline_minutes(len(open_at))} inside a segment"
+        + (f", {format_timeline_minutes(shared)} of it in two or more at once." if shared else "."),
+        "",
+        "## Timeline",
+        "",
+        *rows,
+    ]
+    if together:
+        lines += ["", "## Side by side", ""]
+        lines += [f"- {span(start, end)} · " + " + ".join(names) for start, end, names in together]  # type: ignore[arg-type]
+    return "\n".join(lines) + "\n"
+
+
+def write_day_timeline(target: date) -> Optional[Path]:
+    """Rebuild the day's timeline from its traces; None when there is nothing to show."""
+    content = render_day_timeline(target)
+    if not content:
+        return None
+    path = day_timeline_path(target)
+    if not path.exists() or read_text(path) != content:
+        write_text(path, content)
+        print(f"  wrote: {path.relative_to(ROOT)}")
+    return path
+
+
+def cmd_day_timeline(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    if args.dry_run:
+        print(render_day_timeline(target) or f"No timestamped AI messages on {target.isoformat()}", end="")
+        return
+    path = write_day_timeline(target)
+    print(path if path else f"No timestamped AI messages on {target.isoformat()}")
+
+
 def render_hook_fallback_turn(
     target: date,
     payload: dict,
@@ -6209,6 +6448,12 @@ def writeback_ai_day(
         kept = write_ai_trace(path, header, transcript, source, records, force=force)
         if kept:
             kept_lost_messages[source] = kept
+    # The timeline is derived from the traces just written; it must never fail the archive.
+    try:
+        timeline_path = write_day_timeline(target)
+    except Exception as exc:
+        timeline_path = None
+        print(f"  warning: day timeline not written ({exc})")
 
     # Normalize generated wikilinks so retries and concurrent sessions cannot
     # produce more than one bullet for a source/day.
@@ -6268,6 +6513,7 @@ def writeback_ai_day(
         "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
         "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
         "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
+        "timeline": str(timeline_path) if timeline_path else "",
         "fallback_used": fallback_used,
         "kept_lost_messages": kept_lost_messages,
     }
@@ -7424,6 +7670,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow an intentionally incomplete preview when OpenClaw/Kai is unreachable.",
     )
     s.set_defaults(func=cmd_preview_ai_day, web_chats=True)
+
+    s = sub.add_parser("day-timeline")
+    s.add_argument("--date", required=True, help="Day whose existing traces are put on one time axis (YYYY-MM-DD).")
+    s.add_argument("--dry-run", action="store_true", help="Print the timeline instead of writing it.")
+    s.set_defaults(func=cmd_day_timeline)
 
     s = sub.add_parser("writeback-ai-day")
     s.add_argument("--date", required=True)
