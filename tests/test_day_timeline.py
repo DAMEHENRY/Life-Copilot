@@ -301,5 +301,78 @@ class TestWritebackAiDay(TimelineCase):
         self.assertIn("[[2026-08-13-codex-trace]]", self.journal.read_text(encoding="utf-8"))
 
 
+class TestEarlierDay(TimelineCase):
+    """A day is archived when its analysis starts; the next night's run takes it along."""
+
+    def day(self, day: int, *messages: str) -> Path:
+        journal = self.root / "journal" / "2026" / "08" / f"2026-08-{day:02d}.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("# day\n\n## 💬 From Kai\n", encoding="utf-8")
+        path = self.trace_dir / f"2026-08-{day:02d}-codex-trace.md"
+        path.write_text(_join(CODEX_A, *messages), encoding="utf-8")
+        return path
+
+    def test_only_a_run_on_today_or_yesterday_takes_an_earlier_day_along(self) -> None:
+        self.day(10, _msg(9, 0, "Henry", "one", day=10))
+        self.day(12, _msg(9, 0, "Henry", "one", day=12))
+        # The 11th has no trace, so the day before it is the latest archived one.
+        self.assertEqual(copilot.earlier_archived_day(date(2026, 8, 12), today=date(2026, 8, 12)), date(2026, 8, 10))
+        self.assertEqual(copilot.earlier_archived_day(DAY, today=date(2026, 8, 14)), date(2026, 8, 12))
+        # A deliberate rerun of an older date touches no other day.
+        self.assertIsNone(copilot.earlier_archived_day(DAY, today=date(2026, 8, 15)))
+        self.assertIsNone(copilot.earlier_archived_day(date(2026, 8, 20), today=date(2026, 8, 20)))
+
+    def test_it_reports_what_the_second_archive_added(self) -> None:
+        path = self.day(12, _msg(22, 0, "Henry", "before the analysis", day=12))
+
+        def later(day, **options):
+            self.assertEqual(day, date(2026, 8, 12))
+            self.assertEqual(options, {"web_chats": True, "web_chats_synced": True})
+            path.write_text(
+                path.read_text(encoding="utf-8") + _join(
+                    _msg(23, 0, "Henry", "after it", day=12), _msg(23, 1, "Codex", "noted", day=12)),
+                encoding="utf-8",
+            )
+
+        with patch.object(copilot, "writeback_ai_day", side_effect=later):
+            line = copilot.archive_earlier_day_again(DAY, today=DAY, web_chats=True, web_chats_synced=True)
+        self.assertEqual(
+            line,
+            "Earlier day 2026-08-12 archived again: 2 messages sent after its last archive are now in its traces.",
+        )
+        with patch.object(copilot, "writeback_ai_day"):
+            self.assertEqual(
+                copilot.archive_earlier_day_again(DAY, today=DAY),
+                "Earlier day 2026-08-12 archived again: nothing new.",
+            )
+        with patch.object(copilot, "writeback_ai_day", side_effect=RuntimeError("no link")):
+            self.assertTrue(copilot.archive_earlier_day_again(DAY, today=DAY).startswith(
+                "WARNING: could not archive 2026-08-12 again (no link)"
+            ))
+
+    def test_the_command_never_forces_the_earlier_day(self) -> None:
+        self.day(12, _msg(22, 0, "Henry", "before the analysis", day=12))
+        self.day(13, _msg(9, 0, "Henry", "today"))
+        parser = copilot.build_parser()
+        args = parser.parse_args(["writeback-ai-day", "--date", "2026-08-13", "--force"])
+        out = io.StringIO()
+        real_earlier = copilot.earlier_archived_day
+        with patch.object(copilot, "writeback_ai_day", return_value={"journal": "j"}) as run, \
+                patch.object(copilot, "earlier_archived_day", side_effect=lambda target, today=None: real_earlier(target, DAY)), \
+                redirect_stdout(out):
+            copilot.cmd_writeback_ai_day(args)
+        first, second = run.call_args_list
+        self.assertEqual(first.args, (DAY,))
+        self.assertTrue(first.kwargs["force"])
+        self.assertEqual(second.args, (date(2026, 8, 12),))
+        self.assertNotIn("force", second.kwargs)
+        self.assertNotIn("create_journal", second.kwargs)
+        self.assertTrue(second.kwargs["web_chats_synced"])
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "Earlier day 2026-08-12 archived again: nothing new.")
+        self.assertTrue(lines[1].startswith("Read budget:"))
+        self.assertEqual(lines[-1], "j")
+
+
 if __name__ == "__main__":
     unittest.main()

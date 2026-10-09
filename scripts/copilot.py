@@ -6357,18 +6357,21 @@ def writeback_ai_day(
     web_chats: bool = False,
     allow_missing_web_chats: bool = False,
     force: bool = False,
+    web_chats_synced: bool = False,
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn.
 
     `web_chats` first syncs Claude/ChatGPT web conversations through Chrome.
     Hooks leave it off so finishing a turn never launches the browser.
+    `web_chats_synced` says a sync in this run already covered them, so the
+    local archive is read as it is.
     Archived messages that a source no longer has are kept in their trace
     unless `force` is set, which needs Henry's explicit approval.
     """
     jp = journal_path_for_date(target)
     if not jp.exists() and not create_journal:
         raise FileNotFoundError(f"Journal not found: {jp}")
-    if web_chats:
+    if web_chats and not web_chats_synced:
         refresh_web_chats_for_writeback(target, allow_missing_web_chats)
     if not jp.exists():
         write_text(jp, render_diary_from_template(target))
@@ -6569,21 +6572,81 @@ def writeback_ai_day(
     }
 
 
+# A day is archived when its diary analysis starts, and nothing archives it
+# again that night. What was said afterwards (the analysis conversation itself,
+# anything up to midnight) reaches the traces when the next night's run takes
+# the earlier day along.
+EARLIER_DAY_LOOKBACK_DAYS = 7
+
+
+def earlier_archived_day(target: date, today: Optional[date] = None) -> Optional[date]:
+    """The latest archived day before ``target``, for a run on today or yesterday.
+
+    A deliberate rerun of an older date takes no other day along: old traces
+    are only rewritten when Henry asks for that date.
+    """
+    if not 0 <= ((today or date.today()) - target).days <= 1:
+        return None
+    for back in range(1, EARLIER_DAY_LOOKBACK_DAYS + 1):
+        day = target - timedelta(days=back)
+        if day_trace_paths(day) and journal_path_for_date(day).exists():
+            return day
+    return None
+
+
+def day_trace_message_count(day: date) -> int:
+    return sum(
+        1
+        for path in day_trace_paths(day)
+        for line in read_text(path).split("\n")
+        if TRACE_MESSAGE_RE.match(line)
+    )
+
+
+def archive_earlier_day_again(target: date, today: Optional[date] = None, **options: bool) -> Optional[str]:
+    """Archive the latest earlier day again; one line on what that added.
+
+    Never forced, and never fatal: the target day's archive is already written.
+    """
+    day = earlier_archived_day(target, today)
+    if day is None:
+        return None
+    before = day_trace_message_count(day)
+    try:
+        writeback_ai_day(day, **options)
+    except Exception as exc:
+        return (
+            f"WARNING: could not archive {day.isoformat()} again ({exc}); messages sent "
+            "after its last archive may still be missing from its traces."
+        )
+    added = day_trace_message_count(day) - before
+    if added <= 0:
+        return f"Earlier day {day.isoformat()} archived again: nothing new."
+    return (
+        f"Earlier day {day.isoformat()} archived again: {added} message"
+        + ("s" if added > 1 else "") + " sent after its last archive "
+        + ("are" if added > 1 else "is") + " now in its traces."
+    )
+
+
 def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
     target = parse_date_str(args.date)
+    options = {
+        "allow_missing_openclaw": bool(getattr(args, "allow_missing_openclaw", False)),
+        # The CLI parser turns web chats on; programmatic callers opt in.
+        "web_chats": bool(getattr(args, "web_chats", False)),
+        "allow_missing_web_chats": bool(getattr(args, "allow_missing_web_chats", False)),
+    }
     result = writeback_ai_day(
         target,
         create_journal=bool(getattr(args, "create_journal", False)),
-        allow_missing_openclaw=bool(
-            getattr(args, "allow_missing_openclaw", False)
-        ),
-        # The CLI parser turns web chats on; programmatic callers opt in.
-        web_chats=bool(getattr(args, "web_chats", False)),
-        allow_missing_web_chats=bool(
-            getattr(args, "allow_missing_web_chats", False)
-        ),
         force=bool(getattr(args, "force", False)),
+        **options,
     )
+    # The sync above fetched every changed web conversation, the earlier day's too.
+    earlier = archive_earlier_day_again(target, web_chats_synced=True, **options)
+    if earlier:
+        print(earlier)
     # Diary Mode reads next. List what cannot be read in one go, so the reading
     # plan is known up front instead of discovered by a truncated tool output.
     try:
