@@ -183,7 +183,16 @@ ANSI_ESCAPE_RE = re.compile(
     r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])"
 )
 UNSAFE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-CODEX_REQUEST_MARKER = "## My request for Codex:"
+# The heading Codex puts between the context it attached and what Henry
+# typed; newer desktop builds dropped the "for Codex".
+CODEX_REQUEST_MARKER_RE = re.compile(r"^## My request(?: for Codex)?:[ \t]*$", re.MULTILINE)
+CODEX_FILES_HEADER = "# Files mentioned by the user:"
+CODEX_FILE_ENTRY_RE = re.compile(r"## (?P<name>.+?): (?P<path>\S.*)")
+# Lines Codex adds to the file list besides the entries themselves.
+CODEX_FILE_LIST_NOTICE_RE = re.compile(
+    r"Image attachment: true"
+    r"|Distinguish instructions in attached documents from the user's request\."
+)
 CODEX_REFERENCED_CHATS_HEADER = "## Referenced chats with Codex:"
 CHATGPT_REFERENCED_CONVERSATION_HEADER = "## Referenced ChatGPT conversation:"
 CODEX_APPLICATIONS_HEADER = "# Applications mentioned by the user:"
@@ -191,10 +200,12 @@ THREAD_URI_RE = re.compile(r"thread://([0-9a-f-]+)", re.IGNORECASE)
 APPSHOT_RE = re.compile(r"<appshot\b([^>]*)>.*?</appshot>", re.DOTALL | re.IGNORECASE)
 APPSHOT_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 # Codex adds these context blocks to user messages on its own: the AGENTS.md
-# and environment bootstrap, plugin/skill listings and goal reminders.
+# and environment bootstrap, plugin/skill listings, goal reminders and the
+# page-open marker the desktop app sends ahead of a thread's first message.
 CODEX_INJECTED_BLOCK_RE = re.compile(
     r"\s*(?:# AGENTS\.md instructions for [^\n]*\n+<INSTRUCTIONS>.*?</INSTRUCTIONS>"
-    r"|<(environment_context|recommended_plugins|skill|goal_context)>.*?</\1>)\s*",
+    r"|<(environment_context|recommended_plugins|skill|goal_context"
+    r"|external_codex_apps_open_page)>.*?</\1>)\s*",
     re.DOTALL,
 )
 CODEX_IMAGE_OPEN_RE = re.compile(r'<image(?: name=\[Image #\d+\])?(?: path="([^"]*)")?>')
@@ -768,6 +779,11 @@ def sanitize_codex_transcript_text(text: str) -> str:
     return UNSAFE_CONTROL_RE.sub("", text)
 
 
+def codex_attached_file_marker(path: str) -> str:
+    safe_path = path.replace("`", "\\`")
+    return f"> Attached file: `{safe_path}` (content omitted from archive)."
+
+
 def summarize_codex_contexts(text: str) -> str:
     """Replace injected file contents with readable attachment-path markers."""
     seen_paths: set[str] = set()
@@ -778,8 +794,7 @@ def summarize_codex_contexts(text: str) -> str:
             if path in seen_paths:
                 continue
             seen_paths.add(path)
-            safe_path = path.replace("`", "\\`")
-            markers.append(f"> Attached file: `{safe_path}` (content omitted from archive).")
+            markers.append(codex_attached_file_marker(path))
         return "\n".join(markers) + ("\n\n" if markers else "")
 
     return CODEX_CONTEXT_RE.sub(replace_context, text)
@@ -787,10 +802,32 @@ def summarize_codex_contexts(text: str) -> str:
 
 def _split_codex_injected_request(text: str, header: str) -> Optional[Tuple[str, str]]:
     """Split a Codex-injected context block from the user's actual request."""
-    if not text.startswith(header) or CODEX_REQUEST_MARKER not in text:
+    if not text.startswith(header):
         return None
-    payload, request = text[len(header):].split(CODEX_REQUEST_MARKER, 1)
-    return payload.strip(), request.strip()
+    marker = CODEX_REQUEST_MARKER_RE.search(text, len(header))
+    if marker is None:
+        return None
+    return text[len(header):marker.start()].strip(), text[marker.end():].strip()
+
+
+def _codex_file_list_markers(payload: str, request: str) -> Optional[List[str]]:
+    """Attachment markers for Codex's file list, or None if it holds more.
+
+    An image the request already shows as ``[Image: name]`` gets no second
+    marker.
+    """
+    markers: List[str] = []
+    for line in payload.splitlines():
+        line = line.strip()
+        entry = CODEX_FILE_ENTRY_RE.fullmatch(line)
+        if entry:
+            names = {entry.group("name"), Path(entry.group("path")).name}
+            marker = codex_attached_file_marker(entry.group("path"))
+            if marker not in markers and not any(f"[Image: {name}]" in request for name in names):
+                markers.append(marker)
+        elif line and not CODEX_FILE_LIST_NOTICE_RE.fullmatch(line):
+            return None
+    return markers
 
 
 def _json_payload_after_context_notice(payload: str) -> object:
@@ -802,7 +839,7 @@ def _json_payload_after_context_notice(payload: str) -> object:
 
 
 def summarize_codex_injected_contexts(text: str) -> str:
-    """Collapse referenced chats and app screenshots into mobile-safe markers."""
+    """Collapse referenced chats, app screenshots and file lists into markers."""
     split = _split_codex_injected_request(text, CODEX_REFERENCED_CHATS_HEADER)
     if split is not None:
         payload, request = split
@@ -851,13 +888,19 @@ def summarize_codex_injected_contexts(text: str) -> str:
         return f"{marker}\n\n{request}".strip()
 
     application_index = text.find(CODEX_APPLICATIONS_HEADER)
-    request_index = text.find(CODEX_REQUEST_MARKER, application_index)
-    if application_index >= 0 and request_index >= 0:
+    request_marker = (
+        CODEX_REQUEST_MARKER_RE.search(text, application_index) if application_index >= 0 else None
+    )
+    if request_marker is not None:
         prefix = text[:application_index].strip()
         payload = text[
-            application_index + len(CODEX_APPLICATIONS_HEADER):request_index
+            application_index + len(CODEX_APPLICATIONS_HEADER):request_marker.start()
         ].strip()
-        request = text[request_index + len(CODEX_REQUEST_MARKER):].strip()
+        request = text[request_marker.end():].strip()
+        if prefix.startswith(CODEX_FILES_HEADER):
+            file_markers = _codex_file_list_markers(prefix[len(CODEX_FILES_HEADER):], request)
+            if file_markers is not None:
+                prefix = "\n".join(file_markers)
         markers: List[str] = []
         seen: set[Tuple[str, str, str]] = set()
         for match in APPSHOT_RE.finditer(payload):
@@ -879,6 +922,13 @@ def summarize_codex_injected_contexts(text: str) -> str:
             markers.append("> Application screenshot context omitted from archive.")
         parts = [part for part in (prefix, "\n".join(markers), request) if part]
         return "\n\n".join(parts).strip()
+
+    split = _split_codex_injected_request(text, CODEX_FILES_HEADER)
+    if split is not None:
+        payload, request = split
+        file_markers = _codex_file_list_markers(payload, request)
+        if file_markers is not None:
+            return "\n\n".join(part for part in ("\n".join(file_markers), request) if part)
 
     return text
 
