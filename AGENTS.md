@@ -1,6 +1,6 @@
 # Life Copilot — Codex
 
-> Version: v4.5 (2026-09-22). Design: [[life-copilot-v4.5-rfc]].
+> Version: v4.8 (2026-10-09). Design: [[life-copilot-v4.8-rfc]].
 
 ## L2 Kernel（不可自动修改）
 
