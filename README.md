@@ -1,9 +1,9 @@
 # Life Copilot
 
-> Version: v4.5 (2026-09-22)
+> Version: v4.8 (2026-10-09)
 > Runtime: Claude Code / Codex + Obsidian + local files
-> Design note: [[life-copilot-v4.5-rfc]]
-> Current update: read budget + people pages + closing-greeting rules moved out of memory
+> Design note: [[life-copilot-v4.8-rfc]]
+> Current update: a day timeline that puts every AI session and pasted WeChat chat on one time axis. Since v4.5: book pages (v4.6) and page trails (v4.7)
 
 Life Copilot is Henry's local personal operating system. It is not a task app, not a scheduler, and not a database. It is a small set of files and scripts that help an AI assistant read the right local evidence, preserve provenance, and suggest the smallest useful next step.
 
@@ -11,7 +11,7 @@ Life Copilot is Henry's local personal operating system. It is not a task app, n
 
 > **Do as much as needed, as little as possible.**
 
-This remains the top-level rule in v4.5. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
+This remains the top-level rule in v4.8. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
 
 In practice:
 
@@ -49,7 +49,7 @@ The old Quant roadmap still exists, but it is no longer the life-wide source of 
 
 ## 2. Daily Operating Loop
 
-The normal v4.5 loop is intentionally small:
+The normal v4.8 loop is intentionally small:
 
 1. Read `life-board.md`.
 2. Read today's diary if it exists.
@@ -114,6 +114,9 @@ The most important safety rule is that different kinds of text go to different p
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
 | Cumulative understanding of one person | `journal/people/{slug}.md` (git-ignored) | `maintain-page` |
+| What accumulates about that person, one section a day | `journal/people/{slug}-trail.md` (git-ignored) | `maintain-page --day` |
+| Cumulative understanding of one book, with its reading path | `journal/books/{slug}.md` (git-ignored) | `maintain-page --kind books` |
+| The day's AI sessions and pasted WeChat chats on one time axis | `journal/ai-conversations/…/YYYY-MM-DD-timeline.md` (derived: an index, not evidence) | rebuilt by `writeback-ai-day`; `day-timeline` for an older day |
 | Searchable insight index | `journal/insights.jsonl` | `append-insight` |
 
 Do not use `writeback-thought` for the Copilot response. Do not use `writeback-journal` to imitate Henry's diary voice. The relational response, memory transaction, and target-day direction use separate input files.
@@ -133,6 +136,8 @@ python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD -
 python3 scripts/copilot.py maintain-memory --date YYYY-MM-DD --input-file /tmp/memory-operations.json --dry-run
 python3 scripts/copilot.py maintain-memory --date YYYY-MM-DD --input-file /tmp/memory-operations.json
 python3 scripts/copilot.py maintain-page --slug SLUG --input-file /tmp/page.md --base-sha256 SHA --dry-run
+python3 scripts/copilot.py maintain-page --slug SLUG --day YYYY-MM-DD --day-file /tmp/day.md --dry-run
+python3 scripts/copilot.py day-timeline --date YYYY-MM-DD
 python3 scripts/copilot.py check-read-budget --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-memory --date YYYY-MM-DD --kind "pattern" --content "..."
 python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --content "..."
@@ -155,6 +160,19 @@ local archive for the failed side.
 `preview-ai-day` reads that archive without syncing, and `finalize-ai-day`
 never touches the browser. Setup and troubleshooting:
 [tools/web-chat-archiver/00-readme.md](tools/web-chat-archiver/00-readme.md).
+
+After the traces are written, `writeback-ai-day` rebuilds the day's timeline
+next to them: every session, and every WeChat chat Henry pasted into the diary,
+in time order, with the stretches where nothing ran and the minutes where two
+things ran at once. The read plan the command prints names it in front of the
+traces. It is read first and replaces none of them. `day-timeline` builds one
+for an older day from the traces already on disk.
+
+A day is first archived when its diary analysis starts, so what is said later
+that evening is not in its traces yet. Run for today or yesterday,
+`writeback-ai-day` also archives the latest earlier day again and prints how
+many messages that added. Rewriting a trace keeps the messages its source no
+longer has; dropping them needs `--force` and Henry's explicit approval.
 
 ```bash
 python3 scripts/copilot.py install-web-chats
@@ -258,7 +276,7 @@ The root of `resources/` should normally contain only `00-readme.md`, vault-leve
 
 ## 8. Schedule Projection
 
-v4.5 schedules remain projections, not training-era generated plans.
+v4.8 schedules remain projections, not training-era generated plans.
 
 Default path:
 
@@ -345,7 +363,7 @@ git diff --check
 
 `RFC` means **Request for Comments**.
 
-In this vault, RFCs live in `docs/rfcs/`. [[life-copilot-v4.5-rfc]] is the current design rationale and migration note; the earlier ones stay as history. It is not short for "refactor", although this version does refactor rule ownership.
+In this vault, RFCs live in `docs/rfcs/`. [[life-copilot-v4.8-rfc]] is the current design rationale and migration note; the earlier ones stay as history, and v4.6 to v4.8 are still in their observation weeks. It is not short for "refactor".
 
 Use the RFC when you want to understand why the system changed. Use this README when you want to know how to operate it. `docs/rfcs/00-index.md` says which changes get an RFC and when an RFC stops changing.
 
@@ -353,7 +371,7 @@ Use the RFC when you want to understand why the system changed. Use this README 
 
 ## 12. Trial Week
 
-v4.5 enters a seven-day observation window after each promoted rule.
+Each promoted rule enters a seven-day observation window.
 
 Watch for:
 
@@ -361,10 +379,11 @@ Watch for:
 - whether Diary entry and bedtime close merge the right user content
 - whether direct bedtime requests close reliably without meta-discussion false positives
 - whether each daily trace contains the final request and one-line reply
+- whether each analysed day has a timeline, and the read receipt names it next to the traces
 - whether an evolved rule improves its target without regressing other golden cases
 
 Hard-constraint failure, “变差了”, or two matching soft regressions trigger rollback.
 
 ---
 
-*Last updated: [[2026-07-25]]*
+*Last updated: [[2026-10-09]]*
