@@ -65,13 +65,14 @@ Scripts are used only when they protect a structure that is easy to damage by ha
 
 ### Diary Mode Completion Contract
 
-When Diary Mode analysis completes for a day, the following five steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"):
+When Diary Mode analysis completes for a day, the following six steps are the **default closing actions** (unless Henry says "只调查 / 不要写回 / dry run"). A closing greeting, when one is due, is drafted first from `journal/closing-greetings.md` and travels inside the writebacks below.
 
-1. **Analysis Writeback** — write the analysis to `What Life Copilot Said` via `writeback-journal`.
-2. **Life Board Audit Gate** — run `audit-life-board --date YYYY-MM-DD`. If the board is due or the diary explicitly mentions board drift, the final response must include `Proposed Life Board Patch`; do not edit `life-board.md` unless Henry confirms.
-3. **Inbox Audit / Inbox Closure Check** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks. If inbox is empty, briefly note that.
-4. **Daily Suggestion Writeback** — write a short, actionable suggestion to the target day's `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`. The suggestion body must use target-day voice (`today`, not `tomorrow`) and should reflect post-inbox-closure state — do not recommend inbox actions for files already moved during the audit.
-5. **Final Response**.
+1. **Analysis Writeback** — write the relational response to `What Life Copilot Said` via `writeback-journal`. Memory, Board, inbox and tool status stay out of it.
+2. **Automatic Memory Maintenance** — decide no-op / add / replace / promote / archive backstage, run `maintain-memory --dry-run`, then apply and reread. When the day's evidence touches someone who has a people page, maintain that page in the same step, as `journal/people/00-index.md` describes.
+3. **Life Board Audit Gate** — run `audit-life-board --date YYYY-MM-DD`. If the board is due or the diary explicitly mentions board drift, the final response must include `Proposed Life Board Patch`; do not edit `life-board.md` unless Henry confirms.
+4. **Inbox Audit / Inbox Closure Check** — list pending files in `inbox/`, suggest destinations per `inbox/00-readme.md`, but do not move or delete unless Henry explicitly asks. If inbox is empty, briefly note that.
+5. **Daily Suggestion Writeback** — write a short direction for the target day to its `## 🧭 Daily Suggestion` via `writeback-daily-suggestion`. The body must use target-day voice (`today`, not `tomorrow`) and should reflect post-inbox-closure state — do not recommend inbox actions for files already moved during the audit.
+6. **Final Response** — the relational response first, then the shortest account of the maintenance that really happened, with a read receipt: for each must-read source, the timeline and every trace included, whether it was read in full.
 
 Life Board audit runs before inbox/Daily Suggestion so stale board context is surfaced while keeping board patches out of `What Life Copilot Said` unless the board is the diary topic. Inbox audit runs before Daily Suggestion so the suggestion does not recommend actions already completed during the nightly audit/flush. The sole authoritative contract lives in `prompts/diary-mode.md` §Completion Contract.
 
