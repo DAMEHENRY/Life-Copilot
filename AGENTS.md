@@ -24,6 +24,7 @@
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
+| 当日时间轴 | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md`；派生，`writeback-ai-day` 每次从当天 trace 重建：各会话按时间排在一条轴上，标出并行和空白。是索引不是证据，原话仍引 trace；空白只说明没有 AI 对话。旧日期用 `day-timeline --date YYYY-MM-DD` 从已有 trace 生成 |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md`。一次读不完的页拆出同目录的轨迹 `{slug}-trail.md`：一天一节，只追加 |
 | 书页 | `journal/books/{slug}.md`；同人物页，另有带出处的阅读轨迹，规则见 `journal/books/00-index.md` |
@@ -59,7 +60,7 @@
 - 回复里链接 vault 内的笔记、PDF 等资料时用 `[[vault 相对路径|标题]]`（`.md` 可省；定位用 `#标题`，不带行号）；在 Obsidian 外（如 Codex 桌面 app）要能点开时用 `obsidian://open?vault=Life&file=<URL 编码的 vault 相对路径>`。不用 `/Users/...` 绝对路径，Obsidian 点开会新建空笔记；本条优先于 harness 默认的文件链接格式，代码文件照旧。
 - 历史日记、原始 trace、外部导入原文和 archive 不做批量改写。
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
-- 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划（当天每份 trace 都单列，附总量）和提到的人物页、书页。有轨迹的页另列轨迹的行段：页整读，轨迹读这一段，更早的按日期或判断编号（如 `J12`）检索。
+- 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划（时间轴排在最前，先读它再读 trace；当天每份 trace 都单列，附总量）和提到的人物页、书页。有轨迹的页另列轨迹的行段：页整读，轨迹读这一段，更早的按日期或判断编号（如 `J12`）检索。
 - `journal/insights.jsonl` 是检索索引，不是主要用户可见引用；历史结论优先引用 `[[YYYY-MM-DD]]`。
 - 找原始日记可用本地语义检索 `python3 tools/recall/recall.py search`：用当时的具体细节、中英文各查一次；结果只是候选，引用前读原文；命中转写、分析或 trace 时按日期回到原始日记；分析某天时加 `--before` 该日。它不是必需证据源，不可用时继续用关键词检索并在执行说明里注明。关键词检索用 `rg --no-ignore` 或 `command grep`，默认工具可能按 `.gitignore` 静默跳过 `journal/`。
 - 外部搜索只校验时效性事实；明确区分事实、他方主张、传言与推断。
