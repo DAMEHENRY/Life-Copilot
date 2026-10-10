@@ -5,7 +5,8 @@ Life Copilot — lean orchestration utilities.
 Only structural write commands that are unsafe for the model to do freehand:
 writeback-journal, writeback-thought, writeback-chat-capture,
 writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
-day-timeline, finalize-ai-day, sync-web-chats, web-chats-status, install-web-chats,
+day-timeline, finalize-ai-day, refresh-ai-day, sync-web-chats, web-chats-status,
+install-web-chats,
 writeback-memory, maintain-memory, maintain-page, append-insight, compact-memory,
 audit-system-rules, promote-system-rule, rollback-system-rule, quant-mission,
 quant-question-link, sync-quant-state, sync-roadmap-stats, update-schedule.
@@ -5798,18 +5799,25 @@ def write_ai_trace(
     source: str,
     source_records: Callable[[], List[SourceRecord]],
     force: bool = False,
+    skip_unchanged: bool = False,
 ) -> int:
     """Write a regenerated trace without silently shrinking the archive.
 
     Messages the source no longer has are merged back unless ``force`` is
     set (Henry must approve that). Returns how many were kept.
+    ``skip_unchanged`` leaves a trace that would come out identical alone,
+    so a refresh that runs every minute neither touches the file nor reports
+    the same kept messages again.
     """
     label = path.relative_to(ROOT)
     kept = 0
     if path.exists():
+        existing = read_text(path)
         merged, lost, dropped = guard_trace_transcript(
-            read_text(path), transcript, source, source_records
+            existing, transcript, source, source_records
         )
+        if skip_unchanged and existing == "\n".join([*header, merged if lost and not force else transcript]):
+            return len(lost) if lost and not force else 0
         if dropped:
             print(
                 f"  note: {label}: left out {len(dropped)} archived message(s) that the "
@@ -6455,6 +6463,9 @@ def writeback_ai_day(
     allow_missing_web_chats: bool = False,
     force: bool = False,
     web_chats_synced: bool = False,
+    update_journal: bool = True,
+    pull_openclaw: bool = True,
+    skip_unchanged: bool = False,
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn.
 
@@ -6464,13 +6475,18 @@ def writeback_ai_day(
     local archive is read as it is.
     Archived messages that a source no longer has are kept in their trace
     unless `force` is set, which needs Henry's explicit approval.
+    The daytime refresh (`refresh-ai-day`) turns `update_journal` off, so the
+    diary Henry may be typing in is neither required, created nor rewritten;
+    turns `pull_openclaw` off on the runs that should not open an SSH
+    connection, which leaves the existing Kai trace as it is; and sets
+    `skip_unchanged` so identical traces are not written again.
     """
     jp = journal_path_for_date(target)
-    if not jp.exists() and not create_journal:
+    if update_journal and not jp.exists() and not create_journal:
         raise FileNotFoundError(f"Journal not found: {jp}")
     if web_chats and not web_chats_synced:
         refresh_web_chats_for_writeback(target, allow_missing_web_chats)
-    if not jp.exists():
+    if update_journal and not jp.exists():
         write_text(jp, render_diary_from_template(target))
 
     codex_transcript = export_codex_day_transcript(target).strip()
@@ -6511,8 +6527,12 @@ def writeback_ai_day(
     renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
     claude_code_transcript, _, _ = export_claude_code_day_transcript(target)
     openclaw_retained: List[Tuple[str, str]] = []
+    openclaw_status = "pulled"
     try:
-        openclaw_transcript, _, _ = export_openclaw_day_transcript(target, retained=openclaw_retained)
+        if pull_openclaw:
+            openclaw_transcript, _, _ = export_openclaw_day_transcript(target, retained=openclaw_retained)
+        else:
+            openclaw_transcript, openclaw_status = "", "skipped"
     except OpenClawImportUnavailable as exc:
         if not allow_missing_openclaw:
             raise OpenClawImportUnavailable(
@@ -6522,7 +6542,7 @@ def writeback_ai_day(
                 "archive is intentional. "
                 f"Cause: {exc}"
             ) from exc
-        openclaw_transcript = ""
+        openclaw_transcript, openclaw_status = "", "unavailable"
         print(
             "  warning: OpenClaw unavailable; intentionally skipped Kai / "
             f"direct-message trace because --allow-missing-openclaw was set ({exc})"
@@ -6595,7 +6615,9 @@ def writeback_ai_day(
             f"# {target.isoformat()} {title}",
             "",
         ]
-        kept = write_ai_trace(path, header, transcript, source, records, force=force)
+        kept = write_ai_trace(
+            path, header, transcript, source, records, force=force, skip_unchanged=skip_unchanged
+        )
         if kept:
             kept_lost_messages[source] = kept
     # The timeline is derived from the traces just written; it must never fail the archive.
@@ -6605,41 +6627,42 @@ def writeback_ai_day(
         timeline_path = None
         print(f"  warning: day timeline not written ({exc})")
 
-    # Normalize generated wikilinks so retries and concurrent sessions cannot
-    # produce more than one bullet for a source/day.
-    journal_text = read_text(jp)
-    if codex_transcript:
-        journal_text = ensure_single_from_kai_link(
-            journal_text,
-            codex_link,
-            "Life Copilot / planning / reflection conversations.",
-        )
-    if renderer_transcript:
-        journal_text = ensure_single_from_kai_link(
-            journal_text,
-            renderer_link,
-            "Obsidian-rendered Claude Code conversations.",
-        )
-    if claude_code_transcript:
-        journal_text = ensure_single_from_kai_link(
-            journal_text,
-            claude_code_link,
-            "Native Claude Code conversations.",
-        )
-    if openclaw_transcript:
-        journal_text = ensure_single_from_kai_link(
-            journal_text,
-            openclaw_link,
-            "Kai / OpenClaw direct conversations.",
-        )
-    for provider, web_path in web_paths.items():
-        journal_text = ensure_single_from_kai_link(
-            journal_text,
-            obsidian_wikilink_for_path(web_path),
-            WEB_CHAT_SOURCES[provider][3],
-        )
-    write_text(jp, journal_text)
-    print(f"  updated: {jp.relative_to(ROOT)}")
+    if update_journal:
+        # Normalize generated wikilinks so retries and concurrent sessions cannot
+        # produce more than one bullet for a source/day.
+        journal_text = read_text(jp)
+        if codex_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                codex_link,
+                "Life Copilot / planning / reflection conversations.",
+            )
+        if renderer_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                renderer_link,
+                "Obsidian-rendered Claude Code conversations.",
+            )
+        if claude_code_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                claude_code_link,
+                "Native Claude Code conversations.",
+            )
+        if openclaw_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                openclaw_link,
+                "Kai / OpenClaw direct conversations.",
+            )
+        for provider, web_path in web_paths.items():
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                obsidian_wikilink_for_path(web_path),
+                WEB_CHAT_SOURCES[provider][3],
+            )
+        write_text(jp, journal_text)
+        print(f"  updated: {jp.relative_to(ROOT)}")
 
     trace_text = read_text(codex_path) if codex_transcript else ""
     if hook_payload:
@@ -6656,7 +6679,8 @@ def writeback_ai_day(
                 "Final trace verification failed: " + ", ".join(missing)
             )
     return {
-        "journal": str(jp),
+        "journal": str(jp) if update_journal else "",
+        "openclaw_status": openclaw_status,
         "codex_trace": str(codex_path) if codex_transcript else "",
         "claude_code_trace": str(claude_code_path) if claude_code_transcript else "",
         "renderer_trace": str(renderer_path) if renderer_transcript else "",
@@ -6757,6 +6781,56 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
     for line in summary:
         print(line)
     print(result["journal"])
+
+
+def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
+    """Bring the day's traces and timeline up to date between diary analyses.
+
+    The Mac's sync job runs this before every push to Kai's mirror, so what was
+    said to Claude Code or Codex reaches Kai within minutes, and what was said
+    to Kai reaches this vault the next time the Mac is awake. It is a courtesy
+    copy: the nightly `writeback-ai-day` stays the authoritative archive. So
+    it never touches the diary, never syncs web chats (that opens Chrome),
+    never forces, treats an unreachable Kai as normal, and prints one line
+    only when it wrote something.
+    """
+    target = parse_date_or_today(getattr(args, "date", None))
+    captured = io.StringIO()
+    stdout, sys.stdout = sys.stdout, captured
+    try:
+        result = writeback_ai_day(
+            target,
+            update_journal=False,
+            allow_missing_openclaw=True,
+            pull_openclaw=not getattr(args, "no_openclaw", False),
+            skip_unchanged=True,
+        )
+    except ValueError as exc:
+        if "No AI conversations" not in str(exc):
+            raise
+        result = {}
+    finally:
+        sys.stdout = stdout
+    log = captured.getvalue()
+    if "openclaw_status" not in result:  # a day with nothing to archive yet
+        result["openclaw_status"] = (
+            "skipped" if getattr(args, "no_openclaw", False)
+            else "unavailable" if "OpenClaw unavailable" in log
+            else "pulled"
+        )
+    if getattr(args, "verbose", False):
+        print(log, end="")
+    wrote = [
+        line.split("wrote:", 1)[1].strip().rsplit("/", 1)[-1]
+        for line in log.splitlines() if "wrote:" in line
+    ]
+    if wrote:
+        for line in log.splitlines():
+            if "WARNING" in line:
+                print(line.strip())
+        print(f"refreshed {target.isoformat()}: {', '.join(wrote)}")
+    # The sync job reads this line to decide when Kai was last pulled.
+    print(f"openclaw: {result.get('openclaw_status', 'skipped')}")
 
 
 def cmd_sync_web_chats(args: argparse.Namespace) -> None:
@@ -7912,6 +7986,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     s.set_defaults(func=cmd_writeback_ai_day, web_chats=True)
+
+    s = sub.add_parser("refresh-ai-day")
+    s.add_argument("--date", help="Day to refresh (YYYY-MM-DD). Defaults to today.")
+    s.add_argument(
+        "--no-openclaw",
+        action="store_true",
+        help="Do not connect to Kai on this run; the existing Kai trace is left as it is.",
+    )
+    s.add_argument("--verbose", action="store_true", help="Print the full writeback log.")
+    s.set_defaults(func=cmd_refresh_ai_day)
 
     s = sub.add_parser("sync-web-chats")
     s.add_argument(
