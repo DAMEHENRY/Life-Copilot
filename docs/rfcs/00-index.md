@@ -10,6 +10,7 @@ Design records for Life Copilot. The rules an agent follows live in `AGENTS.md` 
 | [[life-copilot-v4.6-rfc]] | in progress | Book pages: a people page for a book, plus a linked reading trail |
 | [[life-copilot-v4.7-rfc]] | in progress: code, pilot page and rules landed 2026-10-04, observing until 2026-10-11 | A page and its trail: the page holds what changes and fits in one read, a dated append-only trail holds what accumulates |
 | [[life-copilot-v4.8-rfc]] | in progress: code and rules landed 2026-10-09, observing until 2026-10-16 | A day timeline: every session of the day on one time axis, rebuilt from the traces and read before them |
+| [[life-copilot-v4.9-rfc]] | in progress: code, entry file and sync job landed 2026-10-10, observing until 2026-10-17 | Kai becomes an entrance with no rules or memory of its own; traces are refreshed during the day and the mirror is pushed within a minute of a change |
 
 ## Conventions
 

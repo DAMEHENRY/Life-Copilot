@@ -1,6 +1,6 @@
 # Life Copilot — Codex
 
-> Version: v4.8 (2026-10-09). Design: [[life-copilot-v4.8-rfc]].
+> Version: v4.9 (2026-10-10). Design: [[life-copilot-v4.9-rfc]].
 
 ## L2 Kernel（不可自动修改）
 
@@ -35,6 +35,7 @@
 | Active Board | `life-board.md` |
 | Seeds / Inbox | `seeds/` / `inbox/` |
 | 模式 prompts | `prompts/{chat,diary,quant,study}-mode.md` |
+| Telegram 入口 | `prompts/telegram-entry.md`；Kai（OpenClaw）的指令原件，随只读镜像下发到它的主机。Kai 只是入口：不另存记忆、不写 vault。这份文件不属于四个 mode prompt，只在 Henry 要求时修改 |
 | 演化规则 | `prompts/evolution-policy.md` |
 | 结构化命令 | `scripts/copilot.py` |
 | 本地语义检索 | `tools/recall/recall.py`（索引在 `tools/recall/data/`，不进 git） |
@@ -76,6 +77,7 @@
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
   同时归档 Codex、原生 Claude Code CLI、Life Claude Renderer 与 OpenClaw/Kai；Claude Code 仅保留可见正文并过滤 thinking、工具记录、sidechain 和本地斜杠命令。
   一天在日记分析开始时归档，当晚之后的对话由下一次归档补上：对今天或昨天运行时，命令顺带重新归档此前最近一个有 trace 的日子（不带 `--force`），并报告补进了几条。
+  白天另有 `refresh-ai-day`，由 Mac 的同步任务在每次推送镜像前运行：只把当天的 trace 和时间轴刷新到最新，不碰日记、不同步网页对话、Kai 不可达时跳过、内容没变就不写文件。它让 Kai 和各入口当天就能互相看到对话，是中间副本；夜间的 `writeback-ai-day` 仍是权威归档，所以白天的 trace 可能缺网页对话和 Kai 最近几分钟的消息。
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
   重写已有 trace 时，来源已不再保存的消息（OpenClaw 过期会话、Codex 重试或回滚掉的轮次、Renderer 裁掉的历史）会并回原位置并打印 WARNING；来源仍有记录、只是导入器现在过滤或改写的消息照常去掉。所以旧 trace 里可能留有旧版导入器没过滤的系统文字。只有 Henry 明确同意丢弃这些消息时才用 `--force`。
   同一命令先经 Chrome 扩展同步 Claude 网页版与 ChatGPT 网页版（含 Health）对话，再写 `claude-web` / `chatgpt-web` trace；Chrome 未开时会后台启动并在同步后退出。网页对话同为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。

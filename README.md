@@ -1,9 +1,9 @@
 # Life Copilot
 
-> Version: v4.8 (2026-10-09)
+> Version: v4.9 (2026-10-10)
 > Runtime: Claude Code / Codex + Obsidian + local files
-> Design note: [[life-copilot-v4.8-rfc]]
-> Current update: a day timeline that puts every AI session and pasted WeChat chat on one time axis. Since v4.5: book pages (v4.6) and page trails (v4.7)
+> Design note: [[life-copilot-v4.9-rfc]]
+> Current update: the Telegram entrance (Kai) takes its rules and memory from the vault, and traces are refreshed during the day. Since v4.5: book pages (v4.6), page trails (v4.7) and the day timeline (v4.8)
 
 Life Copilot is Henry's local personal operating system. It is not a task app, not a scheduler, and not a database. It is a small set of files and scripts that help an AI assistant read the right local evidence, preserve provenance, and suggest the smallest useful next step.
 
@@ -11,7 +11,7 @@ Life Copilot is Henry's local personal operating system. It is not a task app, n
 
 > **Do as much as needed, as little as possible.**
 
-This remains the top-level rule in v4.8. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
+This remains the top-level rule in v4.9. The system should do enough to preserve evidence, protect writeback boundaries, and keep active work visible. It should avoid adding rules, files, scripts, or modes just because they might be useful someday.
 
 In practice:
 
@@ -49,7 +49,7 @@ The old Quant roadmap still exists, but it is no longer the life-wide source of 
 
 ## 2. Daily Operating Loop
 
-The normal v4.8 loop is intentionally small:
+The normal v4.9 loop is intentionally small:
 
 1. Read `life-board.md`.
 2. Read today's diary if it exists.
@@ -113,6 +113,7 @@ The most important safety rule is that different kinds of text go to different p
 | Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
 | Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai / Claude web / ChatGPT web (incl. Health) daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
+| The same traces, kept current between diary analyses | `journal/ai-conversations/` (traces and timeline only; the diary is not touched) | `refresh-ai-day`, run by the laptop's sync job |
 | Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
 | Cumulative understanding of one person | `journal/people/{slug}.md` (git-ignored) | `maintain-page` |
 | What accumulates about that person, one section a day | `journal/people/{slug}-trail.md` (git-ignored) | `maintain-page --day` |
@@ -129,6 +130,7 @@ Common commands:
 ```bash
 python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
+python3 scripts/copilot.py refresh-ai-day
 python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file /tmp/capture.md
 python3 scripts/copilot.py finalize-ai-day --hook-input-file /tmp/hook.json
 python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file /tmp/analysis.md
@@ -168,6 +170,16 @@ in time order, with the stretches where nothing ran and the minutes where two
 things ran at once. The read plan the command prints names it in front of the
 traces. It is read first and replaces none of them. `day-timeline` builds one
 for an older day from the traces already on disk.
+
+`refresh-ai-day` keeps the day's traces and timeline current between diary
+analyses. The laptop's sync job runs it before each push of the read-only
+mirror that Kai, the Telegram entrance, reads; the job runs every minute and
+does nothing unless a mirrored file or an AI session changed. The refresh never
+touches the diary, never syncs web chats, treats an unreachable Kai as normal,
+and writes a trace only when it would differ. `writeback-ai-day` remains the
+authoritative archive. Kai's own instructions are `prompts/telegram-entry.md`,
+delivered with the mirror; it keeps no memory of its own and writes nothing to
+the vault.
 
 A day is first archived when its diary analysis starts, so what is said later
 that evening is not in its traces yet. Run for today or yesterday,
