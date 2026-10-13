@@ -2253,6 +2253,32 @@ def openclaw_message_text(content: object) -> str:
     return "\n\n".join(parts).strip()
 
 
+def openclaw_media_placeholders(message: dict) -> List[str]:
+    """One placeholder per file attached to a user message, in the order sent.
+
+    OpenClaw stages what the owner sends on its host and lists it under
+    ``__openclaw.media``; the message text does not mention it. An image
+    becomes ``[Image: name]`` and anything else ``[Attachment: name]``, named
+    after the file as it was sent or, failing that, as it was staged.
+    """
+    runtime = message.get("__openclaw")
+    media = runtime.get("media") if isinstance(runtime, dict) else None
+    placeholders: List[str] = []
+    for item in media if isinstance(media, list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        content_type = str(item.get("contentType") or "").lower()
+        source = item.get("fileName") or item.get("path")
+        # A "]" or a line break in the name would end the placeholder early.
+        name = " ".join(Path(source).name.replace("]", " ").split()) if isinstance(source, str) else ""
+        if kind == "image" or content_type.startswith("image/"):
+            placeholders.append(f"[Image: {name}]" if name else "[Image]")
+        elif name or kind or content_type:
+            placeholders.append(f"[Attachment: {name or 'untitled'}]")
+    return placeholders
+
+
 def openclaw_sent_messages(content: object, owner_targets: frozenset = frozenset()) -> List[str]:
     """Return what Kai sent to the owner's chat through the message tool.
 
@@ -2301,6 +2327,8 @@ def openclaw_session_visible_messages(
     Kai answers either with plain text or by sending through the message tool
     (the only record of most replies since OpenClaw moved to tool-based
     delivery), so both count. ``owner_targets`` are the owner's chat ids.
+    What the owner attached follows the text as placeholders, so a photo sent
+    without a caption is still a message.
     """
     messages: List[Tuple[str, str, str]] = []
     last_visible_message: Optional[Tuple[str, str]] = None
@@ -2337,7 +2365,8 @@ def openclaw_session_visible_messages(
             continue
         content = message.get("content")
         if role == "user":
-            texts = [OPENCLAW_INTERNAL_CONTEXT_RE.sub("", openclaw_message_text(content)).strip()]
+            text = OPENCLAW_INTERNAL_CONTEXT_RE.sub("", openclaw_message_text(content)).strip()
+            texts = ["\n\n".join(part for part in [text, *openclaw_media_placeholders(message)] if part)]
         else:
             texts = [openclaw_message_text(content), *openclaw_sent_messages(content, owner_targets)]
         for text in texts:
@@ -5945,7 +5974,8 @@ def openclaw_day_source_records(d: date, retained: List[Tuple[str, str]]) -> Lis
     """Every message the OpenClaw sessions read for ``d`` still hold.
 
     Kai's text and each of its message-tool sends count separately, since
-    the importer archives them as separate messages.
+    the importer archives them as separate messages. A message that is only
+    attachments counts too, under the placeholders it is archived as.
     """
     records: List[SourceRecord] = []
     for session_id, session_jsonl in retained:
@@ -5964,7 +5994,7 @@ def openclaw_day_source_records(d: date, retained: List[Tuple[str, str]]) -> Lis
             ):
                 continue
             content = message.get("content")
-            texts = [openclaw_message_text(content)]
+            texts = [openclaw_message_text(content) or "\n".join(openclaw_media_placeholders(message))]
             for part in content if isinstance(content, list) else []:
                 if not isinstance(part, dict) or part.get("type") != "toolCall" or part.get("name") != "message":
                     continue

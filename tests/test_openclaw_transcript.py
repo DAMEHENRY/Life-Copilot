@@ -743,7 +743,10 @@ def millis(moment):
     return int(moment.timestamp() * 1000)
 
 
-def owner_record(text, moment, channel="telegram"):
+def owner_record(text, moment, channel="telegram", media=None, owner=True):
+    runtime = {"senderIsOwner": owner}
+    if media is not None:
+        runtime["media"] = media
     return json.dumps(
         {
             "type": "message",
@@ -752,7 +755,7 @@ def owner_record(text, moment, channel="telegram"):
                 "role": "user",
                 "sourceChannel": channel,
                 "content": text,
-                "__openclaw": {"senderIsOwner": True},
+                "__openclaw": runtime,
             },
         },
         ensure_ascii=False,
@@ -765,6 +768,106 @@ def kai_record(text, moment):
 
 def sessions_json_is_gone(path):
     raise copilot.OpenClawRemoteFileMissing(f"{path} does not exist")
+
+
+STAGING = "/home/user/.openclaw/workspace/media/inbound/openclaw-staged-00000000-0000-4000-8000-000000000001"
+
+
+def staged(name, content_type="image/jpeg", kind="image", **extra):
+    """A file the owner sent, as OpenClaw 2026.9 lists it on the message."""
+    path = f"{STAGING}/{name}"
+    return {
+        "path": path, "url": path, "contentType": content_type, "kind": kind,
+        "workspaceDir": "/home/user/.openclaw/workspace", **extra,
+    }
+
+
+class TestOpenClawAttachments(unittest.TestCase):
+    """Files sent to Kai are listed beside the message text, never inside it."""
+
+    def messages(self, *records):
+        return [
+            (role, text)
+            for _, role, text in copilot.openclaw_session_visible_messages("\n".join(records), DAY)
+        ]
+
+    def test_attached_images_follow_the_text_as_placeholders(self):
+        session = "\n".join([
+            owner_record(
+                "看一下这两张图",
+                local_time(DAY, 11, 30),
+                media=[staged("input-aaaa.jpg"), staged("input-bbbb.jpg")],
+            ),
+            kai_record("看到了。", local_time(DAY, 11, 31)),
+        ])
+
+        text, count = copilot.export_openclaw_session_transcript(session, DAY)
+
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            text,
+            f"[{copilot.format_chat_timestamp(stamp(local_time(DAY, 11, 30)))}] Henry: 看一下这两张图\n\n"
+            "[Image: input-aaaa.jpg]\n\n"
+            "[Image: input-bbbb.jpg]\n\n"
+            f"[{copilot.format_chat_timestamp(stamp(local_time(DAY, 11, 31)))}] Kai: 看到了。\n",
+        )
+        self.assertNotIn(STAGING, text)
+
+    def test_message_with_only_images_is_still_archived(self):
+        messages = self.messages(
+            owner_record("", local_time(DAY, 9), media=[staged("input-aaaa.jpg")]),
+            owner_record("", local_time(DAY, 9, 1), media=[staged("input-bbbb.jpg"), staged("input-cccc.jpg")]),
+            owner_record("", local_time(DAY, 9, 2)),
+        )
+
+        self.assertEqual(messages, [
+            ("user", "[Image: input-aaaa.jpg]"),
+            ("user", "[Image: input-bbbb.jpg]\n\n[Image: input-cccc.jpg]"),
+        ])
+
+    def test_entries_without_a_kind_are_told_apart_by_content_type(self):
+        # OpenClaw 2026.7 and earlier kept only the path and the content type.
+        older = [
+            {"path": f"{STAGING}/aaaa.jpg", "contentType": "image/jpeg"},
+            {"path": f"{STAGING}/bbbb.ogg", "contentType": "audio/ogg"},
+        ]
+
+        messages = self.messages(owner_record("两个文件", local_time(DAY, 9), media=older))
+
+        self.assertEqual(messages, [("user", "两个文件\n\n[Image: aaaa.jpg]\n\n[Attachment: bbbb.ogg]")])
+
+    def test_other_files_become_attachment_placeholders(self):
+        media = [
+            staged("input-dddd.pdf", "application/pdf", "document", fileName="notes [final].pdf"),
+            staged("input-eeee.mp4", "video/mp4", "video"),
+            {"kind": "audio"},
+            {"kind": "image"},
+            staged("input-ffff.webp", "image/webp", "sticker"),
+            {},
+            "not an entry",
+        ]
+
+        messages = self.messages(owner_record("", local_time(DAY, 9), media=media))
+
+        self.assertEqual(messages, [(
+            "user",
+            "[Attachment: notes [final .pdf]\n\n"
+            "[Attachment: input-eeee.mp4]\n\n"
+            "[Attachment: untitled]\n\n"
+            "[Image]\n\n"
+            "[Image: input-ffff.webp]",
+        )])
+        for line in messages[0][1].split("\n\n"):
+            # The rewrite guard and the timeline skip these lines by this pattern.
+            self.assertTrue(copilot.TRACE_ANNOTATION_RE.fullmatch(line), line)
+
+    def test_only_the_owners_attachments_are_archived(self):
+        messages = self.messages(
+            owner_record("", local_time(DAY, 9), media=[staged("input-aaaa.jpg")], owner=False),
+            owner_record("这张是我发的", local_time(DAY, 9, 1), media=[staged("input-bbbb.jpg")]),
+        )
+
+        self.assertEqual(messages, [("user", "这张是我发的\n\n[Image: input-bbbb.jpg]")])
 
 
 class TestOpenClawStoreExport(unittest.TestCase):
@@ -930,6 +1033,32 @@ class TestOpenClawStoreExport(unittest.TestCase):
         self.assertEqual((message_count, session_count), (4, 2))
         self.assertIn("这一段路你慢慢讲。" * 300, text)
         self.assertIn("Henry: 重置前的一句", text)
+
+    def test_day_trace_lists_what_was_attached_to_each_message(self):
+        store = {
+            "version": 1,
+            "store": True,
+            "index": {OWNER_KEY: SESSION},
+            "cold": [],
+            "transcripts": [
+                {
+                    "origin": "store",
+                    "session_id": SESSION,
+                    "channel": "telegram",
+                    "rows": [
+                        ["j", owner_record("帮我记一下", local_time(DAY, 11, 30), media=[staged("input-aaaa.jpg")])],
+                        ["j", kai_record("记下了。", local_time(DAY, 11, 31))],
+                        ["j", owner_record("", local_time(DAY, 11, 32), media=[staged("input-bbbb.jpg")])],
+                    ],
+                },
+            ],
+        }
+
+        text, message_count, session_count, _ = self.export(store)
+
+        self.assertEqual((message_count, session_count), (3, 1))
+        self.assertIn("Henry: 帮我记一下\n\n[Image: input-aaaa.jpg]\n\n", text)
+        self.assertTrue(text.endswith("Henry: [Image: input-bbbb.jpg]\n"), text)
 
     def test_corrupt_compressed_row_stops_the_import(self):
         store = {
@@ -1153,6 +1282,28 @@ class TestOpenClawStoreReader(unittest.TestCase):
         self.assertEqual((message_count, session_count), (2, 1))
         self.assertIn("Henry: 你好", text)
         self.assertIn("Kai: 你好，Henry。", text)
+
+    def test_compressed_event_with_images_reaches_the_day_export(self):
+        # The sender, transport and media facts push such an event past the
+        # size OpenClaw compresses at, so the host cannot look inside it.
+        sent = local_time(DAY, 11, 30)
+        event = owner_record("帮我记一下", sent, media=[staged("input-aaaa.jpg"), staged("input-bbbb.jpg")])
+        frame = zstd_compress(event.encode("utf-8"))
+        if frame is None:
+            self.skipTest("no zstd compressor on this machine")
+        navigation = json.dumps({"navigation": {"type": "message", "message": {"role": "user"}}})
+        con = self.build_database()
+        self.add_session(con, SESSION, OWNER_KEY, [(sent, None, frame, navigation)], updated=sent)
+        con.commit()
+        con.close()
+
+        with patch.object(copilot, "read_openclaw_remote_text", side_effect=sessions_json_is_gone), \
+             patch.object(copilot, "read_openclaw_remote_texts", return_value={}), \
+             patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]):
+            text, message_count, _ = copilot.export_openclaw_day_transcript(DAY)
+
+        self.assertEqual(message_count, 1)
+        self.assertIn("Henry: 帮我记一下\n\n[Image: input-aaaa.jpg]\n\n[Image: input-bbbb.jpg]\n", text)
 
     def test_reader_failure_is_reported_after_all_attempts(self):
         failed = type("Result", (), {"returncode": 1, "stdout": b"", "stderr": b"Traceback\ndatabase is locked\n"})()

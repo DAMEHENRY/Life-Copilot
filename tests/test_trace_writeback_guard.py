@@ -235,6 +235,38 @@ class TestTraceGuard(unittest.TestCase):
                                        _msg(9, 1, "Kai", "通过消息工具发出的回复"),
                                        _msg(9, 2, "Kai", "旧的文字回复"), _msg(9, 10, "Henry", "谢谢")))
 
+    def test_message_that_gains_placeholders_replaces_its_archived_copy(self):
+        heading = "### Kai / Telegram Session s"
+        old = _join(heading, _msg(9, 0, "Henry", "看一下这张图"), _msg(9, 1, "Kai", "看到了。"))
+        new = _join(heading, _msg(9, 0, "Henry", "看一下这张图\n\n[Image: input-aaaa.jpg]"),
+                    _msg(9, 1, "Kai", "看到了。"), _msg(9, 2, "Henry", "[Image: input-bbbb.jpg]"))
+        records = [
+            _rec("s", 9, 0, "user", "看一下这张图"),
+            _rec("s", 9, 1, "assistant", "看到了。"),
+            _rec("s", 9, 2, "user", "[Image: input-bbbb.jpg]"),
+        ]
+        merged, lost, dropped = _guard("openclaw", old, new, records)
+        self.assertEqual(lost, [])
+        self.assertEqual([unit["text"] for unit in dropped], [_msg(9, 0, "Henry", "看一下这张图")])
+        self.assertEqual(merged, new)
+
+    def test_message_of_placeholders_only_is_kept_once_its_session_is_gone(self):
+        gone = ("### Kai / Telegram Session gone", _msg(8, 0, "Henry", "[Image: input-aaaa.jpg]"))
+        live = ("### Kai / Telegram Session live", _msg(9, 0, "Henry", "早"))
+        merged, lost, dropped = _guard("openclaw", _join(*gone, *live), _join(*live),
+                                       [_rec("live", 9, 0, "user", "早")])
+        self.assertEqual([unit["text"] for unit in lost], [gone[1]])
+        self.assertEqual(dropped, [])
+        self.assertEqual(merged, _join(*gone, *live))
+
+    def test_message_of_placeholders_only_is_not_doubled_when_rendered_anew(self):
+        heading = "### Kai / Telegram Session s"
+        old = _join(heading, _msg(9, 0, "Henry", "[Image]"))
+        new = _join(heading, _msg(9, 0, "Henry", "[Image: input-aaaa.jpg]"))
+        merged, lost, dropped = _guard("openclaw", old, new, [_rec("s", 9, 0, "user", "[Image: input-aaaa.jpg]")])
+        self.assertEqual((lost, len(dropped)), ([], 1))
+        self.assertEqual(merged, new)
+
     def test_manual_openclaw_block_is_never_left_behind(self):
         manual = (
             "<!-- openclaw-manual-begin channel=telegram source=henry-paste -->\n"
@@ -331,6 +363,20 @@ class TestSourceRecords(unittest.TestCase):
             ("user", "定时任务提示"),
         ])
 
+    def test_openclaw_records_count_a_message_that_is_only_attachments(self):
+        def sent(minute, content, *names):
+            media = [{"path": f"/srv/media/inbound/{name}", "contentType": "image/jpeg", "kind": "image"} for name in names]
+            return {"type": "message", "timestamp": _ts(9, minute), "message": {
+                "role": "user", "content": content, "__openclaw": {"senderIsOwner": True, "media": media}}}
+
+        rows = [sent(0, "看一下这张图", "input-aaaa.jpg"), sent(1, "", "input-bbbb.jpg", "input-cccc.jpg"), sent(2, "")]
+        jsonl = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+        records = copilot.openclaw_day_source_records(DAY, [("s", jsonl)])
+        self.assertEqual([(r[1], r[3]) for r in records], [
+            ("8/13/26 9:00 AM", "看一下这张图"),
+            ("8/13/26 9:01 AM", "[Image: input-bbbb.jpg] [Image: input-cccc.jpg]"),
+        ])
+
     def test_web_records_cover_every_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Path(tmp)
@@ -378,6 +424,9 @@ class TestWritebackKeepsLostMessages(unittest.TestCase):
                          return_value=[_rec(CODEX_ID, 9, 5, "user", "保留的问题")]),
             patch.object(copilot, "export_life_claude_renderer_day_transcript", return_value=("", 0, 0)),
             patch.object(copilot, "export_claude_code_day_transcript", return_value=("", 0, 0)),
+            # A host on the file-only layout: the real reader would open an SSH connection.
+            patch.object(copilot, "read_openclaw_store", return_value={
+                "version": 1, "store": False, "index": {}, "transcripts": [], "cold": []}),
             patch.object(copilot, "export_openclaw_day_transcript", return_value=("", 0, 0)),
         ]
         for patcher in self.patchers:
@@ -427,18 +476,16 @@ class TestWritebackKeepsLostMessages(unittest.TestCase):
             copilot.cmd_finalize_ai_day(SimpleNamespace(hook_input_file=str(hook_input), date=None))
             self.assertFalse(run.call_args.kwargs.get("force", False))
 
-    def test_openclaw_is_checked_against_the_sessions_the_export_read(self):
-        openclaw_trace = self.trace.with_name("2026-08-13-openclaw-trace.md")
-        kept_session = _join("### Kai / Telegram Session gone-session", _msg(8, 0, "Henry", "早上的对话"))
-        openclaw_trace.write_text(_trace_file("openclaw", kept_session), encoding="utf-8")
+    def writeback_with_live_openclaw_session(self, *rows: dict) -> tuple[dict, str]:
+        """Run the writeback against a host that holds one Telegram session."""
         files = {
             "sessions.json": json.dumps({"agent:main:telegram:direct:100": {"sessionId": "live-session"}}),
-            "live-session.jsonl": json.dumps({"type": "message", "timestamp": _ts(20, 0), "message": {
-                "role": "user", "content": "晚上的对话", "__openclaw": {"senderIsOwner": True}}}, ensure_ascii=False),
+            "live-session.jsonl": "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
         }
         self.patchers[-1].stop()
         self.patchers.pop()
         read_one = lambda path, *a, **k: files[path.rsplit("/", 1)[-1]]
+        output = io.StringIO()
         with patch.object(copilot, "read_openclaw_remote_text", side_effect=read_one), \
              patch.object(
                  copilot,
@@ -446,13 +493,40 @@ class TestWritebackKeepsLostMessages(unittest.TestCase):
                  side_effect=lambda paths, **k: {path: read_one(path) for path in paths},
              ), \
              patch.object(copilot, "list_openclaw_remote_direct_session_paths", return_value=[]), \
-             redirect_stdout(io.StringIO()):
+             redirect_stdout(output):
             result = copilot.writeback_ai_day(DAY)
+        return result, output.getvalue()
+
+    def test_openclaw_is_checked_against_the_sessions_the_export_read(self):
+        openclaw_trace = self.trace.with_name("2026-08-13-openclaw-trace.md")
+        kept_session = _join("### Kai / Telegram Session gone-session", _msg(8, 0, "Henry", "早上的对话"))
+        openclaw_trace.write_text(_trace_file("openclaw", kept_session), encoding="utf-8")
+        result, _ = self.writeback_with_live_openclaw_session({"type": "message", "timestamp": _ts(20, 0), "message": {
+            "role": "user", "content": "晚上的对话", "__openclaw": {"senderIsOwner": True}}})
         text = openclaw_trace.read_text(encoding="utf-8")
         self.assertIn("早上的对话", text)
         self.assertIn("晚上的对话", text)
         self.assertLess(text.index("早上的对话"), text.index("晚上的对话"))
         self.assertEqual(result["kept_lost_messages"], {"codex": 1, "openclaw": 1})
+
+    def test_openclaw_message_gains_its_placeholders_and_nothing_is_lost(self):
+        openclaw_trace = self.trace.with_name("2026-08-13-openclaw-trace.md")
+        heading = "### Kai / Telegram Session live-session"
+        openclaw_trace.write_text(_trace_file("openclaw", _join(
+            heading, _msg(20, 0, "Henry", "看一下这张图"), _msg(20, 1, "Kai", "看到了。"))), encoding="utf-8")
+        result, output = self.writeback_with_live_openclaw_session(
+            {"type": "message", "timestamp": _ts(20, 0), "message": {
+                "role": "user", "content": "看一下这张图", "__openclaw": {"senderIsOwner": True, "media": [
+                    {"path": "/srv/media/inbound/input-aaaa.jpg", "contentType": "image/jpeg", "kind": "image"}]}}},
+            {"type": "message", "timestamp": _ts(20, 1), "message": {
+                "role": "assistant", "content": [{"type": "text", "text": "看到了。"}]}},
+        )
+        text = openclaw_trace.read_text(encoding="utf-8")
+        self.assertTrue(text.endswith("\n\n" + _join(
+            heading, _msg(20, 0, "Henry", "看一下这张图\n\n[Image: input-aaaa.jpg]"), _msg(20, 1, "Kai", "看到了。"))), text)
+        self.assertEqual(text.count("看一下这张图"), 1)
+        self.assertIn("openclaw-trace.md: left out 1 archived message(s)", output)
+        self.assertEqual(result["kept_lost_messages"], {"codex": 1})
 
 
 if __name__ == "__main__":
