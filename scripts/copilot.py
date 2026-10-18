@@ -6145,8 +6145,9 @@ def day_timeline_messages(target: date) -> List[dict]:
 
 # A WeChat message as the export pastes it into the diary: the sender's name,
 # a line holding only the time, then the text. Pasting straight after a
-# sentence leaves the first name at the end of that sentence.
-TIMELINE_WECHAT_STAMP_RE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2}) (\d{1,2}):(\d{2})$")
+# sentence leaves the first name at the end of that sentence. The export pads
+# a one-digit hour with a second space ("2026/10/18  2:02").
+TIMELINE_WECHAT_STAMP_RE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})$")
 TIMELINE_WECHAT_NAME_CHARS = 24
 TIMELINE_WECHAT_BLOCK = 1_000_000  # block numbers above this are pasted chats
 

@@ -410,6 +410,28 @@ class TestPastedChats(TimelineCase):
         self.assertEqual(self.rows(), ["- 15:00 · WeChat · Henry 0, others 1 · (no message from Henry)"])
         self.assertIn("WeChat messages whose sender could not be read: 1.", text)
 
+    def test_a_one_digit_hour_padded_with_a_second_space_is_read(self) -> None:
+        self.diary(
+            "## 💭 Thoughts & Reflections",
+            "",
+            "Rowan",
+            "2026/08/13  2:02",
+            "still up?",
+            "Henry",
+            "2026/08/13  6:55",
+            "just woke",
+            "Rowan",
+            "2026/08/13 10:01",
+            "coffee?",
+        )
+        self.assertEqual(self.rows(), [
+            "- 02:02 · WeChat `Rowan` · Henry 0, others 1 · (no message from Henry)",
+            "- 02:02–06:55 · no messages for 4h 53m",
+            "- 06:55 · WeChat · Henry 1, others 0 · `just woke`",
+            "- 06:55–10:01 · no messages for 3h 6m",
+            "- 10:01 · WeChat `Rowan` · Henry 0, others 1 · (no message from Henry)",
+        ])
+
     def test_a_date_line_in_prose_is_not_a_message(self) -> None:
         self.diary("On 2026/08/13 10:00 I left the house.", "", "2026/08/13", "10:00")
         self.assertEqual(copilot.render_day_timeline(DAY), "")
