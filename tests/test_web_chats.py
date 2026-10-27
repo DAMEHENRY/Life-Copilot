@@ -368,6 +368,46 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertFalse(getattr(finalize, "web_chats", False))
 
 
+class TestChromeDetection(unittest.TestCase):
+    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    headless = (
+        chrome + " --disable-field-trial-config --disable-extensions --headless "
+        "--user-data-dir=/var/folders/x/T/playwright_chromiumdev_profile-vLf7nQ --remote-debugging-pipe --no-startup-window"
+    )
+    own = chrome + " --no-startup-window --profile-directory=Default"
+
+    def _processes(self, table: dict):
+        def fake_run(command, **kwargs):
+            if command[0] == "pgrep":
+                return SimpleNamespace(returncode=0 if table else 1, stdout="\n".join(map(str, table)))
+            pid = int(command[-1])
+            return SimpleNamespace(returncode=0, stdout=table[pid] + "\n")
+        return patch.object(copilot.subprocess, "run", side_effect=fake_run)
+
+    def test_headless_playwright_chrome_does_not_count_as_running(self):
+        with self._processes({34339: self.headless}):
+            self.assertFalse(copilot.chrome_is_running())
+
+    def test_own_chrome_counts_beside_a_headless_one(self):
+        with self._processes({34339: self.headless, 42544: self.own}):
+            self.assertEqual(copilot.user_chrome_pids(), [42544])
+            self.assertTrue(copilot.chrome_is_running())
+
+    def test_quit_signals_only_own_chrome(self):
+        with self._processes({34339: self.headless, 42544: self.own}), \
+             patch.object(copilot.os, "kill") as kill:
+            copilot.quit_chrome()
+        kill.assert_called_once_with(42544, copilot.signal.SIGTERM)
+
+    def test_launch_forces_a_new_instance(self):
+        with patch.object(copilot, "web_chats_host_alive", return_value=False), \
+             patch.object(copilot, "chrome_is_running", return_value=False), \
+             patch.object(copilot, "wait_for_web_chats_host", return_value=True), \
+             patch.object(copilot.subprocess, "run") as run:
+            self.assertTrue(copilot.connect_web_chats_host())
+        self.assertIn("-n", run.call_args.args[0])
+
+
 class TestSyncWebChats(unittest.TestCase):
     ok_response = {
         "ok": True,

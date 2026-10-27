@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -2633,19 +2634,52 @@ def wait_for_web_chats_host(timeout: float) -> bool:
     return web_chats_host_alive()
 
 
+# Flags that mark a Chrome started by a tool (Playwright, Puppeteer, a headless
+# run) rather than Henry's own browser. Such an instance uses its own profile
+# and never loads the archiver extension, so it must not count as "running".
+CHROME_AUTOMATION_FLAGS = (
+    "--headless",
+    "--remote-debugging-pipe",
+    "--remote-debugging-port",
+    "--user-data-dir",
+    "--enable-automation",
+)
+
+
+def is_automation_chrome(command_line: str) -> bool:
+    tokens = command_line.split()
+    return any(token == flag or token.startswith(flag + "=") for token in tokens for flag in CHROME_AUTOMATION_FLAGS)
+
+
+def user_chrome_pids() -> List[int]:
+    """Main Chrome processes running Henry's own profile; automation instances are left out."""
+    found = subprocess.run(["pgrep", "-x", WEB_CHATS_CHROME_APP], capture_output=True, text=True)
+    pids: List[int] = []
+    for token in found.stdout.split():
+        if not token.isdigit():
+            continue
+        shown = subprocess.run(["ps", "-o", "command=", "-p", token], capture_output=True, text=True)
+        if shown.returncode == 0 and shown.stdout.strip() and not is_automation_chrome(shown.stdout.strip()):
+            pids.append(int(token))
+    return pids
+
+
 def chrome_is_running() -> bool:
-    return subprocess.run(["pgrep", "-x", WEB_CHATS_CHROME_APP], capture_output=True).returncode == 0
+    return bool(user_chrome_pids())
 
 
 def quit_chrome() -> None:
-    try:
-        subprocess.run(
-            ["osascript", "-e", f'tell application "{WEB_CHATS_CHROME_APP}" to quit'],
-            capture_output=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    """Quit Henry's Chrome without touching automation instances.
+
+    A by-name AppleScript quit can land on a headless Chrome that happens to be
+    running, so the main processes are signalled directly; Chrome treats
+    SIGTERM as a normal quit.
+    """
+    for pid in user_chrome_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def connect_web_chats_host(connect_timeout: float = 60) -> bool:
@@ -2668,7 +2702,9 @@ def connect_web_chats_host(connect_timeout: float = 60) -> bool:
     try:
         subprocess.run(
             [
-                "open", "-g", "-j", "-a", WEB_CHATS_CHROME_APP, "--args",
+                # -n: a headless Chrome may already be registered as the app,
+                # and without it `open` would only activate that instance.
+                "open", "-g", "-j", "-n", "-a", WEB_CHATS_CHROME_APP, "--args",
                 "--no-startup-window", f"--profile-directory={WEB_CHATS_CHROME_PROFILE}",
             ],
             check=True,
