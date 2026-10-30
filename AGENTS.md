@@ -85,6 +85,9 @@
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：
   `python3 scripts/copilot.py writeback-daily-suggestion --source-date YYYY-MM-DD --input-file <file>`
+- 今天的颜色（Diary Mode 收尾，规则见 `prompts/day-colour.md`）：
+  `python3 scripts/copilot.py paint-day --date YYYY-MM-DD --input-file <file>`
+  由 Codex 内置生图出一幅不画实物的画，存到 `journal/paintings/`，嵌进日记 `## 🎨 Colour of the Day`。
 - 长期记忆 / 洞察：
   `maintain-memory`（默认事务入口）/ `writeback-memory`（低层追加）/ `append-insight`
 - 人物页：

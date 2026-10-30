@@ -5273,6 +5273,111 @@ def filter_existing_h3_blocks(existing: str, addition: str) -> str:
     return "\n\n".join(kept).strip()
 
 
+COLOUR_SECTION = "## 🎨 Colour of the Day"
+CODEX_BIN_CANDIDATES = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    str(Path.home() / ".codex/plugins/.plugin-appserver/codex-cli/bin/codex"),
+)
+
+
+def find_codex_bin() -> str:
+    for candidate in (os.environ.get("CODEX_BIN"), shutil.which("codex"), *CODEX_BIN_CANDIDATES):
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise FileNotFoundError("codex CLI not found; set CODEX_BIN")
+
+
+def split_colour_brief(text: str) -> Tuple[str, str]:
+    """Split a brief into (reading, prompt); the prompt is everything under `## Prompt`."""
+    m = re.search(r"(?m)^## Prompt\s*$", text)
+    if not m:
+        raise ValueError("brief needs a `## Prompt` heading")
+    prompt = text[m.end():].strip()
+    if not prompt:
+        raise ValueError("`## Prompt` section is empty")
+    reading = re.sub(r"(?m)^## Reading\s*$", "", text[: m.start()]).strip()
+    return reading, prompt
+
+
+def upsert_colour_section(journal_text: str, embed: str) -> str:
+    """Put the painting in its own section, just before From Kai (or the Copilot reply)."""
+    body = f"{COLOUR_SECTION}\n\n{embed}\n\n"
+    existing = re.search(rf"(?m)^{re.escape(COLOUR_SECTION)}\s*$", journal_text)
+    if existing:
+        nxt = re.search(r"(?m)^## ", journal_text[existing.end():])
+        end = existing.end() + nxt.start() if nxt else len(journal_text)
+        return journal_text[: existing.start()] + body + journal_text[end:].lstrip("\n")
+    for anchor in ("## 💬 From Kai", "## What Life Copilot Said"):
+        m = re.search(rf"(?m)^{re.escape(anchor)}", journal_text)
+        if m:
+            return journal_text[: m.start()] + body + journal_text[m.start():]
+    return journal_text.rstrip() + "\n\n" + body
+
+
+def generate_image_with_codex(prompt: str, timeout: int = 600) -> Path:
+    """Ask Codex to run its built-in image_gen once with the prompt verbatim; return the PNG."""
+    instruction = (
+        "Call the built-in image_gen tool exactly once, landscape format, with the prompt "
+        "between the markers below passed verbatim. Do not rewrite, extend or comment on it, "
+        "do not read any files, and do nothing else. Reply only with DONE.\n\n"
+        f"<<<PROMPT\n{prompt}\nPROMPT>>>"
+    )
+    workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "life-copilot-paint"
+    workdir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        find_codex_bin(), "exec", "--skip-git-repo-check", "--json",
+        "-s", "read-only", "-c", 'model_reasoning_effort="low"',
+        "-C", str(workdir), instruction,
+    ]
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    thread_id = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("{") and '"thread.started"' in line:
+            thread_id = json.loads(line).get("thread_id")
+            break
+    if not thread_id:
+        raise RuntimeError(f"codex exec gave no thread id (exit {proc.returncode}): {proc.stderr[-800:]}")
+    images = sorted(
+        (Path.home() / ".codex/generated_images" / thread_id).glob("*.png"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not images:
+        raise RuntimeError(f"codex thread {thread_id} produced no image: {proc.stdout[-800:]}")
+    return images[-1]
+
+
+def cmd_paint_day(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    jp = journal_path_for_date(target)
+    if not jp.exists():
+        raise FileNotFoundError(f"Journal not found: {jp}")
+    reading, prompt = split_colour_brief(read_text(Path(args.input_file)))
+
+    out_dir = JOURNAL_DIR / "paintings" / target.strftime("%Y") / target.strftime("%m")
+    image_path = out_dir / f"{target.isoformat()}-colour.png"
+    brief_path = out_dir / f"{target.isoformat()}-colour-prompt.md"
+    if image_path.exists() and not args.force:
+        raise FileExistsError(f"{image_path} exists; pass --force to paint again")
+
+    if args.dry_run:
+        print(f"would paint {image_path}\n--- prompt ---\n{prompt}")
+        return
+
+    source = generate_image_with_codex(prompt)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if image_path.exists():
+        image_path.rename(image_path.with_name(f"{image_path.stem}-{datetime.now():%Y%m%d%H%M%S}.png"))
+    shutil.copy2(source, image_path)
+    write_text(
+        brief_path,
+        f"---\ndate: {target.isoformat()}\nimage: {image_path.name}\nsource: {source}\n---\n\n"
+        f"## Reading\n\n{reading or '(none)'}\n\n## Prompt\n\n{prompt}\n",
+    )
+    rel = Path(os.path.relpath(image_path, jp.parent)).as_posix()
+    write_text(jp, upsert_colour_section(read_text(jp), f"![Colour of the Day]({rel})"))
+    print(str(image_path))
+
+
 def cmd_writeback_journal(args: argparse.Namespace) -> None:
     target = parse_date_str(args.date)
     jp = journal_path_for_date(target)
@@ -7974,6 +8079,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--date", required=True)
     s.add_argument("--input-file", required=True)
     s.set_defaults(func=cmd_writeback_journal)
+
+    s = sub.add_parser("paint-day", help="Have Codex paint the day's colour from a brief and embed it in the diary.")
+    s.add_argument("--date", required=True)
+    s.add_argument("--input-file", required=True, help="Brief: an optional `## Reading`, then `## Prompt` (sent verbatim).")
+    s.add_argument("--force", action="store_true", help="Paint again; the old image is kept with a timestamp suffix.")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_paint_day)
 
     s = sub.add_parser("audit-life-board")
     s.add_argument("--date", required=True, help="Diary date used to check board audit due/drift state (YYYY-MM-DD).")
