@@ -18,7 +18,7 @@ import tempfile
 from urllib.parse import quote
 import zipfile
 
-MESSAGE = re.compile(r"(?m)^·(?P<sender>[^\n]+)\n(?P<stamp>\d{4}[-/]\d{2}[-/]\d{2} +\d{1,2}:\d{2})(?:\r?$)")
+MESSAGE = re.compile(r"(?m)^·(?P<sender>[^\n]+)\n(?P<stamp>\d{4}[-/]\d{1,2}[-/]\d{1,2} +\d{1,2}:\d{2})(?:\r?$)")
 IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic'}
 
 

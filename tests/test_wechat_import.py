@@ -91,6 +91,24 @@ class WeChatTest(unittest.TestCase):
         self.assertIn('缺失数量未知', text)
         self.assertEqual(list((self.root / 'journal/wechat').glob('assets/*')), [])
 
+    def test_unpadded_export_date_and_markdown_file_remain_attachment(self):
+        name = 'reading-notes.md'
+        content = '# A document\n\nThis belongs to the attachment, not the chat.\n'
+        self.export(message('Rowan', '16:16', 'hello', '2026-7-8')
+                    + message('Henry', '16:18', '[File] ' + name, '2026-7-8'),
+                    {name: content.encode()})
+        self.run_import()
+        target = date(2026, 7, 8)
+        data = wi.read_day(self.root, target)
+        self.assertEqual(len(data['messages']), 2)
+        self.assertEqual(data['messages'][0]['at'], '2026-07-08T16:16')
+        attachment = data['messages'][1]['attachments'][0]
+        self.assertEqual((self.root / attachment['path']).read_text(), content)
+        rendered = wi.daily_path(self.root, target).read_text()
+        self.assertIn('[reading-notes.md](', rendered)
+        self.assertNotIn('![reading-notes.md]', rendered)
+        self.assertNotIn('This belongs to the attachment', rendered)
+
     def test_bad_receipt_and_unknown_format_warn_and_leave_other_sources(self):
         self.export('not an export')
         self.export(message('Henry', '10:00', 'good'))
