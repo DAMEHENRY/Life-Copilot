@@ -34,9 +34,9 @@ Diary Mode 写回关系性回应后，读这一天的人用一幅画回应它：
    <英文提示词>
    ```
 
-2. 后台运行（约一到两分钟，不阻塞后面的收尾步骤）：
+2. 写回关系性回应之后再后台运行（约一到两分钟，不阻塞后面的收尾步骤）：
    `python3 scripts/copilot.py paint-day --date YYYY-MM-DD --input-file <file>`
-   图存到 `journal/paintings/YYYY/MM/YYYY-MM-DD-colour.png`，Reading 和 Prompt 存在同目录的 `-colour-prompt.md`，日记里 `## 🎨 Colour of the Day` 一节只放这张图。已经画过时报错；重画要 Henry 开口，再加 `--force`（旧图带时间戳保留）。
+   图存到 `journal/paintings/YYYY/MM/YYYY-MM-DD-colour.png`，Reading 和 Prompt 存在同目录的 `-colour-prompt.md`，图放在日记 `## What Life Copilot Said` 标题下、回应正文之前，翻到回应时先看到这一天的颜色；之后用 `writeback-journal` 重写回应时这张图会保留。已经画过时报错；重画要 Henry 开口，再加 `--force`（旧图带时间戳保留）。
 3. 最终回复前确认命令成功。失败时不重试、不改走别的生图途径，只在执行说明里写一句原因；日记分析不受影响。
 
 ## 保持安静

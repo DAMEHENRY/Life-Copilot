@@ -3859,6 +3859,10 @@ def replace_journal_copilot_section(journal_text: str, new_section: str) -> str:
     new_stripped = new_section.strip()
     if new_stripped.startswith(marker):
         new_stripped = new_stripped[len(marker):].strip()
+    # The day's painting sits at the top of this section; a rewritten reply keeps it.
+    painting = re.match(r"\s*(!\[Colour of the Day\]\([^)\n]*\))", after_marker[: next_h2.start()] if next_h2 else after_marker)
+    if painting and "![Colour of the Day](" not in new_stripped:
+        new_stripped = painting.group(1) + "\n\n" + new_stripped
     
     return journal_text[: idx + len(marker)].rstrip() + "\n\n" + new_stripped + ("\n\n" + tail if tail else "\n")
 
@@ -5299,19 +5303,27 @@ def split_colour_brief(text: str) -> Tuple[str, str]:
     return reading, prompt
 
 
-def upsert_colour_section(journal_text: str, embed: str) -> str:
-    """Put the painting in its own section, just before From Kai (or the Copilot reply)."""
-    body = f"{COLOUR_SECTION}\n\n{embed}\n\n"
-    existing = re.search(rf"(?m)^{re.escape(COLOUR_SECTION)}\s*$", journal_text)
-    if existing:
-        nxt = re.search(r"(?m)^## ", journal_text[existing.end():])
-        end = existing.end() + nxt.start() if nxt else len(journal_text)
-        return journal_text[: existing.start()] + body + journal_text[end:].lstrip("\n")
-    for anchor in ("## 💬 From Kai", "## What Life Copilot Said"):
-        m = re.search(rf"(?m)^{re.escape(anchor)}", journal_text)
-        if m:
-            return journal_text[: m.start()] + body + journal_text[m.start():]
-    return journal_text.rstrip() + "\n\n" + body
+COPILOT_MARKER = "## What Life Copilot Said"
+COLOUR_IMAGE_RE = re.compile(r"!\[Colour of the Day\]\([^)\n]*\)[ \t]*\n?")
+
+
+def upsert_colour_image(journal_text: str, embed: str) -> str:
+    """Put the painting right under the Copilot heading, so it is seen just before the reply.
+
+    Any earlier copy of the painting is removed, including the old standalone section.
+    """
+    text = journal_text
+    old_section = re.search(rf"(?m)^{re.escape(COLOUR_SECTION)}\s*$", text)
+    if old_section:
+        nxt = re.search(r"(?m)^## ", text[old_section.end():])
+        end = old_section.end() + nxt.start() if nxt else len(text)
+        text = text[: old_section.start()] + text[end:]
+    text = COLOUR_IMAGE_RE.sub("", text)
+    m = re.search(rf"(?m)^{re.escape(COPILOT_MARKER)}[ \t]*\n", text)
+    if not m:
+        raise ValueError(f"marker not found: {COPILOT_MARKER}; write the reply before painting")
+    rest = text[m.end():].lstrip("\n")
+    return text[: m.end()] + "\n" + embed + "\n\n" + rest
 
 
 def generate_image_with_codex(prompt: str, timeout: int = 600) -> Path:
@@ -5374,7 +5386,7 @@ def cmd_paint_day(args: argparse.Namespace) -> None:
         f"## Reading\n\n{reading or '(none)'}\n\n## Prompt\n\n{prompt}\n",
     )
     rel = Path(os.path.relpath(image_path, jp.parent)).as_posix()
-    write_text(jp, upsert_colour_section(read_text(jp), f"![Colour of the Day]({rel})"))
+    write_text(jp, upsert_colour_image(read_text(jp), f"![Colour of the Day]({rel})"))
     print(str(image_path))
 
 
