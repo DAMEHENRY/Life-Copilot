@@ -114,6 +114,7 @@ The most important safety rule is that different kinds of text go to different p
 | Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai / Claude web / ChatGPT web (incl. Health) daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | The same traces, kept current between diary analyses | `journal/ai-conversations/` (traces and timeline only; the diary is not touched) | `refresh-ai-day`, run by the laptop's sync job |
+| Manually selected WeChat share exports | Raw ZIPs in `journal/wechat-imports/`; daily records and attachments in `journal/wechat/`; diary `From WeChat` index | `import-wechat`; also ingested by `writeback-ai-day` and `refresh-ai-day` |
 | Durable memory | `journal/memory.md` | `maintain-memory` (`writeback-memory` is low-level append only) |
 | Cumulative understanding of one person | `journal/people/{slug}.md` (git-ignored) | `maintain-page` |
 | What accumulates about that person, one section a day | `journal/people/{slug}-trail.md` (git-ignored) | `maintain-page --day` |
@@ -131,6 +132,8 @@ Common commands:
 python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py refresh-ai-day
+python3 scripts/copilot.py import-wechat --dry-run
+python3 scripts/copilot.py import-wechat
 python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file /tmp/capture.md
 python3 scripts/copilot.py finalize-ai-day --hook-input-file /tmp/hook.json
 python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file /tmp/analysis.md

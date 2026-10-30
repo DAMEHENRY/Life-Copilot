@@ -33,6 +33,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+try:
+    from scripts import wechat_import
+except ModuleNotFoundError:  # python3 scripts/copilot.py
+    import wechat_import
+
 # ---------------------------------------------------------------------------
 # Paths (new flat structure)
 # ---------------------------------------------------------------------------
@@ -4038,6 +4043,9 @@ def read_budget_paths(target: Optional[date] = None) -> List[Path]:
         if day_timeline_path(target).exists():
             paths.append(day_timeline_path(target))
         paths += day_trace_paths(target)
+        wechat = wechat_import.daily_path(ROOT, target)
+        if wechat.exists():
+            paths.append(wechat)
         paths += [item["path"] for item in pages_mentioned(target) if "error" not in item]
     return paths
 
@@ -4069,6 +4077,7 @@ def audit_read_budget(target: Optional[date] = None) -> Dict[str, object]:
             "oversize_lines": oversize,
             "trace": path in traces,
             "timeline": path == timeline,
+            "wechat": path == wechat_import.daily_path(ROOT, target) if target else False,
         })
     counts = {
         status: sum(1 for item in files if item["status"] == status)
@@ -4094,7 +4103,7 @@ def format_read_parts(item: Dict[str, object]) -> str:
 
 def format_read_budget(result: Dict[str, object], include_ok: bool = True) -> List[str]:
     files = result["files"]
-    others = [item for item in files if not item.get("trace") and not item.get("timeline")]  # type: ignore[union-attr]
+    others = [item for item in files if not item.get("trace") and not item.get("timeline") and not item.get("wechat")]  # type: ignore[union-attr]
     counts = {
         status: sum(1 for item in others if item["status"] == status)
         for status in ("over", "near", "ok", "missing")
@@ -4123,6 +4132,12 @@ def format_read_budget(result: Dict[str, object], include_ok: bool = True) -> Li
                     f"{item['path']}  {item['bytes']:,} bytes" + format_read_parts(item)
                 )
         lines += format_trace_plan([item for item in files if item.get("trace")])  # type: ignore[union-attr]
+        for item in files:
+            if item.get("wechat"):
+                lines.append(f"WeChat source to read in full (human chats, including quoted forwards): {item['path']}  {item['bytes']:,} bytes" + (format_read_parts(item) or "; one read"))
+                data = wechat_import.read_day(ROOT, date.fromisoformat(str(result['date'])))
+                attachments = {a['path'] for m in data['messages'] for a in m['attachments']}
+                lines += [f"- WeChat attachment to inspect: {p}" for p in sorted(attachments)]
     return lines
 
 
@@ -4160,6 +4175,35 @@ def cmd_check_read_budget(args: argparse.Namespace) -> None:
     if target is not None:
         for line in format_pages_mentioned(pages_mentioned(target)):
             print(line)
+
+
+def sync_wechat_journal_index(target: date) -> Optional[Path]:
+    journal = journal_path_for_date(target)
+    if not journal.exists():
+        return None
+    before = read_text(journal)
+    after = wechat_import.journal_index(before, ROOT, target)
+    if before == after:
+        return None
+    # Additive indexes get private rollback copies; handwritten prose is unchanged.
+    snapshot = ROOT / 'journal' / 'wechat' / '.history' / (target.isoformat() + '-' + hashlib.sha256(before.encode()).hexdigest()[:16] + '.md')
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    if not snapshot.exists():
+        snapshot.write_text(before, encoding='utf-8')
+    wechat_import.changed_write(journal, after)
+    return journal
+
+
+def cmd_import_wechat(args: argparse.Namespace) -> None:
+    result = wechat_import.import_exports(ROOT, dry_run=args.dry_run)
+    if not args.dry_run:
+        for day in result['days']:
+            target = date.fromisoformat(day)
+            journal = sync_wechat_journal_index(target)
+            if journal:
+                result['written'].append(str(journal))
+            write_day_timeline(target)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 # People pages (journal/people/) and book pages (journal/books/): one standing
@@ -5063,6 +5107,9 @@ def pages_mentioned(target: date) -> List[Dict[str, object]]:
     sources = [journal_path_for_date(target)]
     sources += day_trace_paths(target)
     text = "\n".join(henry_owned_text(source) for source in sources if source.exists())
+    # Sender names provide relationship context; quoted forwards are not Henry's words.
+    wechat = wechat_import.read_day(ROOT, target)['messages']
+    text += '\n' + '\n'.join(m['sender'] + '\n' + (m['body'].split('[Chat History]', 1)[0] if m['sender'] == TRACE_USER else '') for m in wechat)
     found: List[Dict[str, object]] = []
     for kind, page in pages:
         try:
@@ -6408,6 +6455,19 @@ def format_timeline_minutes(minutes: int) -> str:
 def render_day_timeline(target: date) -> str:
     """The day's timeline file, or "" when the day has no timestamped message."""
     wechat, other_day, unread = day_timeline_wechat_messages(target)
+    imported_count = 0
+    seen_pasted = {(m['at'], m['who'], m['text']) for m in wechat}
+    chat_blocks: Dict[str, int] = {}
+    for message in wechat_import.read_day(ROOT, target)['messages']:
+        at = datetime.fromisoformat(message['at'])
+        first_line = message['body'].split('\n', 1)[0]
+        if (at, message['sender'], first_line) in seen_pasted:
+            continue
+        chat_blocks.setdefault(message['chat'], TIMELINE_WECHAT_BLOCK + 100000 + len(chat_blocks))
+        wechat.append({'at': at, 'henry': message['sender'] == TRACE_USER,
+                       'text': first_line, 'block': chat_blocks[message['chat']],
+                       'label': 'WeChat', 'session': '', 'title': '', 'who': message['sender']})
+        imported_count += 1
     segments = day_timeline_segments(day_timeline_messages(target) + wechat)
     if not segments:
         return ""
@@ -6494,7 +6554,8 @@ def render_day_timeline(target: date) -> str:
     if chats:
         summary += (
             f" WeChat: {len(wechat)} message" + ("s" if len(wechat) > 1 else "")
-            + f" from the diary in {len(chats)} segment" + ("s" if len(chats) > 1 else "") + "."
+            + (" from the diary and imported exports" if imported_count else " from the diary")
+            + f" in {len(chats)} segment" + ("s" if len(chats) > 1 else "") + "."
         )
     if other_day:
         summary += f" Pasted WeChat messages dated another day, left out: {other_day}."
@@ -6524,6 +6585,10 @@ def render_day_timeline(target: date) -> str:
         "",
         *rows,
     ]
+    if imported_count:
+        lines[8] = ("Rebuilt from the day's AI traces, pasted chats and imported WeChat exports. "
+                    "Quote original records, not this index. Forwarded messages remain quoted content; "
+                    "their internal timestamps are not Henry's timeline events. Gaps only mean no recorded messages.")
     if together:
         lines += ["", "## Side by side", ""]
         lines += [f"- {span(start, end)} · " + " + ".join(names) for start, end, names in together]  # type: ignore[arg-type]
@@ -6736,12 +6801,22 @@ def writeback_ai_day(
         for provider in WEB_CHAT_SOURCES:
             web_transcripts[provider], _, _ = export_web_chat_day_transcript(provider, target)
 
+    wechat_result = wechat_import.import_exports(ROOT)
+    for warning in wechat_result['warnings']:
+        print('  WARNING: WeChat import: ' + warning)
+    for path in wechat_result['written']:
+        print('  wrote: ' + str(Path(path).relative_to(ROOT)))
+    changed_wechat_days = {Path(path).name[:10] for path in wechat_result['written']}
+    for day in sorted(changed_wechat_days - {target.isoformat()}):
+        write_day_timeline(date.fromisoformat(day))
+
     if (
         not codex_transcript
         and not renderer_transcript
         and not claude_code_transcript
         and not openclaw_transcript
         and not any(web_transcripts.values())
+        and not wechat_import.read_day(ROOT, target)['messages']
     ):
         raise ValueError(
             "No AI conversations (Codex, Claude Code, Life Claude Renderer, OpenClaw, "
@@ -6814,6 +6889,8 @@ def writeback_ai_day(
     if update_journal:
         # Normalize generated wikilinks so retries and concurrent sessions cannot
         # produce more than one bullet for a source/day.
+        for day in wechat_result['days']:
+            sync_wechat_journal_index(date.fromisoformat(day))
         journal_text = read_text(jp)
         if codex_transcript:
             journal_text = ensure_single_from_kai_link(
@@ -6872,6 +6949,7 @@ def writeback_ai_day(
         "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
         "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
         "timeline": str(timeline_path) if timeline_path else "",
+        "wechat": wechat_result,
         "fallback_used": fallback_used,
         "kept_lost_messages": kept_lost_messages,
     }
@@ -8150,6 +8228,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--date", required=True, help="Day whose existing traces are put on one time axis (YYYY-MM-DD).")
     s.add_argument("--dry-run", action="store_true", help="Print the timeline instead of writing it.")
     s.set_defaults(func=cmd_day_timeline)
+
+    s = sub.add_parser("import-wechat", help="Import locally shared WeChat ZIPs and add daily From WeChat indexes.")
+    s.add_argument("--dry-run", action="store_true", help="Validate exports without writing archives or diaries.")
+    s.set_defaults(func=cmd_import_wechat)
 
     s = sub.add_parser("writeback-ai-day")
     s.add_argument("--date", required=True)

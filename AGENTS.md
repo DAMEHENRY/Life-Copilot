@@ -24,6 +24,7 @@
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
 | AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
+| 微信导出 | 快捷指令收件原件 `journal/wechat-imports/`；按消息日期生成 `journal/wechat/YYYY/MM/YYYY-MM-DD-wechat.md`，附件在 `journal/wechat/assets/`。日记 `From WeChat` 只放索引，真人聊天不混进 `From Kai` 或 AI trace；设计见 [[wechat-share-import-rfc]] |
 | 当日时间轴 | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md`；派生，`writeback-ai-day` 每次从当天 trace 和日记正文里贴的微信记录重建：各会话和各段聊天按时间排在一条轴上，标出并行和空白。是索引不是证据，原话仍引 trace 和日记；空白只说明没有 AI 对话、日记里也没贴聊天。旧日期用 `day-timeline --date YYYY-MM-DD` 从已有 trace 生成 |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
 | 人物页 | `journal/people/{slug}.md`；派生，不进 git，形状与规则见 `journal/people/00-index.md`。一次读不完的页拆出同目录的轨迹 `{slug}-trail.md`：一天一节，只追加 |
@@ -76,6 +77,7 @@
 - 原始对话归档：
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
   同时归档 Codex、原生 Claude Code CLI、Life Claude Renderer 与 OpenClaw/Kai；Claude Code 仅保留可见正文并过滤 thinking、工具记录、sidechain 和本地斜杠命令。
+  同时扫描微信快捷指令收件目录，保存原件 provenance、归档按日期拆分的聊天，并给对应的已有日记补 `From WeChat` 索引。读取计划另列微信原文和图片附件；整读原文并查看相关图片。转发内的消息是引用证据，不当作 Henry 当时参与的会话，不把里面的时间放进时间轴。`[Sticker]` 占位不代表表情图片已保存；微信可能完全省略语音，不能推断缺失条数。
   一天在日记分析开始时归档，当晚之后的对话由下一次归档补上：对今天或昨天运行时，命令顺带重新归档此前最近一个有 trace 的日子（不带 `--force`），并报告补进了几条。
   白天另有 `refresh-ai-day`，由 Mac 的同步任务在每次推送镜像前运行：只把当天的 trace 和时间轴刷新到最新，不碰日记、不同步网页对话、Kai 不可达时跳过、内容没变就不写文件。它让 Kai 和各入口当天就能互相看到对话，是中间副本；夜间的 `writeback-ai-day` 仍是权威归档，所以白天的 trace 可能缺网页对话和 Kai 最近几分钟的消息。
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
@@ -97,6 +99,9 @@
   书页加 `--kind books`，存在 `journal/books/`，另校验轨迹每步都链到存在的日记或 trace。
 - 读取预算：
   `python3 scripts/copilot.py check-read-budget [--date YYYY-MM-DD]`
+- 只导入微信收件（不运行日记分析）：
+  `python3 scripts/copilot.py import-wechat [--dry-run]`
+  扫描收件，生成各消息日期的原文和附件索引，为已有日记添加 `From WeChat` 并重建对应时间轴；不创建历史日记、不改正文。重复收件按 ZIP 哈希跳过；参与者一致的重叠选区按消息内容与出现次数合并。没有可靠会话 ID，同一组参与者的不同群有混淆边界，原始 ZIP 始终保留。白天 `refresh-ai-day` 也接收微信，但仍不碰日记。
 
 禁止 heredoc 作为 writeback input；先写临时文件，再传 `--input-file`。Capture 不授权 Diary Completion Contract。
 
