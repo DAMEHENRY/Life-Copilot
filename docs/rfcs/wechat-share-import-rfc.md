@@ -8,7 +8,7 @@
 
 Henry selects messages in WeChat and shares the exported ZIP to the Mac shortcut. The shortcut saves an untouched ZIP plus an extracted copy and receipt in `journal/wechat-imports/`. The importer validates the receipt hash and reads the ZIP itself. The extracted copy is a convenience, not the authority.
 
-`writeback-ai-day` and `refresh-ai-day` scan the receiver batches. The latter still never edits a diary. The nightly archive adds indexes to corresponding existing diaries, including earlier message dates. `import-wechat` imports without contacting AI sources and adds indexes to existing diaries for all message dates; it never creates historical diaries. Daily records live in `journal/wechat/YYYY/MM/YYYY-MM-DD-wechat.md`; the `From WeChat` section links to them separately from `From Kai`.
+`writeback-ai-day` and `refresh-ai-day` scan the receiver batches. The latter still never edits a diary. The nightly archive adds indexes to corresponding existing diaries, including earlier message dates. `import-wechat` imports without contacting AI sources and adds indexes to existing diaries for all message dates; it never creates historical diaries. Daily records live in `journal/wechat/YYYY/MM/YYYY-MM-DD-wechat.md`; the `From WeChat` section links to them separately from `From Kai` and is placed right after it (above `What Life Copilot Said` when a diary has no `From Kai`). Since 2026-10-31; five earlier diaries were moved, with snapshots in `journal/wechat/.history/`.
 
 The importer creates a private additive catalog and daily JSON projections for the timeline. Assets use content hashes and standard Markdown image/file links. Nothing from a private export is committed to the public repository.
 

@@ -224,4 +224,17 @@ def journal_index(text, root, target):
         return text
     if marker in text:
         return text.replace(marker, marker + '\n\n' + bullet, 1)
-    return text.rstrip() + '\n\n' + marker + '\n\n' + bullet + '\n'
+    section = marker + '\n\n' + bullet + '\n\n'
+    # The section sits right after From Kai: both list where the day's
+    # conversations are kept. Without From Kai, it goes above the reply.
+    at = None
+    kai = re.search(r'(?m)^## 💬 From Kai[ \t]*$', text)
+    if kai:
+        after = re.search(r'(?m)^## ', text[kai.end():])
+        at = kai.end() + after.start() if after else None
+    else:
+        reply = re.search(r'(?m)^## What Life Copilot Said[ \t]*$', text)
+        at = reply.start() if reply else None
+    if at is None:
+        return text.rstrip() + '\n\n' + section.rstrip() + '\n'
+    return text[:at] + section + text[at:]

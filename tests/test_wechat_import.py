@@ -132,9 +132,29 @@ class WeChatTest(unittest.TestCase):
         self.run_import()
         text = '# day\n\nhandwritten text\n\n## What Life Copilot Said\n\nreply\n'
         changed = wi.journal_index(text, self.root, DAY)
-        self.assertTrue(changed.startswith(text.rstrip()))
+        self.assertEqual(changed.replace(changed[changed.find('## 💬 From WeChat'):changed.find('## What Life Copilot Said')], ''), text)
+        self.assertLess(changed.find('From WeChat'), changed.find('What Life Copilot Said'))
         self.assertEqual(wi.journal_index(changed, self.root, DAY), changed)
         self.assertNotIn('From Kai', changed)
+
+    def test_journal_index_follows_from_kai(self):
+        self.export(message('Henry', '10:00', 'hello'))
+        self.run_import()
+        text = ('# day\n\nmine\n\n## 💬 From Kai\n\n- [[trace]]\n\n## 🧭 Tomorrow Projection Input\n\n'
+                'plan\n\n## What Life Copilot Said\n\nreply\n')
+        changed = wi.journal_index(text, self.root, DAY)
+        heads = [line for line in changed.splitlines() if line.startswith('## ')]
+        self.assertEqual(heads, ['## 💬 From Kai', '## 💬 From WeChat', '## 🧭 Tomorrow Projection Input', '## What Life Copilot Said'])
+        self.assertIn('- [[trace]]\n\n## 💬 From WeChat\n\n- [[', changed)
+        self.assertTrue(changed.endswith('reply\n'))
+
+    def test_journal_index_appends_when_no_known_section(self):
+        self.export(message('Henry', '10:00', 'hello'))
+        self.run_import()
+        text = '# day\n\nhandwritten text\n'
+        changed = wi.journal_index(text, self.root, DAY)
+        self.assertTrue(changed.startswith(text.rstrip()))
+        self.assertTrue(changed.rstrip().endswith('附件。'))
 
     def test_read_plan_and_timeline_ignore_nested_timestamps(self):
         quote = '[Chat History]\n\n    ·Quill\n    2026-10-30 12:00\n    quoted'
