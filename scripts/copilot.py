@@ -5373,12 +5373,50 @@ def upsert_colour_image(journal_text: str, embed: str) -> str:
     return text[: m.end()] + "\n" + embed + "\n\n" + rest
 
 
+# Image generation sometimes answers HTTP 429 (Too Many Requests). A rate-limited attempt is
+# tried once more after this many seconds; any other failure is not retried.
+PAINT_RETRY_WAIT = 300
+RATE_LIMITED_RE = re.compile(r"\b429\b|too many requests|rate[ _-]?limit", re.IGNORECASE)
+
+
+class NoImageError(RuntimeError):
+    """Codex finished without an image; `reason` is what it (and its session log) said."""
+
+    def __init__(self, thread_id: str, reason: str):
+        super().__init__(f"codex thread {thread_id} produced no image; Codex said: {reason}")
+        self.reason = reason
+
+
+def codex_image_error(thread_id: str) -> str:
+    """The image tool's own error line from the Codex session log, or '' when there is none."""
+    try:
+        log = read_text(codex_session_file_for_thread(thread_id))
+    except OSError:
+        return ""
+    m = re.search(r'image generation failed: [^:\\\n"]+', log)
+    return m.group(0).strip() if m else ""
+
+
 def generate_image_with_codex(prompt: str, timeout: int = 600) -> Path:
+    """Paint with Codex; when the attempt was rate limited, wait and try exactly once more."""
+    try:
+        return paint_once_with_codex(prompt, timeout)
+    except NoImageError as exc:
+        if not RATE_LIMITED_RE.search(exc.reason):
+            raise
+        print(f"{exc}\nrate limited; trying once more in {PAINT_RETRY_WAIT}s", file=sys.stderr, flush=True)
+        time.sleep(PAINT_RETRY_WAIT)
+    return paint_once_with_codex(prompt, timeout)
+
+
+def paint_once_with_codex(prompt: str, timeout: int) -> Path:
     """Ask Codex to run its built-in image_gen once with the prompt verbatim; return the PNG."""
     instruction = (
         "Call the built-in image_gen tool exactly once, landscape format, with the prompt "
         "between the markers below passed verbatim. Do not rewrite, extend or comment on it, "
-        "do not read any files, and do nothing else. Reply only with DONE.\n\n"
+        "do not read any files, and do nothing else. If the image was generated, reply only "
+        "with DONE. If the tool returned an error, do not call it again; reply only with "
+        "FAILED: and the error's first line, leaving out any HTML.\n\n"
         f"<<<PROMPT\n{prompt}\nPROMPT>>>"
     )
     workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "life-copilot-paint"
@@ -5397,11 +5435,22 @@ def generate_image_with_codex(prompt: str, timeout: int = 600) -> Path:
     if not thread_id:
         raise RuntimeError(f"codex exec gave no thread id (exit {proc.returncode}): {proc.stderr[-800:]}")
     images = sorted(
-        (Path.home() / ".codex/generated_images" / thread_id).glob("*.png"),
+        (CODEX_HOME / "generated_images" / thread_id).glob("*.png"),
         key=lambda p: p.stat().st_mtime,
     )
     if not images:
-        raise RuntimeError(f"codex thread {thread_id} produced no image: {proc.stdout[-800:]}")
+        # Codex is asked to reply FAILED with the error; the session log backs that up
+        # (a bare DONE once hid a rate limit).
+        replies = [
+            json.loads(line).get("item", {}).get("text", "")
+            for line in proc.stdout.splitlines()
+            if line.startswith("{") and '"agent_message"' in line
+        ]
+        reason = replies[-1] if replies else proc.stdout[-800:]
+        tool_error = codex_image_error(thread_id)
+        if tool_error and tool_error not in reason:
+            reason = f"{reason} [{tool_error}]"
+        raise NoImageError(thread_id, reason)
     return images[-1]
 
 
