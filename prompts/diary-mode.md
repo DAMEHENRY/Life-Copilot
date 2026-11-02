@@ -109,7 +109,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
    - `journal/insights.jsonl`：找已有命名模式、跨日期 refs、已验证或待验证的假设。
    - `journal/memory-archive.md`：找已经退出热记忆、但仍可能 relevant 的旧模式。
    - `journal/`：用关键词、变体表达、相关意象、场景词去找原始样本日记。
-   - 本地语义检索：`python3 tools/recall/recall.py search --before YYYY-MM-DD "当时的具体细节" "the same details in English"`（`YYYY-MM-DD` 为目标日期，一次调用可传多个查询）。用当时发生的具体细节检索，不用今天给事件起的定性；中英文各查一次。结果只是候选：命中「转写 / 分析 / 对话记录」时，按其日期回到当天原始日记；要找原件时加 `--kinds handwritten`；引用前读原文。检索不可用时继续用关键词检索，并在最终执行说明里注明，不中断分析。
+   - 本地语义检索：`python3 tools/recall/recall.py search --before YYYY-MM-DD "当时的具体细节" "the same details in English" 2>/dev/null`（目标日）。用具体细节，中英各查，不只搜事后定性。命中只定位：当天回望读日记，当时交流读对应 trace 的双方连续对话；不把 trace 一律当复述。按事件边界展开、截断续读，方法见 `tools/recall/00-readme.md`；当天 trace 仍按第 0.5 步整读。仅找手写用 `--kinds handwritten`。引用前读原文；检索不可用就改关键词检索，执行说明注明，不中断分析。
 3. 若命中的记忆或日记里包含 `[[...]]` wikilink，再按深度 1 跟读。
 4. 在后台判断今天是否延续、修正、验证或开启了某种历史变化；只有这一区分真正改变回应时，才自然写进正文，不展示审计标签。
 

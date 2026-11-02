@@ -64,7 +64,7 @@
 - 读取带 `[[...]]` 的证据文档时跟读一层，不递归。
 - 必读文件要整读。单次工具输出有上限，超过时 harness 会把全文存成文件并明说；这时按 `check-read-budget` 给的行段分段读完，不拿 `cut`、`head` 或猜的行号截出的内容当判断依据。`writeback-ai-day` 结束前会打印当天的读取计划（时间轴排在最前，先读它再读 trace；当天每份 trace 都单列，附总量）和提到的人物页、书页。有轨迹的页另列轨迹的行段：页整读，轨迹读这一段，更早的按日期或判断编号（如 `J12`）检索。
 - `journal/insights.jsonl` 是检索索引，不是主要用户可见引用；历史结论优先引用 `[[YYYY-MM-DD]]`。
-- 找原始日记可用本地语义检索 `python3 tools/recall/recall.py search`：用当时的具体细节、中英文各查一次；结果只是候选，引用前读原文；命中转写、分析或 trace 时按日期回到原始日记；分析某天时加 `--before` 该日。它不是必需证据源，不可用时继续用关键词检索并在执行说明里注明。关键词检索用 `rg --no-ignore` 或 `command grep`，默认工具可能按 `.gitignore` 静默跳过 `journal/`。
+- 找历史可用本地语义检索 `python3 tools/recall/recall.py search`：用当时的具体细节、中英文各查一次；命中只定位，引用前按问题回原件并沿事件边界展开连续内容，截断就补读。日记用于当天回望；接续共同聊过的经历时读 From Kai 对应来源的原始 trace，保留双方交流、补充纠正与后续变化，不能一律把 trace 当成后来的复述。具体读取方法见 `tools/recall/00-readme.md`；分析某天时加 `--before` 该日。它不是必需证据源，不可用时继续用关键词检索并在执行说明里注明。关键词检索用 `rg --no-ignore` 或 `command grep`，默认工具可能按 `.gitignore` 静默跳过 `journal/`。
 - 外部搜索只校验时效性事实；明确区分事实、他方主张、传言与推断。
 - 新文件夹和普通文档用 lowercase kebab-case；保留 `AGENTS.md`、`CLAUDE.md`、`00-index.md`、`00-readme.md` 例外。
 

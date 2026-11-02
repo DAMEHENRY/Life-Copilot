@@ -400,7 +400,7 @@ def print_results(results):
             where = f"{hit['path']}:{hit['line_start']}-{hit['line_end']}"
             print(f"{rank:>2}  {hit['score']:.3f}  {hit['date'] or '----------'}  {KIND_LABELS.get(hit['kind'], hit['kind']):<4}  {where}")
             print(f"    {snippet}")
-    print("\n结果只是候选：引用前打开原文；命中「转写 / 分析 / 对话记录」时，按日期回到当天的原始日记。")
+    print("\n命中只定位：当天回望读日记，当时交流读对应 trace 的双方连续对话；按事件边界展开，截断就续读。方法见 tools/recall/00-readme.md。")
 
 
 def main():
