@@ -5496,8 +5496,10 @@ def generate_image_with_codex(prompt: str, timeout: int = 600) -> Path:
 def paint_once_with_codex(prompt: str, timeout: int) -> Path:
     """Ask Codex to run its built-in image_gen once with the prompt verbatim; return the PNG."""
     instruction = (
-        "Call the built-in image_gen tool exactly once, landscape format, with the prompt "
-        "between the markers below passed verbatim. Do not rewrite, extend or comment on it, "
+        "Call the built-in image_gen tool exactly once with only prompt and "
+        "transparent_background=false. Do not pass a size field; the prompt itself "
+        "determines the composition. Pass the text between the markers below verbatim. "
+        "Do not rewrite, extend or comment on it, "
         "do not read any files, and do nothing else. If the image was generated, reply only "
         "with DONE. If the tool returned an error, do not call it again; reply only with "
         "FAILED: and the error's first line, leaving out any HTML.\n\n"
