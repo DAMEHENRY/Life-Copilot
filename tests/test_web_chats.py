@@ -132,9 +132,46 @@ def chatgpt_conversation() -> dict:
     }
 
 
+def _ds_message(message_id, parent, role, at, *fragments, status="FINISHED"):
+    return {
+        "message_id": message_id, "parent_id": parent, "role": role, "status": status,
+        "inserted_at": at.timestamp(),
+        "fragments": [{"id": str(i), **fragment} for i, fragment in enumerate(fragments, 1)],
+    }
+
+
+def deepseek_conversation() -> dict:
+    tip = {"type": "TIP", "style": "WARNING", "content": "This response is AI-generated, for reference only."}
+    messages = [
+        _ds_message(1, None, "USER", _local(12, 9), {"type": "REQUEST", "content": "什么是久期"},
+                    {"type": "FILE", "files": [{"file_name": "notes.webp"}, {"file_name": "plan.pdf"}]}),
+        _ds_message(2, 1, "ASSISTANT", _local(12, 9, 1),
+                    {"type": "THINK", "content": "SECRET THOUGHT"},
+                    {"type": "TOOL_SEARCH", "content": "Found 9 web pages", "queries": [{"query": "SEARCH QUERY"}]},
+                    {"type": "TOOL_OPEN", "result": {"title": "OPENED PAGE"}},
+                    {"type": "RESPONSE", "content": "久期衡量利率敏感度[citation:1][reference:2]。"}, tip),
+        # Regenerated away: only the selected branch is visible.
+        _ds_message(3, 2, "USER", _local(12, 9, 2), {"type": "REQUEST", "content": "OLD BRANCH"}),
+        _ds_message(4, 3, "ASSISTANT", _local(12, 9, 3), {"type": "RESPONSE", "content": "OLD ANSWER"}),
+        _ds_message(5, 2, "USER", _local(12, 9, 4), {"type": "REQUEST", "content": "换个话题"}),
+        _ds_message(6, 5, "ASSISTANT", _local(12, 9, 5),
+                    {"type": "TEMPLATE_RESPONSE", "content": "这个问题我暂时无法回答。"}, status="CONTENT_FILTER"),
+        _ds_message(7, 6, "USER", _local(13, 0, 10), {"type": "REQUEST", "content": "第二天再问"}),
+        _ds_message(8, 7, "ASSISTANT", _local(13, 0, 11), {"type": "RESPONSE", "content": "好的"}),
+    ]
+    return {
+        "chat_session": {"id": "d-1", "title": "债券基础", "current_message_id": 8},
+        "chat_messages": messages,
+    }
+
+
 def write_archive(store: Path) -> None:
     (store / "claude").mkdir(parents=True)
     (store / "chatgpt").mkdir(parents=True)
+    (store / "deepseek").mkdir(parents=True)
+    (store / "deepseek" / "d-1.json").write_text(json.dumps({
+        "provider": "deepseek", "id": "d-1", "tags": [], "conversation": deepseek_conversation(),
+    }), encoding="utf-8")
     (store / "claude" / "c-1.json").write_text(json.dumps({
         "provider": "claude", "id": "c-1", "tags": [], "conversation": claude_conversation(),
     }), encoding="utf-8")
@@ -223,6 +260,33 @@ class TestVisibleMessages(unittest.TestCase):
         )
 
 
+    def test_deepseek_keeps_visible_branch_answers_files_and_notices(self):
+        messages = copilot.deepseek_web_visible_messages(deepseek_conversation())
+        self.assertEqual(
+            [(role, text) for _, role, text in messages],
+            [
+                ("user", "什么是久期\n\n[Image: notes.webp]\n\n[File: plan.pdf]"),
+                ("assistant", "久期衡量利率敏感度。"),
+                ("user", "换个话题"),
+                ("assistant", "这个问题我暂时无法回答。"),
+                ("user", "第二天再问"),
+                ("assistant", "好的"),
+            ],
+        )
+        self.assertEqual(messages[0][0], _local(12, 9).astimezone(timezone.utc).isoformat())
+        joined = json.dumps(messages, ensure_ascii=False)
+        for hidden in ("SECRET THOUGHT", "SEARCH QUERY", "Found 9", "OPENED PAGE", "AI-generated",
+                       "citation", "reference", "OLD BRANCH", "OLD ANSWER"):
+            self.assertNotIn(hidden, joined)
+
+    def test_deepseek_without_current_message_falls_back_to_time_order(self):
+        conversation = deepseek_conversation()
+        conversation["chat_session"].pop("current_message_id")
+        conversation["chat_messages"] = conversation["chat_messages"][:2]
+        messages = copilot.deepseek_web_visible_messages(conversation)
+        self.assertEqual([role for _, role, _ in messages], ["user", "assistant"])
+
+
 class TestDayTranscripts(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -248,6 +312,21 @@ class TestDayTranscripts(unittest.TestCase):
         self.assertIn("### ChatGPT Web Conversation g-1 [Health] - 比较跑步数据", transcript)
         self.assertIn("Source: <https://chatgpt.com/c/g-1>", transcript)
         self.assertIn("ChatGPT: 心率偏高。\n\n建议休息", transcript)
+
+    def test_deepseek_day_transcript(self):
+        day1, count1, conversations1 = copilot.export_web_chat_day_transcript("deepseek", date(2026, 9, 12), self.store)
+        day2, count2, _ = copilot.export_web_chat_day_transcript("deepseek", date(2026, 9, 13), self.store)
+        self.assertEqual((count1, conversations1, count2), (4, 1, 2))
+        self.assertIn("### DeepSeek Web Conversation d-1 - 债券基础", day1)
+        self.assertIn("Source: <https://chat.deepseek.com/a/chat/s/d-1>", day1)
+        self.assertRegex(day1, r"\[9/12/26 9:01 AM\] DeepSeek: 久期衡量利率敏感度。")
+        self.assertNotIn("第二天再问", day1)
+        self.assertIn("Henry: 第二天再问", day2)
+
+    def test_deepseek_source_records_cover_every_branch(self):
+        records = copilot.web_chat_day_source_records("deepseek", date(2026, 9, 12), self.store)
+        self.assertEqual(len(records), 6)
+        self.assertTrue(any("OLD BRANCH" in record[3] for record in records))
 
     def test_missing_archive_is_empty(self):
         self.assertEqual(
@@ -300,6 +379,13 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertEqual(journal.count("[[2026-09-12-claude-web-trace]]"), 1)
         self.assertEqual(journal.count("[[2026-09-12-chatgpt-web-trace]]"), 1)
         self.assertIn("ChatGPT web conversations, including Health.", journal)
+        deepseek_trace = (self.trace_dir / "2026-09-12-deepseek-web-trace.md").read_text(encoding="utf-8")
+        self.assertIn("source: deepseek-web", deepseek_trace)
+        self.assertIn("# 2026-09-12 DeepSeek Web Trace", deepseek_trace)
+        self.assertEqual(journal.count("[[2026-09-12-deepseek-web-trace]]"), 1)
+        self.assertIn("DeepSeek web (chat.deepseek.com) conversations.", journal)
+        from_kai = journal.split("## 💬 From Kai", 1)[1].split("## What Life Copilot Said", 1)[0]
+        self.assertIn("[[2026-09-12-deepseek-web-trace]]", from_kai)
 
     def test_sync_failure_blocks_writeback(self):
         failure = copilot.WebChatsUnavailable("chatgpt: not logged in (log in again in Chrome)")
@@ -353,6 +439,37 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertIn("warning: web chat sync failed for Claude Web;", output.getvalue())
         self.assertTrue((self.trace_dir / "2026-09-12-chatgpt-web-trace.md").exists())
         self.assertTrue((self.trace_dir / "2026-09-12-claude-web-trace.md").exists())
+
+    def _failed(self, *providers: str) -> copilot.WebChatsUnavailable:
+        outcomes = {
+            p: {"ok": False, "code": "auth_required", "message": f"{p}: not logged in (HTTP 401)"}
+            if p in providers else {"ok": True, "listed": 1, "fetched": 0}
+            for p in ("claude", "chatgpt", "deepseek")
+        }
+        return copilot.WebChatsUnavailable(
+            "; ".join(f"{p}: not logged in (HTTP 401) (log in again in Chrome)" for p in providers),
+            {"ok": False, "providers": outcomes, "failed": list(providers), "warnings": []},
+        )
+
+    def test_deepseek_failure_only_warns_and_writes_every_trace(self):
+        output = io.StringIO()
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("deepseek")), \
+             redirect_stdout(output):
+            copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        self.assertIn("warning: DeepSeek Web sync failed; it is optional", output.getvalue())
+        for source in ("claude-web", "chatgpt-web", "deepseek-web"):
+            self.assertTrue((self.trace_dir / f"2026-09-12-{source}-trace.md").exists(), source)
+        self.assertIn("[[2026-09-12-deepseek-web-trace]]", self.journal.read_text(encoding="utf-8"))
+
+    def test_deepseek_failure_does_not_excuse_a_required_source(self):
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("claude", "deepseek")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        message = str(caught.exception)
+        self.assertIn("Claude Web sync failed; ChatGPT Web synced to the local archive.", message)
+        self.assertNotIn("DeepSeek Web sync failed", message.split("Cause:")[0])
+        self.assertFalse(self.trace_dir.exists())
 
     def test_programmatic_callers_never_sync(self):
         with patch.object(copilot, "export_codex_day_transcript", return_value="[9/12/26 1:00 PM] Henry: hi"), \
@@ -411,7 +528,11 @@ class TestChromeDetection(unittest.TestCase):
 class TestSyncWebChats(unittest.TestCase):
     ok_response = {
         "ok": True,
-        "providers": {"claude": {"ok": True, "errors": []}, "chatgpt": {"ok": True, "errors": []}},
+        "providers": {
+            "claude": {"ok": True, "errors": []},
+            "chatgpt": {"ok": True, "errors": []},
+            "deepseek": {"ok": True, "errors": []},
+        },
     }
 
     def test_launches_hidden_chrome_and_quits_it(self):
@@ -451,13 +572,14 @@ class TestSyncWebChats(unittest.TestCase):
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", return_value=self.ok_response) as request:
             result = copilot.sync_web_chats()
-        self.assertEqual([c.args[0]["providers"] for c in request.call_args_list], [["claude"], ["chatgpt"]])
+        self.assertEqual([c.args[0]["providers"] for c in request.call_args_list], [["claude"], ["chatgpt"], ["deepseek"]])
         self.assertEqual(result["failed"], [])
 
     def test_auth_failure_is_reported(self):
         outcomes = {
             "claude": {"ok": True, "errors": []},
             "chatgpt": {"ok": False, "code": "auth_required", "message": "chatgpt: not logged in (HTTP 401)"},
+            "deepseek": {"ok": True, "errors": []},
         }
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)):
@@ -471,12 +593,13 @@ class TestSyncWebChats(unittest.TestCase):
         outcomes = {
             "claude": {"ok": False, "code": "auth_required", "message": "claude: not logged in (HTTP 403)"},
             "chatgpt": {"ok": True, "errors": [], "listed": 275, "fetched": 2},
+            "deepseek": {"ok": True, "errors": []},
         }
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)) as request:
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.sync_web_chats()
-        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_count, 3)
         self.assertTrue(str(caught.exception).startswith("claude: not logged in (HTTP 403)"))
         self.assertNotIn("chatgpt", str(caught.exception))
         self.assertEqual(caught.exception.result["failed"], ["claude"])
@@ -487,6 +610,7 @@ class TestSyncWebChats(unittest.TestCase):
         outcomes = {
             "claude": copilot.WebChatsUnavailable("web chat host closed the connection without a reply"),
             "chatgpt": {"ok": True, "errors": [], "listed": 275, "fetched": 2},
+            "deepseek": {"ok": True, "errors": []},
         }
         with patch.object(copilot, "web_chats_host_alive", return_value=False), \
              patch.object(copilot, "chrome_is_running", return_value=False), \
@@ -515,6 +639,7 @@ class TestSyncWebChats(unittest.TestCase):
             "claude": {"ok": True, "errors": []},
             "chatgpt": {"ok": True, "errors": [], "rate_limited": True, "pending": 37,
                         "pending_newest_update_time": newest},
+            "deepseek": {"ok": True, "errors": []},
         })
 
     def test_rate_limited_leftovers_older_than_target_day_are_a_warning(self):

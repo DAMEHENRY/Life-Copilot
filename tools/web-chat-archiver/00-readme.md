@@ -1,17 +1,17 @@
 # 网页对话归档
 
-把 Claude 网页版（claude.ai）和 ChatGPT 网页版（含 Health）的对话存到本地，日记流程跑 `writeback-ai-day` 时写进当天的 `claude-web` / `chatgpt-web` trace，并在 `## 💬 From Kai` 各挂一个链接。
+把 Claude 网页版（claude.ai）、ChatGPT 网页版（含 Health）和 DeepSeek 网页版（chat.deepseek.com）的对话存到本地，日记流程跑 `writeback-ai-day` 时写进当天的 `claude-web` / `chatgpt-web` / `deepseek-web` trace，并在 `## 💬 From Kai` 各挂一个链接。
 
 抓取不依赖任何 AI 框架：Chrome 扩展用浏览器里现成的登录去读对话，本地小程序（native messaging host）把原始 JSON 写到磁盘，`scripts/copilot.py` 再从磁盘生成 trace。Claude Code 和 Codex 跑的都是同一条 `copilot.py` 命令。
 
 ## 怎么运转
 
 1. `writeback-ai-day` 先检查扩展在不在线。Chrome 没开就用 `open -g -j -a "Google Chrome" --args --no-startup-window` 在后台启动（不开窗口、不抢焦点），同步完再退出；Chrome 本来开着就不动它。
-2. Claude 和 ChatGPT 分开同步：`copilot.py` 对每一边单独发一次请求，一边失败（登录失效，或扩展中途断开）不影响另一边。本地小程序断开时，先重连再同步下一边；Chrome 是 `copilot.py` 自己启动的，就重启一次。失败的一边照样报错，`writeback-ai-day` 仍然只在 Henry 明确接受时才加 `--allow-missing-web-chats` 继续。
-3. 扩展收到同步请求后，列出 Claude 全部对话，以及 ChatGPT 普通、星标、归档、Health 和 Projects 里的对话，只下载更新过的那些。
-4. 请求先直接从扩展后台发；如果被拒，就在一个后台标签页（同源的 `robots.txt`，必要时换成完整网页）里发。登录凭证和 token 始终不离开浏览器。Chrome 没有窗口时（比如被 `copilot.py` 在后台启动），扩展会开一个最小化窗口放这些标签页，并且一直留着它：无窗口的 Chrome 一旦关掉最后一个窗口，扩展和本地小程序会一起断开。2026-09-24 就是 Claude 同步失败后关了窗口，连带中断了 ChatGPT。`copilot.py` 自己启动的 Chrome 同步完会退出，窗口也就没了。
-5. 本地小程序把每条对话写成 `~/.local/share/life-copilot/web-chats/<claude|chatgpt>/<对话 id>.json`，版本记录在同目录的 `index.json`。
-6. `copilot.py` 从这些 JSON 里取当前可见分支的正文，按消息时间分到各天，过滤 thinking、工具调用和返回、隐藏上下文和引用标记。
+2. 三边分开同步：`copilot.py` 对每一边单独发一次请求，一边失败（登录失效，或扩展中途断开）不影响另一边。本地小程序断开时，先重连再同步下一边；Chrome 是 `copilot.py` 自己启动的，就重启一次。失败的一边照样报错，`writeback-ai-day` 仍然只在 Henry 明确接受时才加 `--allow-missing-web-chats` 继续。DeepSeek 是可选来源，失败只打印 warning，用上次的本地存档。
+3. 扩展收到同步请求后，列出 Claude 全部对话，以及 ChatGPT 普通、星标、归档、Health 和 Projects 里的对话、DeepSeek 的全部对话，只下载更新过的那些。
+4. 请求先直接从扩展后台发；如果被拒，就在一个后台标签页（同源的 `robots.txt`，必要时换成完整网页）里发。登录凭证和 token 始终不离开浏览器。DeepSeek 的登录存在页面的 localStorage 里，扩展后台读不到，所以它总是在 `chat.deepseek.com/robots.txt` 标签页里发请求；DeepSeek 出错时也回 HTTP 200，错误码在返回体里（未登录是 `40003 INVALID_TOKEN`）。Chrome 没有窗口时（比如被 `copilot.py` 在后台启动），扩展会开一个最小化窗口放这些标签页，并且一直留着它：无窗口的 Chrome 一旦关掉最后一个窗口，扩展和本地小程序会一起断开。2026-09-24 就是 Claude 同步失败后关了窗口，连带中断了 ChatGPT。`copilot.py` 自己启动的 Chrome 同步完会退出，窗口也就没了。
+5. 本地小程序把每条对话写成 `~/.local/share/life-copilot/web-chats/<claude|chatgpt|deepseek>/<对话 id>.json`，版本记录在同目录的 `index.json`。
+6. `copilot.py` 从这些 JSON 里取当前可见分支的正文，按消息时间分到各天，过滤 thinking、工具调用和返回、隐藏上下文和引用标记。DeepSeek 一条消息由若干片段组成：保留 Henry 的 `REQUEST` 和附件名、DeepSeek 的 `RESPONSE` 和 `TEMPLATE_RESPONSE`（「暂时无法回答」「人太多」这类替代回复），去掉 `THINK`、搜索和打开网页的步骤、固定的「AI 生成」提示和 `[citation:N]` / `[reference:N]` 标记。
 
 扩展每小时也会自己同步一次，但日记流程不依赖这个定时同步。
 
@@ -46,7 +46,7 @@ python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD   # 只读本地存�
 
 ## 出问题时
 
-- **`not logged in` / `auth_required`**：在 Chrome 里重新登录 claude.ai 或 chatgpt.com，再重跑。错误信息里带着原因：ChatGPT 的 `/api/auth/session` 没给 token 时，列出它返回的字段名；接口拒绝时，附上接口自己的错误说明。不记录 token。2026-09-24 至 25 日出现过网页已登录、归档器仍报 HTTP 401 的情况，09-25 重新打开 Chrome 后自己恢复了，原因没有确认；再出现时先看 `host.log` 里的原因。
+- **`not logged in` / `auth_required`**：在 Chrome 里重新登录 claude.ai、chatgpt.com 或 chat.deepseek.com，再重跑。错误信息里带着原因：ChatGPT 的 `/api/auth/session` 没给 token 时，列出它返回的字段名；接口拒绝时，附上接口自己的错误说明。不记录 token。2026-09-24 至 25 日出现过网页已登录、归档器仍报 HTTP 401 的情况，09-25 重新打开 Chrome 后自己恢复了，原因没有确认；再出现时先看 `host.log` 里的原因。
 - **`extension is not connected`**：扩展没加载或被停用了，按上面的安装步骤重新加载；`web-chats-status` 里 `native_host_registered` 应为 `true`。
 - **ChatGPT 弹人机验证**：在 Chrome 里打开 chatgpt.com 手动通过，再重跑。
 - **确实要跳过**：只有 Henry 明确接受不完整归档时，才给 `writeback-ai-day` 加 `--allow-missing-web-chats`，这时会改用上次的本地存档。

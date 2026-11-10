@@ -171,10 +171,16 @@ CHROME_NATIVE_MESSAGING_HOSTS_DIR = (
 WEB_CHAT_SOURCES: Dict[str, Tuple[str, str, str, str]] = {
     "claude": ("claude-web", "Claude", "Claude Web", "Claude web (claude.ai) conversations."),
     "chatgpt": ("chatgpt-web", "ChatGPT", "ChatGPT Web", "ChatGPT web conversations, including Health."),
+    "deepseek": ("deepseek-web", "DeepSeek", "DeepSeek Web", "DeepSeek web (chat.deepseek.com) conversations."),
 }
+# Henry chose DeepSeek as optional (2026-11-10): a failed DeepSeek sync only
+# warns, while Claude/ChatGPT web stay required.
+OPTIONAL_WEB_CHAT_PROVIDERS = frozenset({"deepseek"})
 WEB_CHAT_TAG_LABELS = {"health": "Health", "voice": "Voice", "archived": "Archived"}
 CHATGPT_CITATION_RE = re.compile("[^]*")
 CHATGPT_PRIVATE_MARKER_RE = re.compile("[-]")
+DEEPSEEK_CITATION_RE = re.compile(r"\[(?:citation|reference):\d+\]")
+DEEPSEEK_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".bmp")
 
 MEMORY_RETENTION_DAYS = 30
 
@@ -412,13 +418,13 @@ def ai_conversation_dir_for_date(d: date) -> Path:
 def ai_trace_path_for_date(d: date, source: str) -> Path:
     sources = {
         "codex", "claude-code", "claudian", "life-claude-renderer", "openclaw",
-        "claude-web", "chatgpt-web",
+        "claude-web", "chatgpt-web", "deepseek-web",
     }
     if source not in sources:
         raise ValueError(
             f"Unsupported source: {source}. "
             "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', 'openclaw', "
-            "'claude-web', or 'chatgpt-web'."
+            "'claude-web', 'chatgpt-web', or 'deepseek-web'."
         )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
@@ -2979,6 +2985,76 @@ def chatgpt_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str
     return visible
 
 
+def deepseek_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str]]:
+    """Return (timestamp, role, text) for the visible DeepSeek branch.
+
+    A message is a list of fragments. Henry's turn is REQUEST text plus FILE
+    names; DeepSeek's is RESPONSE text, or a TEMPLATE_RESPONSE such as the
+    "can't answer" notice shown in its place. Thinking, search and page-open
+    steps, the stock AI-generated tip and citation markers are dropped.
+    """
+    messages = [m for m in conversation.get("chat_messages") or [] if isinstance(m, dict)]
+    by_id = {str(m["message_id"]): m for m in messages if m.get("message_id") is not None}
+    # Ids are integers; _message_chain walks string keys.
+    nodes = {
+        key: {**m, "_parent": None if m.get("parent_id") is None else str(m["parent_id"])}
+        for key, m in by_id.items()
+    }
+    current = (conversation.get("chat_session") or {}).get("current_message_id")
+    chain = _message_chain(nodes, None if current is None else str(current), "_parent")
+    if not chain:
+        chain = sorted(nodes.values(), key=lambda m: m.get("inserted_at") or 0)
+    visible: List[Tuple[str, str, str]] = []
+    for message in chain:
+        role = {"USER": "user", "ASSISTANT": "assistant"}.get(message.get("role"))
+        ts = chatgpt_timestamp(message.get("inserted_at"))
+        if role is None or ts is None:
+            continue
+        wanted = {"REQUEST"} if role == "user" else {"RESPONSE", "TEMPLATE_RESPONSE"}
+        parts: List[str] = []
+        for fragment in message.get("fragments") or []:
+            if not isinstance(fragment, dict):
+                continue
+            kind = fragment.get("type")
+            if kind in wanted and isinstance(fragment.get("content"), str):
+                text = DEEPSEEK_CITATION_RE.sub("", fragment["content"]).strip()
+                if text:
+                    parts.append(text)
+            elif kind == "FILE" and role == "user":
+                for item in fragment.get("files") or []:
+                    if isinstance(item, dict) and item.get("file_name"):
+                        name = str(item["file_name"])
+                        label = "Image" if name.lower().endswith(DEEPSEEK_IMAGE_SUFFIXES) else "File"
+                        parts.append(f"[{label}: {name}]")
+        text = "\n\n".join(parts).strip()
+        if text:
+            visible.append((ts, role, text))
+    return visible
+
+
+WEB_CHAT_EXTRACTORS: Dict[str, Callable[[dict], List[Tuple[str, str, str]]]] = {
+    "claude": claude_web_visible_messages,
+    "chatgpt": chatgpt_web_visible_messages,
+    "deepseek": deepseek_web_visible_messages,
+}
+
+
+def web_chat_conversation_title(provider: str, conversation: dict) -> str:
+    if provider == "claude":
+        return str(conversation.get("name") or "")
+    if provider == "deepseek":
+        return str((conversation.get("chat_session") or {}).get("title") or "")
+    return str(conversation.get("title") or "")
+
+
+def web_chat_conversation_url(provider: str, conv_id: str) -> str:
+    return {
+        "claude": f"https://claude.ai/chat/{conv_id}",
+        "chatgpt": f"https://chatgpt.com/c/{conv_id}",
+        "deepseek": f"https://chat.deepseek.com/a/chat/s/{conv_id}",
+    }[provider]
+
+
 def merge_consecutive_web_messages(messages: List[Tuple[str, str, str]]) -> List[Tuple[str, str, str]]:
     """Join split assistant turns (e.g. text around a tool call) into one line."""
     merged: List[Tuple[str, str, str]] = []
@@ -3020,7 +3096,7 @@ def export_web_chat_day_transcript(
     listed = (
         load_web_chats_index(store_dir).get("providers", {}).get(provider, {}).get("listed", {})
     )
-    extract = claude_web_visible_messages if provider == "claude" else chatgpt_web_visible_messages
+    extract = WEB_CHAT_EXTRACTORS[provider]
     blocks: List[Tuple[datetime, str]] = []
     total_messages = 0
     for path in sorted(provider_dir.glob("*.json")):
@@ -3041,7 +3117,7 @@ def export_web_chat_day_transcript(
         listing = listed.get(conv_id) if isinstance(listed.get(conv_id), dict) else {}
         tags = [t for t in [*(record.get("tags") or []), *(listing.get("tags") or [])] if isinstance(t, str)]
         title = str(
-            conversation.get("name" if provider == "claude" else "title")
+            web_chat_conversation_title(provider, conversation)
             or record.get("title")
             or listing.get("title")
             or ""
@@ -3052,9 +3128,7 @@ def export_web_chat_day_transcript(
             heading += f" {tag_label}"
         if title:
             heading += f" - {title}"
-        url = (
-            f"https://claude.ai/chat/{conv_id}" if provider == "claude" else f"https://chatgpt.com/c/{conv_id}"
-        )
+        url = web_chat_conversation_url(provider, conv_id)
         rendered = [
             f"[{format_chat_timestamp(ts)}] {user_name if role == 'user' else assistant_name}: {text}"
             for ts, role, text in lines
@@ -3086,9 +3160,19 @@ def refresh_web_chats_for_writeback(target: date, allow_missing: bool) -> None:
         return
     # Without per-provider results the sync never reached the extension.
     failed = result.get("failed") or list(WEB_CHAT_SOURCES)
+    optional_failed = [p for p in failed if p in OPTIONAL_WEB_CHAT_PROVIDERS]
+    failed = [p for p in failed if p not in OPTIONAL_WEB_CHAT_PROVIDERS]
+    for provider in optional_failed:
+        print(
+            f"  warning: {WEB_CHAT_SOURCES[provider][2]} sync failed; it is optional, so its "
+            f"trace uses the last local archive ({failure})"
+        )
+    if not failed:
+        return
     failed_labels = " and ".join(WEB_CHAT_SOURCES[p][2] for p in failed)
     synced_labels = " and ".join(
-        WEB_CHAT_SOURCES[p][2] for p in result.get("providers") or {} if p not in failed
+        WEB_CHAT_SOURCES[p][2] for p in result.get("providers") or {}
+        if p not in failed and p not in optional_failed
     )
     synced_note = f"; {synced_labels} synced to the local archive" if synced_labels else ""
     if not allow_missing:
@@ -5707,7 +5791,7 @@ TRACE_ASSISTANTS: Dict[str, str] = {
 }
 TRACE_SESSION_HEADING_RE = re.compile(
     r"^### (?:Codex Thread|(?:Claude Code|Life Claude Renderer|Kai / \S+) Session"
-    r"|(?:Claude|ChatGPT) Web Conversation) (?P<session>\S+)"
+    r"|(?:Claude|ChatGPT|DeepSeek) Web Conversation) (?P<session>\S+)"
 )
 # Henry's manual OpenClaw blocks put U+202F before AM/PM.
 TRACE_MESSAGE_RE = re.compile(
@@ -6299,6 +6383,22 @@ def web_chat_day_source_records(
                     trace_match_text(message.get("text"), *blocks, *names),
                 ))
             continue
+        if provider == "deepseek":
+            for message in conversation.get("chat_messages") or []:
+                if not isinstance(message, dict):
+                    continue
+                role = {"USER": "user", "ASSISTANT": "assistant"}.get(message.get("role"))
+                ts = chatgpt_timestamp(message.get("inserted_at"))
+                if role is None or ts is None or timestamp_to_local_date(ts) != d:
+                    continue
+                fragments = [f for f in message.get("fragments") or [] if isinstance(f, dict)]
+                texts = [f.get("content") for f in fragments if isinstance(f.get("content"), str)]
+                names = [
+                    item.get("file_name")
+                    for f in fragments for item in f.get("files") or [] if isinstance(item, dict)
+                ]
+                records.append((conv_id, format_chat_timestamp(ts), role, trace_match_text(*texts, *names)))
+            continue
         mapping = conversation.get("mapping")
         for node in mapping.values() if isinstance(mapping, dict) else []:
             message = node.get("message") if isinstance(node, dict) else None
@@ -6334,7 +6434,7 @@ TIMELINE_TOPIC_CHARS = 48
 # as [Health] between the id and the title.
 TIMELINE_SESSION_HEADING_RE = re.compile(
     r"^### (?P<label>Codex|Claude Code|Life Claude Renderer|Claudian|Kai / \S+"
-    r"|(?:Claude|ChatGPT|Gemini) Web) (?:Thread|Session|Conversation) "
+    r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web) (?:Thread|Session|Conversation) "
     r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)(?P<tags>(?: \[[^\]\n]+\])*)(?: - (?P<title>.+))?$"
 )
 TIMELINE_ASSISTANTS = frozenset({*TRACE_ASSISTANTS.values(), "Claudian", "Gemini"})
@@ -6767,7 +6867,8 @@ def writeback_ai_day(
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn.
 
-    `web_chats` first syncs Claude/ChatGPT web conversations through Chrome.
+    `web_chats` first syncs Claude/ChatGPT/DeepSeek web conversations through
+    Chrome; DeepSeek is optional (OPTIONAL_WEB_CHAT_PROVIDERS).
     Hooks leave it off so finishing a turn never launches the browser.
     `web_chats_synced` says a sync in this run already covered them, so the
     local archive is read as it is.
@@ -6869,7 +6970,7 @@ def writeback_ai_day(
     ):
         raise ValueError(
             "No AI conversations (Codex, Claude Code, Life Claude Renderer, OpenClaw, "
-            f"or Claude/ChatGPT web) found for date: {target.isoformat()}"
+            f"or Claude/ChatGPT/DeepSeek web) found for date: {target.isoformat()}"
         )
 
     codex_path = ai_trace_path_for_date(target, "codex")
@@ -8297,7 +8398,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--allow-missing-web-chats",
         action="store_true",
-        help="Use the last local Claude/ChatGPT web archive when the browser sync fails.",
+        help=(
+            "Use the last local Claude/ChatGPT web archive when the browser sync fails. "
+            "DeepSeek web is optional and never stops the run."
+        ),
     )
     s.add_argument(
         "--force",

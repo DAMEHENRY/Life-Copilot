@@ -2,7 +2,8 @@
 //
 // The local native host (com.lifecopilot.web_chats) owns the archive on disk
 // and decides when to sync. This worker only reads conversations with the
-// browser's existing claude.ai / chatgpt.com login and streams raw JSON back.
+// browser's existing claude.ai / chatgpt.com / chat.deepseek.com login and
+// streams raw JSON back.
 // Session cookies and access tokens never leave the browser.
 
 const HOST_NAME = 'com.lifecopilot.web_chats';
@@ -22,6 +23,12 @@ const PROVIDERS = {
     fullPagePath: '/',
     // ChatGPT answers bursts of conversation downloads with HTTP 429.
     requestGapMs: 600,
+  },
+  deepseek: {
+    origin: 'https://chat.deepseek.com',
+    bootstrapPath: '/robots.txt',
+    fullPagePath: '/',
+    requestGapMs: 300,
   },
 };
 
@@ -113,6 +120,11 @@ async function workerFetch(ctx, path) {
     }
     headers.Authorization = `Bearer ${ctx.token}`;
   }
+  if (ctx.provider === 'deepseek') {
+    // DeepSeek keeps its login in the page's localStorage, which a worker
+    // cannot read; apiGet switches to a same-origin page.
+    return { status: 401, json: null, error: 'no_session', detail: 'DeepSeek login is only readable inside its page' };
+  }
   return rawFetch(PROVIDERS[ctx.provider].origin + path, headers);
 }
 
@@ -131,6 +143,22 @@ function failureDetail(result) {
   const reason = body && typeof body === 'object' ? body.detail || body.error || body.message : '';
   if (reason) return String(typeof reason === 'string' ? reason : reason.message || JSON.stringify(reason)).slice(0, 200);
   return result.error || '';
+}
+
+// DeepSeek answers HTTP 200 with its own error codes inside the envelope
+// {code, msg, data: {biz_code, biz_msg, biz_data}}; map them onto statuses.
+function unwrapDeepseek(result) {
+  const body = result.json;
+  if (result.status !== 200 || !body || typeof body !== 'object' || !('code' in body)) return result;
+  if (body.code !== 0) {
+    const status = [40001, 40002, 40003].includes(body.code) ? 401 : 502;
+    return { status, json: null, detail: `DeepSeek code ${body.code}: ${String(body.msg || '').slice(0, 200)}` };
+  }
+  const data = body.data || {};
+  if (data.biz_code !== undefined && data.biz_code !== 0) {
+    return { status: 502, json: null, detail: `DeepSeek biz_code ${data.biz_code}: ${String(data.biz_msg || '').slice(0, 200)}` };
+  }
+  return { status: 200, json: data.biz_data === undefined ? null : data.biz_data };
 }
 
 async function rawFetch(url, headers) {
@@ -189,6 +217,20 @@ async function pageFetch(ctx, path) {
           return { status: 401, json: null, error: 'no_session', detail: window.__lifeCopilotSession.detail };
         }
         headers.Authorization = `Bearer ${window.__lifeCopilotSession.token}`;
+      }
+      if (provider === 'deepseek') {
+        // The web app keeps its login as {"value": token} in localStorage.
+        // Without one the request still carries the browser's cookies, and
+        // DeepSeek's own reply (code 40003 when logged out) decides.
+        let token = '';
+        try {
+          const parsed = JSON.parse(localStorage.getItem('userToken') || 'null');
+          token = parsed && typeof parsed.value === 'string' ? parsed.value : '';
+        } catch (_) {
+          token = '';
+        }
+        if (token) headers.Authorization = `Bearer ${token}`;
+        headers['x-client-platform'] = 'web';
       }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 60000);
@@ -273,7 +315,8 @@ async function apiGet(ctx, path) {
   let rateLimitRetries = 0;
   for (;;) {
     await sleep(PROVIDERS[ctx.provider].requestGapMs);
-    const result = ctx.mode === 'worker' ? await workerFetch(ctx, path) : await pageFetch(ctx, path);
+    const fetched = ctx.mode === 'worker' ? await workerFetch(ctx, path) : await pageFetch(ctx, path);
+    const result = ctx.provider === 'deepseek' ? unwrapDeepseek(fetched) : fetched;
     if (result.status === 200 && result.json !== null) return result.json;
 
     if (result.status === 429) {
@@ -486,7 +529,43 @@ async function syncChatGPT(ctx, requestId, known) {
   return { listed: listed.size, ...stats, warnings };
 }
 
-const SYNCERS = { claude: syncClaude, chatgpt: syncChatGPT };
+async function syncDeepseek(ctx, requestId, known) {
+  const listed = new Map();
+  let cursor = '';
+  for (let guard = 0; guard < 200; guard += 1) {
+    const page = await apiGet(ctx, `/api/v0/chat_session/fetch_page?count=100${cursor}`);
+    const sessions = page && Array.isArray(page.chat_sessions) ? page.chat_sessions : null;
+    if (!sessions) throw new SyncError('unexpected_response', 'deepseek: session list has no chat_sessions');
+    let fresh = 0;
+    for (const session of sessions) {
+      if (!session || !session.id || listed.has(session.id)) continue;
+      fresh += 1;
+      const tags = session.pinned ? ['pinned'] : [];
+      listed.set(session.id, {
+        id: session.id,
+        title: session.title || '',
+        created_at: session.inserted_at || '',
+        update_time: session.updated_at || '',
+        tags,
+      });
+    }
+    const last = sessions[sessions.length - 1];
+    if (!page.has_more || !fresh || !last) break;
+    cursor = `&lte_cursor.updated_at=${encodeURIComponent(last.updated_at)}&lte_cursor.pinned=${last.pinned ? 'true' : 'false'}`;
+  }
+  post({ type: 'index', request_id: requestId, provider: 'deepseek', items: [...listed.values()] });
+
+  const stats = await fetchChanged(
+    ctx,
+    requestId,
+    [...listed.values()],
+    known,
+    (item) => `/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(item.id)}`,
+  );
+  return { listed: listed.size, ...stats };
+}
+
+const SYNCERS = { claude: syncClaude, chatgpt: syncChatGPT, deepseek: syncDeepseek };
 
 async function runSync(message) {
   const requestId = message.request_id;

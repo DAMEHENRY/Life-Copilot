@@ -23,7 +23,7 @@
 | 概念 | 路径 |
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
+| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,deepseek-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
 | 微信导出 | 快捷指令收件原件 `journal/wechat-imports/`；按消息日期生成 `journal/wechat/YYYY/MM/YYYY-MM-DD-wechat.md`，附件在 `journal/wechat/assets/`。日记 `From WeChat` 只放索引，紧跟在 `From Kai` 后面，真人聊天不混进 `From Kai` 或 AI trace；设计见 [[wechat-share-import-rfc]] |
 | 当日时间轴 | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md`；派生，`writeback-ai-day` 每次从当天 trace 和日记正文里贴的微信记录重建：各会话和各段聊天按时间排在一条轴上，标出并行和空白。是索引不是证据，原话仍引 trace 和日记；空白只说明没有 AI 对话、日记里也没贴聊天。旧日期用 `day-timeline --date YYYY-MM-DD` 从已有 trace 生成 |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
@@ -82,7 +82,7 @@
   白天另有 `refresh-ai-day`，由 Mac 的同步任务在每次推送镜像前运行：只把当天的 trace 和时间轴刷新到最新，不碰日记、不同步网页对话、Kai 不可达时跳过、内容没变就不写文件。它让 Kai 和各入口当天就能互相看到对话，是中间副本；夜间的 `writeback-ai-day` 仍是权威归档，所以白天的 trace 可能缺网页对话和 Kai 最近几分钟的消息。
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
   重写已有 trace 时，来源已不再保存的消息（OpenClaw 过期会话、Codex 重试或回滚掉的轮次、Renderer 裁掉的历史）会并回原位置并打印 WARNING；来源仍有记录、只是导入器现在过滤或改写的消息照常去掉。所以旧 trace 里可能留有旧版导入器没过滤的系统文字。只有 Henry 明确同意丢弃这些消息时才用 `--force`。
-  同一命令先经 Chrome 扩展同步 Claude 网页版与 ChatGPT 网页版（含 Health）对话，再写 `claude-web` / `chatgpt-web` trace；Chrome 未开时会后台启动并在同步后退出。网页对话同为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。
+  同一命令先经 Chrome 扩展同步 Claude 网页版、ChatGPT 网页版（含 Health）和 DeepSeek 网页版（chat.deepseek.com）对话，再写 `claude-web` / `chatgpt-web` / `deepseek-web` trace；Chrome 未开时会后台启动并在同步后退出。Claude 和 ChatGPT 网页对话同为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。DeepSeek 是可选来源（Henry 2026-11-10 定）：同步失败只打印 warning、用上次的本地存档继续，不需要 `--allow-missing-web-chats`；看到这条 warning 时在回复里告诉 Henry 当天 DeepSeek 可能不全。
 - Diary 关系性回应：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：
