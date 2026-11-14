@@ -111,7 +111,7 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot's relational response to Henry | `What Life Copilot Said` | `writeback-journal` |
 | Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / native Claude Code / Life Claude Renderer / OpenClaw-Kai / Claude web / ChatGPT web (incl. Health) daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / native Claude Code / Life Claude Renderer / Antigravity / OpenClaw-Kai / Claude, ChatGPT (incl. Health), DeepSeek, Gemini web daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | The same traces, kept current between diary analyses | `journal/ai-conversations/` (traces and timeline only; the diary is not touched) | `refresh-ai-day`, run by the laptop's sync job |
 | Manually selected WeChat share exports | Raw ZIPs in `journal/wechat-imports/`; daily records and attachments in `journal/wechat/`; diary `From WeChat` index | `import-wechat`; also ingested by `writeback-ai-day` and `refresh-ai-day` |
@@ -154,15 +154,16 @@ source to be reachable over Tailscale SSH. They fail before writing a partial
 archive if that source cannot be read. Use `--allow-missing-openclaw` only when
 an intentionally incomplete archive has been explicitly accepted.
 
-`writeback-ai-day` also syncs Claude web (claude.ai) and ChatGPT web
-conversations, including ChatGPT Health, before writing
-`YYYY-MM-DD-claude-web-trace.md` and `YYYY-MM-DD-chatgpt-web-trace.md`. The
+`writeback-ai-day` also syncs Claude web (claude.ai), ChatGPT web
+conversations (including ChatGPT Health), and optional DeepSeek / Gemini web
+conversations before writing `YYYY-MM-DD-{claude,chatgpt,deepseek,gemini}-web-trace.md`. The
 sync runs through the Chrome extension in `tools/web-chat-archiver/` using the
 existing browser login; if Chrome is closed it is started in the background and
-quit afterwards. Claude and ChatGPT sync separately, so a failure on one side
-(for example an expired login) does not keep the other from syncing, but it
-still stops the writeback; `--allow-missing-web-chats` falls back to the last
-local archive for the failed side.
+quit afterwards. Each provider syncs separately, so a failure on one side
+(for example an expired login) does not keep the others from syncing, and an
+optional provider failure only warns and uses the last local archive; required
+provider failures still stop the writeback unless `--allow-missing-web-chats`
+falls back to the last local archive for the failed side.
 `preview-ai-day` reads that archive without syncing, and `finalize-ai-day`
 never touches the browser. Setup and troubleshooting:
 [tools/web-chat-archiver/00-readme.md](tools/web-chat-archiver/00-readme.md).

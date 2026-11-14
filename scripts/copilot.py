@@ -25,13 +25,14 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tarfile
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from scripts import wechat_import
@@ -42,6 +43,7 @@ except ModuleNotFoundError:  # python3 scripts/copilot.py
 # Paths (new flat structure)
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
+ACTUAL_VAULT_ROOT = ROOT
 JOURNAL_DIR = ROOT / "journal"
 LIFE_BOARD_FILE = ROOT / "life-board.md"
 MEMORY_FILE = JOURNAL_DIR / "memory.md"
@@ -86,6 +88,29 @@ LIFE_CLAUDE_RENDERER_PARTIAL_WARNING = (
 )
 LIFE_CLAUDE_RENDERER_NOTICE_RE = re.compile(
     r"(?:\A|\n\n)(?:\*\*Error:\*\* .*|\*\*Timed out after \d+ minutes\.\*\*)\Z",
+    re.DOTALL,
+)
+ANTIGRAVITY_DIR = Path(os.environ.get(
+    "LIFE_ANTIGRAVITY_DIR",
+    str(Path.home() / ".gemini" / "antigravity"),
+))
+DEFAULT_ANTIGRAVITY_BRAIN_DIR = ANTIGRAVITY_DIR / "brain"
+ANTIGRAVITY_BRAIN_DIR = DEFAULT_ANTIGRAVITY_BRAIN_DIR
+ANTIGRAVITY_SUMMARIES_DB = ANTIGRAVITY_DIR / "conversation_summaries.db"
+ANTIGRAVITY_USER_SETTINGS_RE = re.compile(
+    r"<USER_SETTINGS_CHANGE>.*?</USER_SETTINGS_CHANGE>\s*",
+    re.DOTALL,
+)
+ANTIGRAVITY_USER_REQUEST_RE = re.compile(
+    r"<USER_REQUEST>(.*?)</USER_REQUEST>",
+    re.DOTALL,
+)
+ANTIGRAVITY_ADDITIONAL_META_RE = re.compile(
+    r"<ADDITIONAL_METADATA>(.*?)</ADDITIONAL_METADATA>",
+    re.DOTALL,
+)
+ANTIGRAVITY_QUOTED_TEXT_RE = re.compile(
+    r"@\[Quote\] is a \[Text Block\]:\s*(.*?)(?=\nThe user's current state is as follows:|\nThe current local time is:|\n<SUBAGENT>|\Z)",
     re.DOTALL,
 )
 LIFE_CLAUDE_RENDERER_TEXT_ATTACHMENTS = {
@@ -172,10 +197,11 @@ WEB_CHAT_SOURCES: Dict[str, Tuple[str, str, str, str]] = {
     "claude": ("claude-web", "Claude", "Claude Web", "Claude web (claude.ai) conversations."),
     "chatgpt": ("chatgpt-web", "ChatGPT", "ChatGPT Web", "ChatGPT web conversations, including Health."),
     "deepseek": ("deepseek-web", "DeepSeek", "DeepSeek Web", "DeepSeek web (chat.deepseek.com) conversations."),
+    "gemini": ("gemini-web", "Gemini", "Gemini Web", "Gemini web (gemini.google.com) conversations."),
 }
-# Henry chose DeepSeek as optional (2026-11-10): a failed DeepSeek sync only
-# warns, while Claude/ChatGPT web stay required.
-OPTIONAL_WEB_CHAT_PROVIDERS = frozenset({"deepseek"})
+# DeepSeek and Gemini web stay optional: a failed sync only warns, while
+# Claude/ChatGPT web remain required.
+OPTIONAL_WEB_CHAT_PROVIDERS = frozenset({"deepseek", "gemini"})
 WEB_CHAT_TAG_LABELS = {"health": "Health", "voice": "Voice", "archived": "Archived"}
 CHATGPT_CITATION_RE = re.compile("[^]*")
 CHATGPT_PRIVATE_MARKER_RE = re.compile("[-]")
@@ -418,13 +444,13 @@ def ai_conversation_dir_for_date(d: date) -> Path:
 def ai_trace_path_for_date(d: date, source: str) -> Path:
     sources = {
         "codex", "claude-code", "claudian", "life-claude-renderer", "openclaw",
-        "claude-web", "chatgpt-web", "deepseek-web",
+        "antigravity", "claude-web", "chatgpt-web", "deepseek-web", "gemini-web",
     }
     if source not in sources:
         raise ValueError(
             f"Unsupported source: {source}. "
             "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', 'openclaw', "
-            "'claude-web', 'chatgpt-web', or 'deepseek-web'."
+            "'antigravity', 'claude-web', 'chatgpt-web', 'deepseek-web', or 'gemini-web'."
         )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
@@ -1684,6 +1710,237 @@ def export_life_claude_renderer_day_transcript(
     # Sort by earliest included message timestamp
     session_blocks.sort(key=lambda x: x[0])
     blocks = [block for _, block in session_blocks]
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
+
+
+def load_antigravity_summaries(summaries_db: Optional[Path] = None) -> Dict[str, dict]:
+    """Load session metadata from Antigravity's conversation_summaries.db."""
+    db_path = summaries_db if summaries_db is not None else ANTIGRAVITY_SUMMARIES_DB
+    if not db_path.is_file():
+        return {}
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT conversation_id, title, workspace_uris, status, source, "
+            "agent_name, parent_conversation_id, nesting_depth "
+            "FROM conversation_summaries"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+    summaries: Dict[str, dict] = {}
+    for conv_id, title, workspace_uris, status, source, agent_name, parent_id, depth in rows:
+        if not conv_id:
+            continue
+        uris: List[str] = []
+        if isinstance(workspace_uris, str) and workspace_uris.strip():
+            try:
+                parsed = json.loads(workspace_uris)
+                if isinstance(parsed, list):
+                    uris = [str(u) for u in parsed if isinstance(u, str)]
+            except json.JSONDecodeError:
+                uris = []
+        summaries[str(conv_id)] = {
+            "title": str(title or ""),
+            "workspace_uris": uris,
+            "status": str(status or ""),
+            "source": str(source or ""),
+            "agent_name": str(agent_name or ""),
+            "parent_conversation_id": str(parent_id or ""),
+            "nesting_depth": int(depth or 0),
+        }
+    return summaries
+
+
+def antigravity_session_steps(session_dir: Path) -> List[dict]:
+    """Read raw steps from an Antigravity brain directory."""
+    logs_dir = session_dir / ".system_generated" / "logs"
+    log_path = logs_dir / "transcript_full.jsonl"
+    if not log_path.is_file():
+        log_path = logs_dir / "transcript.jsonl"
+    if not log_path.is_file():
+        return []
+    steps: List[dict] = []
+    for raw in read_text(log_path).splitlines():
+        if not raw.strip():
+            continue
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            steps.append(item)
+    return steps
+
+
+def antigravity_root_allowed(brain_dir: Optional[Path], meta: dict) -> bool:
+    """Restrict default reads to matching workspaces when ROOT is overridden in tests."""
+    if brain_dir is not None:
+        return True
+    if ANTIGRAVITY_BRAIN_DIR.resolve() != DEFAULT_ANTIGRAVITY_BRAIN_DIR.resolve():
+        return True
+    if ROOT.resolve() == ACTUAL_VAULT_ROOT.resolve():
+        return True
+    return ROOT.resolve().as_uri() in (meta.get("workspace_uris") or [])
+
+
+def is_antigravity_subagent(meta: dict, steps: List[dict]) -> bool:
+    """Return True when an Antigravity transcript belongs to a spawned subagent."""
+    if meta.get("parent_conversation_id") or (meta.get("nesting_depth") or 0) > 0 or meta.get("agent_name"):
+        return True
+    if steps and steps[0].get("source") == "SYSTEM" and steps[0].get("type") == "SYSTEM_MESSAGE":
+        return True
+    return not any(s.get("source") == "USER_EXPLICIT" and s.get("type") == "USER_INPUT" for s in steps)
+
+
+def antigravity_media_placeholders(media: object) -> List[str]:
+    placeholders: List[str] = []
+    for item in media if isinstance(media, list) else []:
+        if not isinstance(item, dict):
+            continue
+        mime = str(item.get("mime_type") or "")
+        uri = str(item.get("uri") or "")
+        label = Path(uri.removeprefix("file://")).name if uri else mime
+        if mime.startswith("image/"):
+            placeholders.append(f"[Image: {label}]" if label else "[Image]")
+        elif mime.startswith("audio/"):
+            placeholders.append(f"[Audio: {label}]" if label else "[Audio]")
+        else:
+            placeholders.append(f"[Attachment: {label}]" if label else "[Attachment]")
+    return placeholders
+
+
+def clean_antigravity_user_step(step: dict) -> str:
+    """Extract clean user prompt, quoted selections, and media labels."""
+    content = str(step.get("content") or "")
+    parts: List[str] = []
+    req_match = ANTIGRAVITY_USER_REQUEST_RE.search(content)
+    if req_match:
+        prefix = ANTIGRAVITY_USER_SETTINGS_RE.sub("", content[:req_match.start()]).strip()
+        if prefix:
+            parts.append(prefix)
+        body = ANTIGRAVITY_USER_SETTINGS_RE.sub("", req_match.group(1)).strip()
+        if body:
+            parts.append(body)
+    else:
+        body = ANTIGRAVITY_ADDITIONAL_META_RE.sub("", ANTIGRAVITY_USER_SETTINGS_RE.sub("", content)).strip()
+        if body:
+            parts.append(body)
+
+    quotes: List[str] = []
+    for meta_match in ANTIGRAVITY_ADDITIONAL_META_RE.finditer(content):
+        meta_text = meta_match.group(1)
+        for q_match in ANTIGRAVITY_QUOTED_TEXT_RE.finditer(meta_text):
+            q_text = re.split(r"\n@\[[^\]]+\] is ", q_match.group(1), maxsplit=1)[0].strip()
+            if q_text:
+                quotes.append(q_text)
+
+    text = "\n\n".join(parts).strip()
+    if quotes:
+        quote_lines = ["Attachments:"]
+        for q_text in quotes:
+            quote_lines.append("  - Selected text:")
+            quote_lines.extend(f"    > {line}".rstrip() for line in q_text.splitlines())
+        text = (text.rstrip() + "\n\n" if text else "") + "\n".join(quote_lines)
+
+    media_lines = antigravity_media_placeholders(step.get("media"))
+    if media_lines:
+        text = (text.rstrip() + "\n\n" if text else "") + "\n".join(media_lines)
+    return text.strip()
+
+
+def clean_antigravity_assistant_step(step: dict, *, include_commentary: bool = False) -> str:
+    """Return user-visible assistant text, dropping intermediate tool narration."""
+    content = str(step.get("content") or "").strip()
+    tool_calls = step.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return content
+    if include_commentary:
+        return content
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        if str(tc.get("name") or "") in {
+            "ask_question",
+            "default_api:ask_question",
+            "notify_user",
+            "default_api:notify_user",
+        }:
+            return content
+    return ""
+
+
+def export_antigravity_day_transcript(
+    d: date,
+    brain_dir: Optional[Path] = None,
+    summaries_db: Optional[Path] = None,
+    user_name: str = "Henry",
+    assistant_name: str = "Antigravity",
+) -> Tuple[str, int, int]:
+    """Build a combined transcript of Antigravity sessions for date d."""
+    effective_brain = brain_dir if brain_dir is not None else ANTIGRAVITY_BRAIN_DIR
+    if not effective_brain.is_dir():
+        return "", 0, 0
+    if summaries_db is None and effective_brain != DEFAULT_ANTIGRAVITY_BRAIN_DIR:
+        candidate_db = effective_brain.parent / "conversation_summaries.db"
+        if candidate_db.is_file():
+            summaries_db = candidate_db
+    summaries = load_antigravity_summaries(summaries_db)
+
+    session_blocks: List[Tuple[datetime, str, str]] = []
+    total_messages = 0
+    for session_dir in sorted(effective_brain.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        conv_id = session_dir.name
+        meta = summaries.get(conv_id, {})
+        if not antigravity_root_allowed(brain_dir, meta):
+            continue
+        steps = antigravity_session_steps(session_dir)
+        if not steps or is_antigravity_subagent(meta, steps):
+            continue
+        # Skip unanswered single-prompt stubs across the whole session.
+        if not any(s.get("source") == "MODEL" and s.get("type") == "PLANNER_RESPONSE" for s in steps):
+            continue
+
+        lines: List[str] = []
+        first_dt: Optional[datetime] = None
+        for step in steps:
+            source = step.get("source")
+            step_type = step.get("type")
+            ts = str(step.get("created_at") or "")
+            if timestamp_to_local_date(ts) != d:
+                continue
+            if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
+                role, text = "user", clean_antigravity_user_step(step)
+            elif source == "MODEL" and step_type == "PLANNER_RESPONSE":
+                role, text = "assistant", clean_antigravity_assistant_step(step)
+            else:
+                continue
+            if not text:
+                continue
+            dt_val = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+            if first_dt is None or dt_val < first_dt:
+                first_dt = dt_val
+            speaker = user_name if role == "user" else assistant_name
+            lines.append(f"[{format_chat_timestamp(ts)}] {speaker}: {text}")
+
+        if lines and first_dt is not None:
+            total_messages += len(lines)
+            title = re.sub(r"\s+", " ", str(meta.get("title") or "")).strip()
+            heading = (
+                f"### Antigravity Session {conv_id} - {title}"
+                if title
+                else f"### Antigravity Session {conv_id}"
+            )
+            block = heading + "\n\n" + "\n\n".join(lines)
+            session_blocks.append((first_dt, conv_id, block))
+
+    session_blocks.sort(key=lambda item: (item[0], item[1]))
+    blocks = [block for _, _, block in session_blocks]
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else ""), total_messages, len(blocks)
 
 
@@ -3032,10 +3289,156 @@ def deepseek_web_visible_messages(conversation: dict) -> List[Tuple[str, str, st
     return visible
 
 
+def gemini_timestamp(value: object, depth: int = 0) -> Optional[str]:
+    """Convert a Gemini [seconds, nanos] pair or ISO timestamp into UTC ISO-8601."""
+    if isinstance(value, str):
+        return chatgpt_timestamp(value)
+    if depth > 4 or not isinstance(value, list):
+        return None
+    if (
+        len(value) == 2
+        and isinstance(value[0], int) and not isinstance(value[0], bool)
+        and isinstance(value[1], int) and not isinstance(value[1], bool)
+        and 1_500_000_000 <= value[0] <= 4_000_000_000
+        and 0 <= value[1] < 1_000_000_000
+    ):
+        epoch = value[0] + value[1] / 1_000_000_000
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+    for child in value:
+        if isinstance(child, list):
+            found = gemini_timestamp(child, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _gemini_prompt_text(prompt_block: object) -> str:
+    if isinstance(prompt_block, str):
+        return prompt_block.strip()
+    if not isinstance(prompt_block, list):
+        return ""
+    texts: List[str] = []
+    # Prompt parts live at prompt_block[0] (list of text fragments).
+    items = prompt_block[0] if prompt_block else []
+    if isinstance(items, str) and items.strip():
+        texts.append(items.strip())
+    elif isinstance(items, list):
+        for part in items:
+            if isinstance(part, str) and part.strip():
+                texts.append(part.strip())
+            elif isinstance(part, list):
+                for sub in part:
+                    if isinstance(sub, str) and sub.strip():
+                        texts.append(sub.strip())
+                        break
+    return "\n\n".join(texts).strip()
+
+
+def _gemini_candidates_text(response_block: object) -> Tuple[str, List[str]]:
+    if not isinstance(response_block, list) or not response_block:
+        return "", []
+    candidates = response_block[0] if isinstance(response_block[0], list) else []
+    chosen_id = ""
+    for idx in (3, 2, 1):
+        if idx < len(response_block) and isinstance(response_block[idx], str) and response_block[idx].startswith("rc_"):
+            chosen_id = response_block[idx]
+            break
+    chosen_text = ""
+    all_texts: List[str] = []
+    for cand in candidates:
+        if not isinstance(cand, list) or len(cand) < 2:
+            continue
+        cid = cand[0] if isinstance(cand[0], str) else ""
+        parts = cand[1]
+        cand_text = ""
+        if isinstance(parts, str):
+            cand_text = parts.strip()
+        elif isinstance(parts, list):
+            cand_text = "\n\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+        if not cand_text:
+            continue
+        all_texts.append(cand_text)
+        if not chosen_text or (chosen_id and cid == chosen_id):
+            chosen_text = cand_text
+    return chosen_text, all_texts
+
+
+def gemini_web_turn_entries(conversation: dict) -> List[Tuple[str, str, str, List[str]]]:
+    """Extract chronological (ts, role, chosen_text, all_texts) for a Gemini conversation."""
+    fallback_ts = (
+        gemini_timestamp(conversation.get("update_time"))
+        or gemini_timestamp(conversation.get("list_item"))
+    )
+    raw_messages = conversation.get("messages")
+    if isinstance(raw_messages, list):
+        items: List[Tuple[datetime, str, str, str, List[str]]] = []
+        for msg in raw_messages:
+            if not isinstance(msg, dict):
+                continue
+            role = {"user": "user", "assistant": "assistant", "model": "assistant"}.get(
+                str(msg.get("role") or "").lower()
+            )
+            ts = gemini_timestamp(msg.get("timestamp") or msg.get("created_at")) or fallback_ts
+            text = str(msg.get("text") if msg.get("text") is not None else msg.get("content") or "").strip()
+            if role and ts and text:
+                dt_val = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                items.append((dt_val, ts, role, text, [text]))
+        items.sort(key=lambda entry: entry[0])
+        return [(ts, role, chosen, all_texts) for _, ts, role, chosen, all_texts in items]
+
+    raw_turns: List[list] = []
+    pages = conversation.get("pages")
+    if isinstance(pages, list):
+        for page in pages:
+            if isinstance(page, list) and page and isinstance(page[0], list):
+                raw_turns.extend(t for t in page[0] if isinstance(t, list))
+    elif isinstance(conversation.get("turns"), list):
+        raw_turns.extend(t for t in conversation["turns"] if isinstance(t, list))
+
+    parsed_turns: List[Tuple[datetime, str, str, str, List[str]]] = []
+    for turn in raw_turns:
+        ts = None
+        for idx in (4, 5, 1):
+            if idx < len(turn):
+                ts = gemini_timestamp(turn[idx])
+                if ts:
+                    break
+        if not ts:
+            ts = gemini_timestamp(turn) or fallback_ts
+        if not ts:
+            continue
+        dt_val = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        user_text = _gemini_prompt_text(turn[2] if len(turn) > 2 else None)
+        chosen_resp, all_resp = _gemini_candidates_text(turn[3] if len(turn) > 3 else None)
+        parsed_turns.append((dt_val, ts, user_text, chosen_resp, all_resp))
+
+    if len(parsed_turns) >= 2 and parsed_turns[0][0] > parsed_turns[-1][0]:
+        parsed_turns.reverse()
+    parsed_turns.sort(key=lambda entry: entry[0])
+
+    entries: List[Tuple[str, str, str, List[str]]] = []
+    for _, ts, user_text, chosen_resp, all_resp in parsed_turns:
+        if user_text:
+            entries.append((ts, "user", user_text, [user_text]))
+        if chosen_resp or all_resp:
+            entries.append((ts, "assistant", chosen_resp or all_resp[0], all_resp))
+    return entries
+
+
+def gemini_web_visible_messages(conversation: dict) -> List[Tuple[str, str, str]]:
+    """Return (timestamp, role, text) for the visible Gemini web branch."""
+    return [
+        (ts, role, chosen)
+        for ts, role, chosen, _ in gemini_web_turn_entries(conversation)
+        if chosen
+    ]
+
+
 WEB_CHAT_EXTRACTORS: Dict[str, Callable[[dict], List[Tuple[str, str, str]]]] = {
     "claude": claude_web_visible_messages,
     "chatgpt": chatgpt_web_visible_messages,
     "deepseek": deepseek_web_visible_messages,
+    "gemini": gemini_web_visible_messages,
 }
 
 
@@ -3052,6 +3455,7 @@ def web_chat_conversation_url(provider: str, conv_id: str) -> str:
         "claude": f"https://claude.ai/chat/{conv_id}",
         "chatgpt": f"https://chatgpt.com/c/{conv_id}",
         "deepseek": f"https://chat.deepseek.com/a/chat/s/{conv_id}",
+        "gemini": f"https://gemini.google.com/app/{conv_id}",
     }[provider]
 
 
@@ -5661,6 +6065,7 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
 
     renderer_transcript, renderer_msg_count, renderer_session_count = export_life_claude_renderer_day_transcript(target)
     claude_code_transcript, claude_code_msg_count, claude_code_session_count = export_claude_code_day_transcript(target)
+    antigravity_transcript, antigravity_msg_count, antigravity_session_count = export_antigravity_day_transcript(target)
     openclaw_warning = ""
     try:
         openclaw_transcript, openclaw_msg_count, openclaw_session_count = export_openclaw_day_transcript(target)
@@ -5678,10 +6083,12 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     codex_path = ai_trace_path_for_date(target, "codex")
     renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
     claude_code_path = ai_trace_path_for_date(target, "claude-code")
+    antigravity_path = ai_trace_path_for_date(target, "antigravity")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
     claude_code_link = obsidian_wikilink_for_path(claude_code_path)
+    antigravity_link = obsidian_wikilink_for_path(antigravity_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
     if openclaw_transcript and openclaw_path.exists():
@@ -5720,6 +6127,16 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
         print(f"  Journal wikilink:                - {claude_code_link}：Native Claude Code conversations.")
     else:
         print("  Claude Code:                     (no native sessions for this date)")
+
+    print()
+
+    if antigravity_transcript:
+        print(f"  Antigravity trace file:          {antigravity_path.relative_to(ROOT)}")
+        print(f"  Antigravity sessions:            {antigravity_session_count}")
+        print(f"  Antigravity messages:            {antigravity_msg_count}")
+        print(f"  Journal wikilink:                - {antigravity_link}：Antigravity sessions.")
+    else:
+        print("  Antigravity:                     (no sessions for this date)")
 
     print()
 
@@ -5766,6 +6183,7 @@ def cmd_preview_ai_day(args: argparse.Namespace) -> None:
         not codex_transcript
         and not renderer_transcript
         and not claude_code_transcript
+        and not antigravity_transcript
         and not openclaw_transcript
         and not web_found
     ):
@@ -5788,12 +6206,13 @@ TRACE_ASSISTANTS: Dict[str, str] = {
     "codex": "Codex",
     "claude-code": "Claude",
     "life-claude-renderer": "Claude",
+    "antigravity": "Antigravity",
     "openclaw": "Kai",
     **{source: assistant for source, assistant, _, _ in WEB_CHAT_SOURCES.values()},
 }
 TRACE_SESSION_HEADING_RE = re.compile(
-    r"^### (?:Codex Thread|(?:Claude Code|Life Claude Renderer|Kai / \S+) Session"
-    r"|(?:Claude|ChatGPT|DeepSeek) Web Conversation) (?P<session>\S+)"
+    r"^### (?:Codex Thread|(?:Claude Code|Life Claude Renderer|Antigravity|Kai / \S+) Session"
+    r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web Conversation) (?P<session>\S+)"
 )
 # Henry's manual OpenClaw blocks put U+202F before AM/PM.
 TRACE_MESSAGE_RE = re.compile(
@@ -5908,6 +6327,8 @@ def trace_message_is_synthetic(source: str, unit: dict) -> bool:
         if unit["role"] == "user":
             return not OPENCLAW_INTERNAL_CONTEXT_RE.sub("", body).strip()
         return body.strip() == "NO_REPLY"
+    if source == "antigravity" and unit["role"] == "user":
+        return not clean_antigravity_user_step({"content": body})
     return False
 
 
@@ -6177,6 +6598,13 @@ def write_ai_trace(
     kept = 0
     if path.exists():
         existing = read_text(path)
+        if "generated_by: one-time Google Takeout import" in existing:
+            takeout_attach = next(
+                (line for line in existing.splitlines() if line.startswith("Attachments and full original export:")),
+                "",
+            )
+            if takeout_attach and takeout_attach not in header:
+                header = [*header, takeout_attach, ""]
         merged, lost, dropped = guard_trace_transcript(
             existing, transcript, source, source_records
         )
@@ -6305,6 +6733,51 @@ def life_claude_renderer_day_source_records(
     return records
 
 
+def antigravity_day_source_records(
+    d: date,
+    brain_dir: Optional[Path] = None,
+    summaries_db: Optional[Path] = None,
+) -> List[SourceRecord]:
+    """Every user/assistant step Antigravity still holds for ``d``."""
+    effective_brain = brain_dir if brain_dir is not None else ANTIGRAVITY_BRAIN_DIR
+    if not effective_brain.is_dir():
+        return []
+    if summaries_db is None and effective_brain != DEFAULT_ANTIGRAVITY_BRAIN_DIR:
+        candidate_db = effective_brain.parent / "conversation_summaries.db"
+        if candidate_db.is_file():
+            summaries_db = candidate_db
+    summaries = load_antigravity_summaries(summaries_db)
+    records: List[SourceRecord] = []
+    for session_dir in sorted(effective_brain.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        conv_id = session_dir.name
+        if not antigravity_root_allowed(brain_dir, summaries.get(conv_id, {})):
+            continue
+        for step in antigravity_session_steps(session_dir):
+            ts = str(step.get("created_at") or "")
+            if timestamp_to_local_date(ts) != d:
+                continue
+            source = step.get("source")
+            step_type = step.get("type")
+            if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
+                role = "user"
+                cleaned = clean_antigravity_user_step(step)
+            elif source == "MODEL" and step_type == "PLANNER_RESPONSE":
+                role = "assistant"
+                cleaned = clean_antigravity_assistant_step(step, include_commentary=True)
+            else:
+                continue
+            raw_content = step.get("content")
+            records.append((
+                conv_id,
+                format_chat_timestamp(ts),
+                role,
+                trace_match_text(cleaned, raw_content),
+            ))
+    return records
+
+
 def openclaw_day_source_records(d: date, retained: List[Tuple[str, str]]) -> List[SourceRecord]:
     """Every message the OpenClaw sessions read for ``d`` still hold.
 
@@ -6401,6 +6874,12 @@ def web_chat_day_source_records(
                 ]
                 records.append((conv_id, format_chat_timestamp(ts), role, trace_match_text(*texts, *names)))
             continue
+        if provider == "gemini":
+            for ts, role, _, all_texts in gemini_web_turn_entries(conversation):
+                if timestamp_to_local_date(ts) != d:
+                    continue
+                records.append((conv_id, format_chat_timestamp(ts), role, trace_match_text(*all_texts)))
+            continue
         mapping = conversation.get("mapping")
         for node in mapping.values() if isinstance(mapping, dict) else []:
             message = node.get("message") if isinstance(node, dict) else None
@@ -6435,7 +6914,7 @@ TIMELINE_TOPIC_CHARS = 48
 # ("### Codex Thread <id>") must not open a session. Web chats put tags such
 # as [Health] between the id and the title.
 TIMELINE_SESSION_HEADING_RE = re.compile(
-    r"^### (?P<label>Codex|Claude Code|Life Claude Renderer|Claudian|Kai / \S+"
+    r"^### (?P<label>Codex|Claude Code|Life Claude Renderer|Claudian|Antigravity|Kai / \S+"
     r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web) (?:Thread|Session|Conversation) "
     r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)(?P<tags>(?: \[[^\]\n]+\])*)(?: - (?P<title>.+))?$"
 )
@@ -6927,6 +7406,7 @@ def writeback_ai_day(
         )
     renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
     claude_code_transcript, _, _ = export_claude_code_day_transcript(target)
+    antigravity_transcript, _, _ = export_antigravity_day_transcript(target)
     openclaw_retained: List[Tuple[str, str]] = []
     openclaw_status = "pulled"
     try:
@@ -6966,22 +7446,25 @@ def writeback_ai_day(
         not codex_transcript
         and not renderer_transcript
         and not claude_code_transcript
+        and not antigravity_transcript
         and not openclaw_transcript
         and not any(web_transcripts.values())
         and not wechat_import.read_day(ROOT, target)['messages']
     ):
         raise ValueError(
-            "No AI conversations (Codex, Claude Code, Life Claude Renderer, OpenClaw, "
-            f"or Claude/ChatGPT/DeepSeek web) found for date: {target.isoformat()}"
+            "No AI conversations (Codex, Claude Code, Life Claude Renderer, Antigravity, "
+            f"OpenClaw, or Claude/ChatGPT/DeepSeek/Gemini web) found for date: {target.isoformat()}"
         )
 
     codex_path = ai_trace_path_for_date(target, "codex")
     renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
     claude_code_path = ai_trace_path_for_date(target, "claude-code")
+    antigravity_path = ai_trace_path_for_date(target, "antigravity")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
     claude_code_link = obsidian_wikilink_for_path(claude_code_path)
+    antigravity_link = obsidian_wikilink_for_path(antigravity_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
 
     if openclaw_transcript and openclaw_path.exists():
@@ -6998,6 +7481,8 @@ def writeback_ai_day(
          lambda: life_claude_renderer_day_source_records(target)),
         ("claude-code", claude_code_path, "Claude Code Trace", [], claude_code_transcript,
          lambda: claude_code_day_source_records(target)),
+        ("antigravity", antigravity_path, "Antigravity Trace", [], antigravity_transcript,
+         lambda: antigravity_day_source_records(target)),
         ("openclaw", openclaw_path, "Kai / OpenClaw Direct-Message Trace",
          ["channels: telegram, openclaw-weixin"], openclaw_transcript,
          lambda: openclaw_day_source_records(target, openclaw_retained)),
@@ -7062,6 +7547,12 @@ def writeback_ai_day(
                 claude_code_link,
                 "Native Claude Code conversations.",
             )
+        if antigravity_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                antigravity_link,
+                "Antigravity sessions.",
+            )
         if openclaw_transcript:
             journal_text = ensure_single_from_kai_link(
                 journal_text,
@@ -7097,9 +7588,12 @@ def writeback_ai_day(
         "codex_trace": str(codex_path) if codex_transcript else "",
         "claude_code_trace": str(claude_code_path) if claude_code_transcript else "",
         "renderer_trace": str(renderer_path) if renderer_transcript else "",
+        "antigravity_trace": str(antigravity_path) if antigravity_transcript else "",
         "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
         "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
         "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
+        "deepseek_web_trace": str(web_paths["deepseek"]) if "deepseek" in web_paths else "",
+        "gemini_web_trace": str(web_paths["gemini"]) if "gemini" in web_paths else "",
         "timeline": str(timeline_path) if timeline_path else "",
         "wechat": wechat_result,
         "fallback_used": fallback_used,
@@ -8402,7 +8896,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Use the last local Claude/ChatGPT web archive when the browser sync fails. "
-            "DeepSeek web is optional and never stops the run."
+            "DeepSeek and Gemini web are optional and never stop the run."
         ),
     )
     s.add_argument(

@@ -165,12 +165,65 @@ def deepseek_conversation() -> dict:
     }
 
 
+def gemini_conversation_pages() -> dict:
+    def pair(dt_val: datetime) -> list[int]:
+        sec = int(dt_val.timestamp())
+        return [sec, 123_000_000]
+
+    # Stored in reverse chronological order like Gemini batchexecute hNvQHb pages.
+    turn2 = [
+        ["c_gem-1", "r_2"],
+        None,
+        [["第二天继续追问"]],
+        [[["rc_2", ["好的，这是第二天的问题。"]]], None, None, "rc_2"],
+        pair(_local(13, 0, 10)),
+    ]
+    turn1 = [
+        ["c_gem-1", "r_1"],
+        None,
+        [["解释一下久期和凸性"]],
+        [
+            [
+                ["rc_0", ["UNCHOSEN DRAFT"]],
+                ["rc_1", ["久期是一阶灵敏度，凸性是二阶修正。"]],
+            ],
+            None,
+            None,
+            "rc_1",
+        ],
+        pair(_local(12, 15)),
+    ]
+    return {
+        "id": "gem-1",
+        "raw_id": "c_gem-1",
+        "title": "固收基础讨论",
+        "update_time": _iso(_local(13, 0, 10)),
+        "pages": [[[turn2, turn1]]],
+    }
+
+
+def gemini_conversation_messages() -> dict:
+    return {
+        "id": "gem-2",
+        "title": "Normalized Gemini Chat",
+        "update_time": _iso(_local(12, 18)),
+        "messages": [
+            {"role": "model", "text": "Here is the answer.", "timestamp": _iso(_local(12, 18, 1))},
+            {"role": "user", "content": "Quick question", "created_at": _iso(_local(12, 18))},
+        ],
+    }
+
+
 def write_archive(store: Path) -> None:
     (store / "claude").mkdir(parents=True)
     (store / "chatgpt").mkdir(parents=True)
     (store / "deepseek").mkdir(parents=True)
+    (store / "gemini").mkdir(parents=True)
     (store / "deepseek" / "d-1.json").write_text(json.dumps({
         "provider": "deepseek", "id": "d-1", "tags": [], "conversation": deepseek_conversation(),
+    }), encoding="utf-8")
+    (store / "gemini" / "gem-1.json").write_text(json.dumps({
+        "provider": "gemini", "id": "gem-1", "tags": [], "conversation": gemini_conversation_pages(),
     }), encoding="utf-8")
     (store / "claude" / "c-1.json").write_text(json.dumps({
         "provider": "claude", "id": "c-1", "tags": [], "conversation": claude_conversation(),
@@ -286,6 +339,29 @@ class TestVisibleMessages(unittest.TestCase):
         messages = copilot.deepseek_web_visible_messages(conversation)
         self.assertEqual([role for _, role, _ in messages], ["user", "assistant"])
 
+    def test_gemini_keeps_chosen_candidate_and_chronological_turns(self):
+        messages = copilot.gemini_web_visible_messages(gemini_conversation_pages())
+        self.assertEqual(
+            [(role, text) for _, role, text in messages],
+            [
+                ("user", "解释一下久期和凸性"),
+                ("assistant", "久期是一阶灵敏度，凸性是二阶修正。"),
+                ("user", "第二天继续追问"),
+                ("assistant", "好的，这是第二天的问题。"),
+            ],
+        )
+        self.assertNotIn("UNCHOSEN DRAFT", json.dumps(messages, ensure_ascii=False))
+
+    def test_gemini_accepts_normalized_messages(self):
+        messages = copilot.gemini_web_visible_messages(gemini_conversation_messages())
+        self.assertEqual(
+            [(role, text) for _, role, text in messages],
+            [
+                ("user", "Quick question"),
+                ("assistant", "Here is the answer."),
+            ],
+        )
+
 
 class TestDayTranscripts(unittest.TestCase):
     def setUp(self) -> None:
@@ -327,6 +403,21 @@ class TestDayTranscripts(unittest.TestCase):
         records = copilot.web_chat_day_source_records("deepseek", date(2026, 9, 12), self.store)
         self.assertEqual(len(records), 6)
         self.assertTrue(any("OLD BRANCH" in record[3] for record in records))
+
+    def test_gemini_day_transcript(self):
+        day1, count1, conversations1 = copilot.export_web_chat_day_transcript("gemini", date(2026, 9, 12), self.store)
+        day2, count2, _ = copilot.export_web_chat_day_transcript("gemini", date(2026, 9, 13), self.store)
+        self.assertEqual((count1, conversations1, count2), (2, 1, 2))
+        self.assertIn("### Gemini Web Conversation gem-1 - 固收基础讨论", day1)
+        self.assertIn("Source: <https://gemini.google.com/app/gem-1>", day1)
+        self.assertRegex(day1, r"\[9/12/26 3:00 PM\] Gemini: 久期是一阶灵敏度，凸性是二阶修正。")
+        self.assertNotIn("第二天继续追问", day1)
+        self.assertIn("Henry: 第二天继续追问", day2)
+
+    def test_gemini_source_records_cover_every_candidate(self):
+        records = copilot.web_chat_day_source_records("gemini", date(2026, 9, 12), self.store)
+        self.assertEqual(len(records), 2)
+        self.assertTrue(any("UNCHOSEN DRAFT" in record[3] for record in records))
 
     def test_missing_archive_is_empty(self):
         self.assertEqual(
@@ -380,12 +471,19 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertEqual(journal.count("[[2026-09-12-chatgpt-web-trace]]"), 1)
         self.assertIn("ChatGPT web conversations, including Health.", journal)
         deepseek_trace = (self.trace_dir / "2026-09-12-deepseek-web-trace.md").read_text(encoding="utf-8")
+        gemini_trace = (self.trace_dir / "2026-09-12-gemini-web-trace.md").read_text(encoding="utf-8")
         self.assertIn("source: deepseek-web", deepseek_trace)
         self.assertIn("# 2026-09-12 DeepSeek Web Trace", deepseek_trace)
+        self.assertIn("source: gemini-web", gemini_trace)
+        self.assertIn("# 2026-09-12 Gemini Web Trace", gemini_trace)
+        self.assertTrue(result["gemini_web_trace"].endswith("2026-09-12-gemini-web-trace.md"))
         self.assertEqual(journal.count("[[2026-09-12-deepseek-web-trace]]"), 1)
+        self.assertEqual(journal.count("[[2026-09-12-gemini-web-trace]]"), 1)
         self.assertIn("DeepSeek web (chat.deepseek.com) conversations.", journal)
+        self.assertIn("Gemini web (gemini.google.com) conversations.", journal)
         from_kai = journal.split("## 💬 From Kai", 1)[1].split("## What Life Copilot Said", 1)[0]
         self.assertIn("[[2026-09-12-deepseek-web-trace]]", from_kai)
+        self.assertIn("[[2026-09-12-gemini-web-trace]]", from_kai)
 
     def test_sync_failure_blocks_writeback(self):
         failure = copilot.WebChatsUnavailable("chatgpt: not logged in (log in again in Chrome)")
@@ -444,7 +542,7 @@ class TestWritebackWithWebChats(unittest.TestCase):
         outcomes = {
             p: {"ok": False, "code": "auth_required", "message": f"{p}: not logged in (HTTP 401)"}
             if p in providers else {"ok": True, "listed": 1, "fetched": 0}
-            for p in ("claude", "chatgpt", "deepseek")
+            for p in ("claude", "chatgpt", "deepseek", "gemini")
         }
         return copilot.WebChatsUnavailable(
             "; ".join(f"{p}: not logged in (HTTP 401) (log in again in Chrome)" for p in providers),
@@ -457,9 +555,60 @@ class TestWritebackWithWebChats(unittest.TestCase):
              redirect_stdout(output):
             copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
         self.assertIn("warning: DeepSeek Web sync failed; it is optional", output.getvalue())
-        for source in ("claude-web", "chatgpt-web", "deepseek-web"):
+        for source in ("claude-web", "chatgpt-web", "deepseek-web", "gemini-web"):
             self.assertTrue((self.trace_dir / f"2026-09-12-{source}-trace.md").exists(), source)
         self.assertIn("[[2026-09-12-deepseek-web-trace]]", self.journal.read_text(encoding="utf-8"))
+
+    def test_gemini_failure_only_warns_and_writes_every_trace(self):
+        output = io.StringIO()
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("gemini")), \
+             redirect_stdout(output):
+            copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        self.assertIn("warning: Gemini Web sync failed; it is optional", output.getvalue())
+        for source in ("claude-web", "chatgpt-web", "deepseek-web", "gemini-web"):
+            self.assertTrue((self.trace_dir / f"2026-09-12-{source}-trace.md").exists(), source)
+        self.assertIn("[[2026-09-12-gemini-web-trace]]", self.journal.read_text(encoding="utf-8"))
+
+    def test_takeout_gemini_trace_left_untouched_and_preserved_on_merge(self):
+        self.trace_dir.mkdir(parents=True)
+        takeout_path = self.trace_dir / "2026-09-12-gemini-web-trace.md"
+        takeout_content = textwrap.dedent("""\
+            ---
+            date: 2026-09-12
+            source: gemini-web
+            generated_by: one-time Google Takeout import (2026-09-18)
+            ---
+
+            # 2026-09-12 Gemini Web Trace
+
+            Attachments and full original export: [gemini-web-takeout-2026-09-18](../../gemini-web-takeout-2026-09-18/MyActivity.html)
+
+            ### Gemini Web Conversation old12345 - 旧导入对话
+
+            Source: <https://gemini.google.com/app/old12345>
+
+            [9/12/26 8:00 AM] Henry: 从 Takeout 导出的问题
+
+            [9/12/26 8:00 AM] Gemini: 从 Takeout 导出的回答
+        """)
+        takeout_path.write_text(takeout_content, encoding="utf-8")
+        # Empty live gemini store -> Takeout file is left completely untouched.
+        (self.store / "gemini" / "gem-1.json").unlink()
+        synced = {"ok": True, "providers": {}}
+        with patch.object(copilot, "sync_web_chats", return_value=synced), redirect_stdout(io.StringIO()):
+            copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        self.assertEqual(takeout_path.read_text(encoding="utf-8"), takeout_content)
+
+        # Even if a live chat merges into the same date, Takeout content and attachment link survive.
+        (self.store / "gemini" / "gem-1.json").write_text(json.dumps({
+            "provider": "gemini", "id": "gem-1", "tags": [], "conversation": gemini_conversation_pages(),
+        }), encoding="utf-8")
+        with patch.object(copilot, "sync_web_chats", return_value=synced), redirect_stdout(io.StringIO()):
+            copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        merged = takeout_path.read_text(encoding="utf-8")
+        self.assertIn("Attachments and full original export:", merged)
+        self.assertIn("从 Takeout 导出的问题", merged)
+        self.assertIn("久期是一阶灵敏度，凸性是二阶修正。", merged)
 
     def test_deepseek_failure_does_not_excuse_a_required_source(self):
         with patch.object(copilot, "sync_web_chats", side_effect=self._failed("claude", "deepseek")), \
@@ -467,8 +616,18 @@ class TestWritebackWithWebChats(unittest.TestCase):
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
         message = str(caught.exception)
-        self.assertIn("Claude Web sync failed; ChatGPT Web synced to the local archive.", message)
+        self.assertIn("Claude Web sync failed; ChatGPT Web and Gemini Web synced to the local archive.", message)
         self.assertNotIn("DeepSeek Web sync failed", message.split("Cause:")[0])
+        self.assertFalse(self.trace_dir.exists())
+
+    def test_gemini_failure_does_not_excuse_a_required_source(self):
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("claude", "gemini")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        message = str(caught.exception)
+        self.assertIn("Claude Web sync failed; ChatGPT Web and DeepSeek Web synced to the local archive.", message)
+        self.assertNotIn("Gemini Web sync failed", message.split("Cause:")[0])
         self.assertFalse(self.trace_dir.exists())
 
     def test_programmatic_callers_never_sync(self):
@@ -532,6 +691,7 @@ class TestSyncWebChats(unittest.TestCase):
             "claude": {"ok": True, "errors": []},
             "chatgpt": {"ok": True, "errors": []},
             "deepseek": {"ok": True, "errors": []},
+            "gemini": {"ok": True, "errors": []},
         },
     }
 
@@ -572,7 +732,10 @@ class TestSyncWebChats(unittest.TestCase):
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", return_value=self.ok_response) as request:
             result = copilot.sync_web_chats()
-        self.assertEqual([c.args[0]["providers"] for c in request.call_args_list], [["claude"], ["chatgpt"], ["deepseek"]])
+        self.assertEqual(
+            [c.args[0]["providers"] for c in request.call_args_list],
+            [["claude"], ["chatgpt"], ["deepseek"], ["gemini"]],
+        )
         self.assertEqual(result["failed"], [])
 
     def test_auth_failure_is_reported(self):
@@ -580,6 +743,7 @@ class TestSyncWebChats(unittest.TestCase):
             "claude": {"ok": True, "errors": []},
             "chatgpt": {"ok": False, "code": "auth_required", "message": "chatgpt: not logged in (HTTP 401)"},
             "deepseek": {"ok": True, "errors": []},
+            "gemini": {"ok": True, "errors": []},
         }
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)):
@@ -594,12 +758,13 @@ class TestSyncWebChats(unittest.TestCase):
             "claude": {"ok": False, "code": "auth_required", "message": "claude: not logged in (HTTP 403)"},
             "chatgpt": {"ok": True, "errors": [], "listed": 275, "fetched": 2},
             "deepseek": {"ok": True, "errors": []},
+            "gemini": {"ok": True, "errors": []},
         }
         with patch.object(copilot, "web_chats_host_alive", return_value=True), \
              patch.object(copilot, "web_chats_host_request", side_effect=self._per_provider(outcomes)) as request:
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.sync_web_chats()
-        self.assertEqual(request.call_count, 3)
+        self.assertEqual(request.call_count, 4)
         self.assertTrue(str(caught.exception).startswith("claude: not logged in (HTTP 403)"))
         self.assertNotIn("chatgpt", str(caught.exception))
         self.assertEqual(caught.exception.result["failed"], ["claude"])
@@ -611,6 +776,7 @@ class TestSyncWebChats(unittest.TestCase):
             "claude": copilot.WebChatsUnavailable("web chat host closed the connection without a reply"),
             "chatgpt": {"ok": True, "errors": [], "listed": 275, "fetched": 2},
             "deepseek": {"ok": True, "errors": []},
+            "gemini": {"ok": True, "errors": []},
         }
         with patch.object(copilot, "web_chats_host_alive", return_value=False), \
              patch.object(copilot, "chrome_is_running", return_value=False), \
@@ -640,6 +806,7 @@ class TestSyncWebChats(unittest.TestCase):
             "chatgpt": {"ok": True, "errors": [], "rate_limited": True, "pending": 37,
                         "pending_newest_update_time": newest},
             "deepseek": {"ok": True, "errors": []},
+            "gemini": {"ok": True, "errors": []},
         })
 
     def test_rate_limited_leftovers_older_than_target_day_are_a_warning(self):

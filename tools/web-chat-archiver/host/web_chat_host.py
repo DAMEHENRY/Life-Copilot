@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
-PROVIDERS = ("claude", "chatgpt", "deepseek")
+PROVIDERS = ("claude", "chatgpt", "deepseek", "gemini")
 DATA_DIR = Path(
     os.environ.get(
         "LIFE_WEB_CHATS_DIR",

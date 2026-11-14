@@ -23,7 +23,7 @@
 | 概念 | 路径 |
 |---|---|
 | 日记 | `journal/YYYY/MM/YYYY-MM-DD.md` |
-| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,claude-web,chatgpt-web,deepseek-web,gemini-web}-trace.md`；`gemini-web` 是 2026-09-18 从 Google Takeout 一次性导入的历史（2025-05-22 至 2026-09-15），不随 `writeback-ai-day` 更新，附件与原始导出在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/` |
+| AI trace | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-{codex,claude-code,life-claude-renderer,openclaw,antigravity,claude-web,chatgpt-web,deepseek-web,gemini-web}-trace.md`；`2025-05-22` 至 `2026-09-15` 的 `gemini-web` 为 2026-09-18 Google Takeout 历史导入（附件在 `journal/ai-conversations/gemini-web-takeout-2026-09-18/`，保留不动），新增网页版 Gemini 对话随 `writeback-ai-day` 归档 |
 | 微信导出 | 快捷指令收件原件 `journal/wechat-imports/`；按消息日期生成 `journal/wechat/YYYY/MM/YYYY-MM-DD-wechat.md`，附件在 `journal/wechat/assets/`。日记 `From WeChat` 只放索引，紧跟在 `From Kai` 后面，真人聊天不混进 `From Kai` 或 AI trace；设计见 [[wechat-share-import-rfc]] |
 | 当日时间轴 | `journal/ai-conversations/YYYY/MM/YYYY-MM-DD-timeline.md`；派生，`writeback-ai-day` 每次从当天 trace 和日记正文里贴的微信记录重建：各会话和各段聊天按时间排在一条轴上，标出并行和空白。是索引不是证据，原话仍引 trace 和日记；空白只说明没有 AI 对话、日记里也没贴聊天。旧日期用 `day-timeline --date YYYY-MM-DD` 从已有 trace 生成 |
 | 热 / 冷记忆 | `journal/memory.md` / `journal/memory-archive.md` |
@@ -76,13 +76,13 @@
   `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <file>`
 - 原始对话归档：
   `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`
-  同时归档 Codex、原生 Claude Code CLI、Life Claude Renderer 与 OpenClaw/Kai；Claude Code 仅保留可见正文并过滤 thinking、工具记录、sidechain 和本地斜杠命令。
+  同时归档 Codex、原生 Claude Code CLI、Life Claude Renderer、Antigravity 与 OpenClaw/Kai；Claude Code 和 Antigravity 仅保留可见正文，过滤 thinking、子代理和中间工具调用。
   同时扫描微信快捷指令收件目录，保存原件 provenance、归档按日期拆分的聊天，并给对应的已有日记补 `From WeChat` 索引。读取计划另列微信原文和图片附件；整读原文并查看相关图片。转发内的消息是引用证据，不当作 Henry 当时参与的会话，不把里面的时间放进时间轴。`[Sticker]` 占位不代表表情图片已保存；微信可能完全省略语音，不能推断缺失条数。
   一天在日记分析开始时归档，当晚之后的对话由下一次归档补上：对今天或昨天运行时，命令顺带重新归档此前最近一个有 trace 的日子（不带 `--force`），并报告补进了几条。
   白天另有 `refresh-ai-day`，由 Mac 的同步任务在每次推送镜像前运行：只把当天的 trace 和时间轴刷新到最新，不碰日记、不同步网页对话、Kai 不可达时跳过、内容没变就不写文件。它让 Kai 和各入口当天就能互相看到对话，是中间副本；夜间的 `writeback-ai-day` 仍是权威归档，所以白天的 trace 可能缺网页对话和 Kai 最近几分钟的消息。
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
   重写已有 trace 时，来源已不再保存的消息（OpenClaw 过期会话、Codex 重试或回滚掉的轮次、Renderer 裁掉的历史）会并回原位置并打印 WARNING；来源仍有记录、只是导入器现在过滤或改写的消息照常去掉。所以旧 trace 里可能留有旧版导入器没过滤的系统文字。只有 Henry 明确同意丢弃这些消息时才用 `--force`。
-  同一命令先经 Chrome 扩展同步 Claude 网页版、ChatGPT 网页版（含 Health）和 DeepSeek 网页版（chat.deepseek.com）对话，再写 `claude-web` / `chatgpt-web` / `deepseek-web` trace；Chrome 未开时会后台启动并在同步后退出。Claude 和 ChatGPT 网页对话同为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。DeepSeek 是可选来源（Henry 2026-11-10 定）：同步失败只打印 warning、用上次的本地存档继续，不需要 `--allow-missing-web-chats`；看到这条 warning 时在回复里告诉 Henry 当天 DeepSeek 可能不全。
+  同一命令先经 Chrome 扩展同步 Claude、ChatGPT（含 Health）、DeepSeek（chat.deepseek.com）与 Gemini（gemini.google.com）网页版对话，再写 `claude-web` / `chatgpt-web` / `deepseek-web` / `gemini-web` trace；Chrome 未开时会后台启动并在同步后退出。Claude 和 ChatGPT 网页对话同为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。DeepSeek（Henry 2026-11-10 定）与 Gemini 网页版是可选来源：同步失败只打印 warning、用上次的本地存档继续，不需要 `--allow-missing-web-chats`；看到这条 warning 时在回复里告诉 Henry 当天对应来源可能不全。
 - Diary 关系性回应：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：

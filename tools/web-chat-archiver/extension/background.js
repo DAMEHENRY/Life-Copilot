@@ -2,8 +2,8 @@
 //
 // The local native host (com.lifecopilot.web_chats) owns the archive on disk
 // and decides when to sync. This worker only reads conversations with the
-// browser's existing claude.ai / chatgpt.com / chat.deepseek.com login and
-// streams raw JSON back.
+// browser's existing claude.ai / chatgpt.com / chat.deepseek.com / gemini.google.com
+// login and streams raw JSON back.
 // Session cookies and access tokens never leave the browser.
 
 const HOST_NAME = 'com.lifecopilot.web_chats';
@@ -29,6 +29,12 @@ const PROVIDERS = {
     bootstrapPath: '/robots.txt',
     fullPagePath: '/',
     requestGapMs: 300,
+  },
+  gemini: {
+    origin: 'https://gemini.google.com',
+    bootstrapPath: '/robots.txt',
+    fullPagePath: '/app',
+    requestGapMs: 250,
   },
 };
 
@@ -565,7 +571,417 @@ async function syncDeepseek(ctx, requestId, known) {
   return { listed: listed.size, ...stats };
 }
 
-const SYNCERS = { claude: syncClaude, chatgpt: syncChatGPT, deepseek: syncDeepseek };
+function extractGeminiTokensFromHtml(html) {
+  if (!html || typeof html !== 'string') return null;
+  const atMatch = html.match(/"?SNlM0e"?\s*:\s*"([^"]+)"/);
+  if (!atMatch) return null;
+  const blMatch = html.match(/"?cfb2h"?\s*:\s*"([^"]+)"/);
+  const fsidMatch = html.match(/"?FdrFJe"?\s*:\s*"([^"]+)"/);
+  const userMatch = html.match(/"?oPEP7c"?\s*:\s*"([^"]*)"/);
+  return {
+    at: atMatch[1],
+    bl: blMatch ? blMatch[1] : '',
+    fsid: fsidMatch ? fsidMatch[1] : '',
+    signedIn: Boolean(userMatch && userMatch[1]),
+  };
+}
+
+function parseGeminiBatchResponse(text, rpcId) {
+  const cleaned = String(text || '').replace(/^\)\]\}'\s*/, '');
+  const results = [];
+  const errors = [];
+  let sawUnauth = false;
+  const visit = (node) => {
+    if (!Array.isArray(node)) return;
+    if (node[0] === 'wrb.fr' && node[1] === rpcId) {
+      if (typeof node[2] === 'string') {
+        try {
+          results.push(JSON.parse(node[2]));
+        } catch (_) {
+          // Ignore malformed chunk.
+        }
+      } else {
+        if (node[5] !== undefined && node[5] !== null) errors.push(node[5]);
+        if (Array.isArray(node[5]) && node[5].includes(16)) sawUnauth = true;
+      }
+      return;
+    }
+    if (node[0] === 'er' && Array.isArray(node[5])) {
+      errors.push(node[5]);
+      if (node[5].includes(16) || node[5].includes(8)) sawUnauth = true;
+      return;
+    }
+    for (const child of node) visit(child);
+  };
+  for (const line of cleaned.split('\n')) {
+    const trimmed = line.trim();
+    const start = trimmed.indexOf('[');
+    if (start === -1) continue;
+    try {
+      visit(JSON.parse(trimmed.slice(start)));
+    } catch (_) {
+      // Ignore non-JSON chunk length or trailer lines.
+    }
+  }
+  if (!results.length) {
+    try {
+      visit(JSON.parse(cleaned));
+    } catch (_) {
+      // Ignore if chunked.
+    }
+  }
+  return { payload: results.length ? results[0] : null, allPayloads: results, sawUnauth, errors };
+}
+
+function extractGeminiTimestamp(node, depth = 0) {
+  if (depth > 4 || !Array.isArray(node)) return '';
+  if (
+    node.length === 2
+    && Number.isInteger(node[0])
+    && node[0] > 1500000000
+    && node[0] < 4000000000
+    && Number.isInteger(node[1])
+    && node[1] >= 0
+    && node[1] < 1000000000
+  ) {
+    const ms = node[0] * 1000 + Math.floor(node[1] / 1000000);
+    return new Date(ms).toISOString();
+  }
+  for (const child of node) {
+    if (Array.isArray(child)) {
+      const found = extractGeminiTimestamp(child, depth + 1);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
+function extractGeminiListAndCursor(data) {
+  if (!Array.isArray(data)) return { items: [], nextCursor: null };
+  const isConvItem = (entry) =>
+    Array.isArray(entry) && typeof entry[0] === 'string' && entry[0].startsWith('c_');
+  let items = [];
+  for (const candidate of data) {
+    if (Array.isArray(candidate) && candidate.some(isConvItem)) {
+      items = candidate.filter(isConvItem);
+      break;
+    }
+  }
+  let nextCursor = null;
+  for (const candidate of data) {
+    if (typeof candidate === 'string' && candidate && !candidate.startsWith('c_')) {
+      nextCursor = candidate;
+      break;
+    }
+  }
+  return { items, nextCursor };
+}
+
+async function geminiLoadTokensInPage(ctx) {
+  ctx.mode = 'page';
+  await openPageTab(ctx, PROVIDERS.gemini.fullPagePath);
+  const [injection] = await chrome.scripting.executeScript({
+    target: { tabId: ctx.tabId },
+    world: 'MAIN',
+    func: () => {
+      const wiz = window.WIZ_global_data || {};
+      return {
+        url: window.location.href,
+        at: typeof wiz.SNlM0e === 'string' ? wiz.SNlM0e : '',
+        bl: typeof wiz.cfb2h === 'string' ? wiz.cfb2h : '',
+        fsid: typeof wiz.FdrFJe === 'string' ? wiz.FdrFJe : '',
+        signedIn: Boolean(wiz.oPEP7c || wiz.S06Grb),
+      };
+    },
+  });
+  const res = injection && injection.result;
+  if (!res || !res.at || !res.signedIn || (res.url && res.url.includes('accounts.google.com'))) {
+    throw new SyncError('auth_required', 'gemini: not logged in at gemini.google.com');
+  }
+  return { at: res.at, bl: res.bl || '', fsid: res.fsid || '', signedIn: res.signedIn };
+}
+
+async function geminiLoadTokens(ctx) {
+  const response = await fetch(`${PROVIDERS.gemini.origin}/app`, { credentials: 'include' });
+  const html = await response.text();
+  if (response.url && response.url.includes('accounts.google.com')) {
+    throw new SyncError('auth_required', 'gemini: not logged in at gemini.google.com');
+  }
+  const tokens = extractGeminiTokensFromHtml(html);
+  if (tokens && tokens.signedIn) return tokens;
+
+  log('info', `gemini: worker /app had tokens=${Boolean(tokens)} signedIn=${Boolean(tokens && tokens.signedIn)}; trying page context`);
+  return geminiLoadTokensInPage(ctx);
+}
+
+async function geminiPostRaw(ctx, url, body) {
+  if (ctx.mode === 'page' && ctx.tabId) {
+    const path = new URL(url).pathname + new URL(url).search;
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId: ctx.tabId },
+      world: 'MAIN',
+      args: [path, body],
+      func: async (requestPath, requestBody) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60000);
+        try {
+          const response = await fetch(requestPath, {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'X-Same-Domain': '1',
+            },
+            body: requestBody,
+            signal: controller.signal,
+          });
+          return { status: response.status, text: await response.text() };
+        } catch (error) {
+          return { status: 0, text: '', error: String(error) };
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    });
+    return injection && injection.result ? injection.result : { status: 0, text: '', error: 'no result' };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-Same-Domain': '1',
+      },
+      body,
+      signal: controller.signal,
+    });
+    return { status: response.status, text: await response.text() };
+  } catch (error) {
+    return { status: 0, text: '', error: String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function geminiBatchExecute(ctx, tokens, rpcId, payload) {
+  const params = new URLSearchParams({
+    rpcids: rpcId,
+    'source-path': '/app',
+    hl: 'en',
+    _reqid: String(Math.floor(Math.random() * 900000) + 100000),
+    rt: 'c',
+  });
+  if (tokens.bl) params.set('bl', tokens.bl);
+  if (tokens.fsid) params.set('f.sid', tokens.fsid);
+  const url = `${PROVIDERS.gemini.origin}/_/BardChatUi/data/batchexecute?${params.toString()}`;
+  const body = new URLSearchParams({
+    'f.req': JSON.stringify([[[rpcId, JSON.stringify(payload), null, 'generic']]]),
+    at: tokens.at,
+  }).toString();
+
+  let transientRetries = 0;
+  let rateLimitRetries = 0;
+  for (;;) {
+    await sleep(PROVIDERS.gemini.requestGapMs);
+    const result = await geminiPostRaw(ctx, url, body);
+    if (result.status === 429) {
+      if (rateLimitRetries < 1) {
+        rateLimitRetries += 1;
+        await sleep(RATE_LIMIT_WAIT_MS);
+        continue;
+      }
+      throw new SyncError('rate_limited', `gemini: rate limited (HTTP 429) for ${rpcId}`);
+    }
+    const transient = result.status === 0 || result.status >= 500;
+    if (transient && transientRetries < 3) {
+      transientRetries += 1;
+      await sleep(2000 * transientRetries * transientRetries);
+      continue;
+    }
+    if (result.status === 401 || result.status === 403) {
+      throw new SyncError('auth_required', `gemini: not logged in (HTTP ${result.status})`);
+    }
+    if (result.status !== 200) {
+      throw new SyncError('http_error', `gemini: HTTP ${result.status} for ${rpcId}`);
+    }
+    const parsed = parseGeminiBatchResponse(result.text, rpcId);
+    if (parsed.sawUnauth) {
+      throw new SyncError('auth_required', `gemini: session expired for ${rpcId}`);
+    }
+    if (parsed.payload === null) {
+      const head = String(result.text || '').replace(/\s+/g, ' ').slice(0, 140);
+      log('warn', `gemini: empty ${rpcId} payload errors=${JSON.stringify(parsed.errors)} len=${(result.text || '').length} head=${head}`);
+      throw new SyncError('unexpected_response', `gemini: empty ${rpcId} response`);
+    }
+    return parsed.payload;
+  }
+}
+
+async function syncGemini(ctx, requestId, known) {
+  const POST_TAKEOUT_CUTOFF_MS = Date.parse('2026-09-16T00:00:00.000Z');
+  const MAX_CONVS_PER_SYNC = 40;
+  let tokens = await geminiLoadTokens(ctx);
+  const listed = new Map();
+  const warnings = [];
+  let cursor = null;
+  for (let guard = 0; guard < 50; guard += 1) {
+    let data;
+    try {
+      data = await geminiBatchExecute(ctx, tokens, 'MaZiqc', [20, cursor, [0, null, 1]]);
+    } catch (err) {
+      const retryable = err.code === 'unexpected_response' || err.code === 'http_error';
+      if (guard === 0 && retryable) {
+        log('info', `gemini: initial MaZiqc failed (${err.message}); retrying in page context with [13, null, [0, null, 1]]`);
+        if (ctx.mode !== 'page') {
+          tokens = await geminiLoadTokensInPage(ctx);
+        }
+        data = await geminiBatchExecute(ctx, tokens, 'MaZiqc', [13, null, [0, null, 1]]);
+      } else if (guard > 0 && listed.size > 0 && retryable) {
+        const msg = `MaZiqc page ${guard} failed after listing ${listed.size} conversation(s): ${err.message}`;
+        warnings.push(msg);
+        log('warn', `gemini: ${msg}`);
+        break;
+      } else {
+        throw err;
+      }
+    }
+    const { items, nextCursor } = extractGeminiListAndCursor(data);
+    let fresh = 0;
+    let unchangedOnPage = 0;
+    const pageTimes = [];
+    for (const c of items) {
+      const rawId = String(c[0] || '');
+      const id = rawId.replace(/^c_/, '');
+      if (!id) continue;
+      const updateTime = extractGeminiTimestamp(c);
+      const ms = timeValue(updateTime);
+      if (ms > 0) pageTimes.push(ms);
+      if (updateTime && known[id] === updateTime) unchangedOnPage += 1;
+      if (listed.has(id)) continue;
+      fresh += 1;
+      listed.set(id, {
+        id,
+        raw_id: rawId,
+        title: typeof c[1] === 'string' ? c[1] : '',
+        created_at: '',
+        update_time: updateTime,
+        tags: [],
+        list_item: c,
+      });
+    }
+    const allKnownUnchanged = items.length > 0 && unchangedOnPage === items.length;
+    const beforeTakeoutCutoff = pageTimes.length > 0 && Math.max(...pageTimes) < POST_TAKEOUT_CUTOFF_MS;
+    if (!nextCursor || fresh === 0 || allKnownUnchanged || beforeTakeoutCutoff) break;
+    cursor = nextCursor;
+  }
+  log('info', `gemini: listed ${listed.size} conversation(s) in mode=${ctx.mode}`);
+  post({
+    type: 'index',
+    request_id: requestId,
+    provider: 'gemini',
+    items: [...listed.values()].map(({ list_item, raw_id, ...rest }) => rest),
+  });
+
+  const changed = [...listed.values()]
+    .filter((item) => {
+      if (item.update_time && known[item.id] === item.update_time) return false;
+      const ms = timeValue(item.update_time);
+      if (ms > 0 && ms < POST_TAKEOUT_CUTOFF_MS && !known[item.id]) return false;
+      return true;
+    })
+    .sort((a, b) => timeValue(b.update_time) - timeValue(a.update_time));
+  const batch = changed.slice(0, MAX_CONVS_PER_SYNC);
+  const deferred = changed.slice(MAX_CONVS_PER_SYNC);
+
+  let fetched = 0;
+  const errors = [];
+  for (let i = 0; i < batch.length; i += 1) {
+    const item = batch[i];
+    try {
+      const pages = [];
+      let turnCursor = null;
+      let useShortArgs = false;
+      for (let pageGuard = 0; pageGuard < 50; pageGuard += 1) {
+        let turnData;
+        if (useShortArgs) {
+          turnData = await geminiBatchExecute(ctx, tokens, 'hNvQHb', [item.raw_id, turnCursor, null]);
+        } else {
+          try {
+            turnData = await geminiBatchExecute(
+              ctx,
+              tokens,
+              'hNvQHb',
+              [item.raw_id, 50, turnCursor, 1, [1], [4], null, 1],
+            );
+          } catch (err) {
+            if (pageGuard === 0 && err.code === 'unexpected_response') {
+              useShortArgs = true;
+              turnData = await geminiBatchExecute(ctx, tokens, 'hNvQHb', [item.raw_id, null, null]);
+            } else {
+              throw err;
+            }
+          }
+        }
+        pages.push(turnData);
+        const nextTurnCursor =
+          Array.isArray(turnData) && typeof turnData[1] === 'string' && turnData[1]
+            ? turnData[1]
+            : null;
+        if (!nextTurnCursor || nextTurnCursor === turnCursor) break;
+        turnCursor = nextTurnCursor;
+      }
+      post({
+        type: 'conversation',
+        request_id: requestId,
+        provider: 'gemini',
+        id: item.id,
+        title: item.title,
+        created_at: item.created_at,
+        update_time: item.update_time,
+        tags: item.tags,
+        conversation: {
+          id: item.id,
+          raw_id: item.raw_id,
+          title: item.title,
+          update_time: item.update_time,
+          list_item: item.list_item,
+          pages,
+        },
+      });
+      fetched += 1;
+    } catch (error) {
+      if (error.code === 'rate_limited') {
+        const pending = changed.slice(i);
+        log('warn', `gemini: rate limited; ${pending.length} conversation(s) left for the next sync`);
+        return {
+          listed: listed.size,
+          fetched,
+          errors,
+          rate_limited: true,
+          pending: pending.length,
+          pending_newest_update_time: pending[0].update_time,
+          warnings,
+        };
+      }
+      if (error.code === 'auth_required' || error.code === 'host_disconnected') throw error;
+      errors.push(`${item.id}: ${error.message}`);
+    }
+  }
+  return {
+    listed: listed.size,
+    fetched,
+    errors,
+    rate_limited: false,
+    pending: deferred.length,
+    pending_newest_update_time: deferred.length ? deferred[0].update_time : '',
+    warnings,
+  };
+}
+
+const SYNCERS = { claude: syncClaude, chatgpt: syncChatGPT, deepseek: syncDeepseek, gemini: syncGemini };
 
 async function runSync(message) {
   const requestId = message.request_id;

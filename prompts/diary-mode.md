@@ -67,7 +67,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 **💬 From Kai 证据层：**
 - `## 💬 From Kai` 是当天 AI 原始对话流的索引层。每个来源一条指向当日 trace 的 wikilink，如 `[[2026-06-01-codex-trace]]`。
 - 完整对话在 `journal/ai-conversations/YYYY/MM/` 下各来源的 trace 里，由 `writeback-ai-day` 归档；各导入器保留和过滤什么，以 `AGENTS.md` 的结构化写回说明和脚本为准。读 trace 时记住：只保留双方可见正文，图片记为 `[Image]` 占位，客户端或平台自己写入的上下文、提示与报错不算任何一方的话；Henry 手工补的完整记录优先于远端残留；网页对话按每条消息的时间归日，ChatGPT Health 对话的标题带 `[Health]`。
-- 分析依据第 0.5 步读过的完整 trace，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Claude Code/Life Claude Renderer 当场反照了什么、晚上日记正文又如何重构这一天。
+- 分析依据第 0.5 步读过的完整 trace，保留 provenance：区分 Henry 当时说了什么、Kai/Codex/Claude/Antigravity/Gemini 等当场反照了什么、晚上日记正文又如何重构这一天。
 - 不要把 AI 的回答直接复述成夜间分析；夜间分析要做二阶工作：提炼主线、校验 AI 的判断、补本地历史证据、指出对话流里反复出现的结构。
 - 如果 AI 在 trace 文件里声称”找到了”某篇日记、某条记忆或某个历史模式，必须回到本地文件复查后才能当作事实引用。
 - `writeback-ai-day` 按 wikilink 去重；重复分析同一天时先执行该命令，不应重复写入已经存在的 wikilink。
