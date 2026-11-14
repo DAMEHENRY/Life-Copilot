@@ -502,39 +502,39 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertIn("warning: web chat sync failed", output.getvalue())
         self.assertTrue((self.trace_dir / "2026-09-12-claude-web-trace.md").exists())
 
-    def _claude_failed(self) -> copilot.WebChatsUnavailable:
+    def _chatgpt_failed(self) -> copilot.WebChatsUnavailable:
         return copilot.WebChatsUnavailable(
-            "claude: not logged in (HTTP 403) (log in again in Chrome)",
+            "chatgpt: not logged in (HTTP 403) (log in again in Chrome)",
             {
                 "ok": False,
                 "providers": {
-                    "claude": {"ok": False, "code": "auth_required", "message": "claude: not logged in (HTTP 403)"},
-                    "chatgpt": {"ok": True, "listed": 3, "fetched": 1},
+                    "claude": {"ok": True, "listed": 3, "fetched": 1},
+                    "chatgpt": {"ok": False, "code": "auth_required", "message": "chatgpt: not logged in (HTTP 403)"},
                 },
-                "failed": ["claude"],
+                "failed": ["chatgpt"],
                 "warnings": [],
             },
         )
 
-    def test_claude_failure_names_the_failed_source_and_keeps_chatgpt_sync(self):
+    def test_required_failure_names_the_failed_source_and_keeps_other_syncs(self):
         output = io.StringIO()
-        with patch.object(copilot, "sync_web_chats", side_effect=self._claude_failed()), \
+        with patch.object(copilot, "sync_web_chats", side_effect=self._chatgpt_failed()), \
              redirect_stdout(output):
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
         message = str(caught.exception)
-        self.assertIn("Claude Web sync failed; ChatGPT Web synced to the local archive", message)
+        self.assertIn("ChatGPT Web sync failed; Claude Web synced to the local archive", message)
         self.assertIn("--allow-missing-web-chats", message)
-        self.assertIn("web chats: chatgpt listed 3, fetched 1", output.getvalue())
+        self.assertIn("web chats: claude listed 3, fetched 1", output.getvalue())
         self.assertFalse(self.trace_dir.exists())
         self.assertEqual(self.journal.read_text(encoding="utf-8"), MINIMAL_DIARY)
 
     def test_allow_missing_skips_only_the_failed_source(self):
         output = io.StringIO()
-        with patch.object(copilot, "sync_web_chats", side_effect=self._claude_failed()), \
+        with patch.object(copilot, "sync_web_chats", side_effect=self._chatgpt_failed()), \
              redirect_stdout(output):
             copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True, allow_missing_web_chats=True)
-        self.assertIn("warning: web chat sync failed for Claude Web;", output.getvalue())
+        self.assertIn("warning: web chat sync failed for ChatGPT Web;", output.getvalue())
         self.assertTrue((self.trace_dir / "2026-09-12-chatgpt-web-trace.md").exists())
         self.assertTrue((self.trace_dir / "2026-09-12-claude-web-trace.md").exists())
 
@@ -548,6 +548,16 @@ class TestWritebackWithWebChats(unittest.TestCase):
             "; ".join(f"{p}: not logged in (HTTP 401) (log in again in Chrome)" for p in providers),
             {"ok": False, "providers": outcomes, "failed": list(providers), "warnings": []},
         )
+
+    def test_claude_failure_only_warns_and_writes_every_trace(self):
+        output = io.StringIO()
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("claude")), \
+             redirect_stdout(output):
+            copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        self.assertIn("warning: Claude Web sync failed; it is optional", output.getvalue())
+        for source in ("claude-web", "chatgpt-web", "deepseek-web", "gemini-web"):
+            self.assertTrue((self.trace_dir / f"2026-09-12-{source}-trace.md").exists(), source)
+        self.assertIn("[[2026-09-12-claude-web-trace]]", self.journal.read_text(encoding="utf-8"))
 
     def test_deepseek_failure_only_warns_and_writes_every_trace(self):
         output = io.StringIO()
@@ -610,23 +620,33 @@ class TestWritebackWithWebChats(unittest.TestCase):
         self.assertIn("从 Takeout 导出的问题", merged)
         self.assertIn("久期是一阶灵敏度，凸性是二阶修正。", merged)
 
-    def test_deepseek_failure_does_not_excuse_a_required_source(self):
-        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("claude", "deepseek")), \
+    def test_claude_failure_does_not_excuse_a_required_source(self):
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("chatgpt", "claude")), \
              redirect_stdout(io.StringIO()):
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
         message = str(caught.exception)
-        self.assertIn("Claude Web sync failed; ChatGPT Web and Gemini Web synced to the local archive.", message)
+        self.assertIn("ChatGPT Web sync failed; DeepSeek Web and Gemini Web synced to the local archive.", message)
+        self.assertNotIn("Claude Web sync failed", message.split("Cause:")[0])
+        self.assertFalse(self.trace_dir.exists())
+
+    def test_deepseek_failure_does_not_excuse_a_required_source(self):
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("chatgpt", "deepseek")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(copilot.WebChatsUnavailable) as caught:
+                copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
+        message = str(caught.exception)
+        self.assertIn("ChatGPT Web sync failed; Claude Web and Gemini Web synced to the local archive.", message)
         self.assertNotIn("DeepSeek Web sync failed", message.split("Cause:")[0])
         self.assertFalse(self.trace_dir.exists())
 
     def test_gemini_failure_does_not_excuse_a_required_source(self):
-        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("claude", "gemini")), \
+        with patch.object(copilot, "sync_web_chats", side_effect=self._failed("chatgpt", "gemini")), \
              redirect_stdout(io.StringIO()):
             with self.assertRaises(copilot.WebChatsUnavailable) as caught:
                 copilot.writeback_ai_day(date(2026, 9, 12), web_chats=True)
         message = str(caught.exception)
-        self.assertIn("Claude Web sync failed; ChatGPT Web and DeepSeek Web synced to the local archive.", message)
+        self.assertIn("ChatGPT Web sync failed; Claude Web and DeepSeek Web synced to the local archive.", message)
         self.assertNotIn("Gemini Web sync failed", message.split("Cause:")[0])
         self.assertFalse(self.trace_dir.exists())
 

@@ -154,9 +154,9 @@ source to be reachable over Tailscale SSH. They fail before writing a partial
 archive if that source cannot be read. Use `--allow-missing-openclaw` only when
 an intentionally incomplete archive has been explicitly accepted.
 
-`writeback-ai-day` also syncs Claude web (claude.ai), ChatGPT web
-conversations (including ChatGPT Health), and optional DeepSeek / Gemini web
-conversations before writing `YYYY-MM-DD-{claude,chatgpt,deepseek,gemini}-web-trace.md`. The
+`writeback-ai-day` also syncs ChatGPT web conversations (including ChatGPT
+Health), and optional Claude / DeepSeek / Gemini web conversations before
+writing `YYYY-MM-DD-{claude,chatgpt,deepseek,gemini}-web-trace.md`. The
 sync runs through the Chrome extension in `tools/web-chat-archiver/` using the
 existing browser login; if Chrome is closed it is started in the background and
 quit afterwards. Each provider syncs separately, so a failure on one side

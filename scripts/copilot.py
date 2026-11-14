@@ -199,9 +199,9 @@ WEB_CHAT_SOURCES: Dict[str, Tuple[str, str, str, str]] = {
     "deepseek": ("deepseek-web", "DeepSeek", "DeepSeek Web", "DeepSeek web (chat.deepseek.com) conversations."),
     "gemini": ("gemini-web", "Gemini", "Gemini Web", "Gemini web (gemini.google.com) conversations."),
 }
-# DeepSeek and Gemini web stay optional: a failed sync only warns, while
-# Claude/ChatGPT web remain required.
-OPTIONAL_WEB_CHAT_PROVIDERS = frozenset({"deepseek", "gemini"})
+# Claude, DeepSeek, and Gemini web stay optional: a failed sync only warns,
+# while ChatGPT web remains required.
+OPTIONAL_WEB_CHAT_PROVIDERS = frozenset({"claude", "deepseek", "gemini"})
 WEB_CHAT_TAG_LABELS = {"health": "Health", "voice": "Voice", "archived": "Archived"}
 CHATGPT_CITATION_RE = re.compile("[^]*")
 CHATGPT_PRIVATE_MARKER_RE = re.compile("[-]")
@@ -3581,7 +3581,7 @@ def refresh_web_chats_for_writeback(target: date, allow_missing: bool) -> None:
     synced_note = f"; {synced_labels} synced to the local archive" if synced_labels else ""
     if not allow_missing:
         raise WebChatsUnavailable(
-            f"{failed_labels} sync failed{synced_note}. Claude/ChatGPT web chats are "
+            f"{failed_labels} sync failed{synced_note}. ChatGPT web chats are "
             "required for AI-day writeback; no partial writeback was performed. Fix the "
             "browser sync (log in again in Chrome if asked), or explicitly pass "
             "--allow-missing-web-chats if the incomplete archive is intentional. "
@@ -7348,8 +7348,8 @@ def writeback_ai_day(
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn.
 
-    `web_chats` first syncs Claude/ChatGPT/DeepSeek web conversations through
-    Chrome; DeepSeek is optional (OPTIONAL_WEB_CHAT_PROVIDERS).
+    `web_chats` first syncs Claude/ChatGPT/DeepSeek/Gemini web conversations
+    through Chrome; providers in OPTIONAL_WEB_CHAT_PROVIDERS only warn on failure.
     Hooks leave it off so finishing a turn never launches the browser.
     `web_chats_synced` says a sync in this run already covered them, so the
     local archive is read as it is.
@@ -8895,8 +8895,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-missing-web-chats",
         action="store_true",
         help=(
-            "Use the last local Claude/ChatGPT web archive when the browser sync fails. "
-            "DeepSeek and Gemini web are optional and never stop the run."
+            "Use the last local ChatGPT web archive when the browser sync fails. "
+            "Claude, DeepSeek, and Gemini web are optional and never stop the run."
         ),
     )
     s.add_argument(

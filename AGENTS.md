@@ -82,7 +82,7 @@
   白天另有 `refresh-ai-day`，由 Mac 的同步任务在每次推送镜像前运行：只把当天的 trace 和时间轴刷新到最新，不碰日记、不同步网页对话、Kai 不可达时跳过、内容没变就不写文件。它让 Kai 和各入口当天就能互相看到对话，是中间副本；夜间的 `writeback-ai-day` 仍是权威归档，所以白天的 trace 可能缺网页对话和 Kai 最近几分钟的消息。
   OpenClaw/Kai 是必需证据源；不可达时先修复或重试。只有 Henry 明确接受不完整归档时才使用 `--allow-missing-openclaw`。
   重写已有 trace 时，来源已不再保存的消息（OpenClaw 过期会话、Codex 重试或回滚掉的轮次、Renderer 裁掉的历史）会并回原位置并打印 WARNING；来源仍有记录、只是导入器现在过滤或改写的消息照常去掉。所以旧 trace 里可能留有旧版导入器没过滤的系统文字。只有 Henry 明确同意丢弃这些消息时才用 `--force`。
-  同一命令先经 Chrome 扩展同步 Claude、ChatGPT（含 Health）、DeepSeek（chat.deepseek.com）与 Gemini（gemini.google.com）网页版对话，再写 `claude-web` / `chatgpt-web` / `deepseek-web` / `gemini-web` trace；Chrome 未开时会后台启动并在同步后退出。Claude 和 ChatGPT 网页对话同为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。DeepSeek（Henry 2026-11-10 定）与 Gemini 网页版是可选来源：同步失败只打印 warning、用上次的本地存档继续，不需要 `--allow-missing-web-chats`；看到这条 warning 时在回复里告诉 Henry 当天对应来源可能不全。
+  同一命令先经 Chrome 扩展同步 Claude、ChatGPT（含 Health）、DeepSeek（chat.deepseek.com）与 Gemini（gemini.google.com）网页版对话，再写 `claude-web` / `chatgpt-web` / `deepseek-web` / `gemini-web` trace；Chrome 未开时会后台启动并在同步后退出。ChatGPT 网页对话为必需证据源：同步失败（如登录过期）时先请 Henry 在 Chrome 重新登录；只有 Henry 明确接受时才使用 `--allow-missing-web-chats`。Claude（因账号封禁，Henry 2026-11-14 移入可选）、DeepSeek（Henry 2026-11-10 定）与 Gemini 网页版是可选来源：同步失败只打印 warning、用上次的本地存档继续，不需要 `--allow-missing-web-chats`；看到这条 warning 时在回复里告诉 Henry 当天对应来源可能不全。
 - Diary 关系性回应：
   `python3 scripts/copilot.py writeback-journal --date YYYY-MM-DD --input-file <file>`
 - 次日建议：
