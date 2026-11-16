@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.henry.life.eventkit-ctl</string>
+    <key>CFBundleName</key>
+    <string>eventkit-ctl</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Allow eventkit-ctl to read and write your macOS Calendars.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Allow eventkit-ctl to read and write your macOS Reminders.</string>
+</dict>
+</plist>

@@ -57,8 +57,9 @@ GEMINI.md
 .claudian/
 quant/notes/
 
-# 8. 本地语义检索索引（私密日记的切块原文与向量）
+# 8. 本地语义检索索引与私人日程镜像（不进 git，随 rsync 同步给 Kai）
 tools/recall/data/
+tools/apple-eventkit/schedule-snapshot.json
 
 # Generated artifacts (reviews, replays, image renders); may contain private material
 output/

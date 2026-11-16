@@ -32,9 +32,7 @@ from scripts.copilot import (
 # introduced (2026-09-21). They may shrink but not grow, so anything added to
 # them has to be paid for by cutting something else; once a file is back under
 # budget its entry has to go.
-OVER_BUDGET_BASELINE = {
-    "prompts/diary-mode.md": 26_358,
-}
+OVER_BUDGET_BASELINE: dict[str, int] = {}
 
 
 def _line_sizes(data: bytes) -> list[int]:

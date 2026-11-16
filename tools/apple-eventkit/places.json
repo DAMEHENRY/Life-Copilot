@@ -1,0 +1,59 @@
+{
+  "places": [
+    {
+      "key": "hongtian-pool",
+      "location": "红天游泳馆",
+      "aliases": ["游泳馆", "贸大游泳馆", "对外经济贸易大学红天游泳馆", "游泳"]
+    },
+    {
+      "key": "hongtian-gym",
+      "location": "对外经济贸易大学红天体育馆",
+      "aliases": ["红天体育馆", "贸大体育馆", "体育馆"]
+    },
+    {
+      "key": "qiusuo",
+      "location": "对外经济贸易大学求索楼",
+      "aliases": ["求索楼", "贸大求索楼", "第一教学楼"]
+    },
+    {
+      "key": "boxue",
+      "location": "对外经济贸易大学博学楼",
+      "aliases": ["博学楼", "贸大博学楼"]
+    },
+    {
+      "key": "ningyuan",
+      "location": "对外经济贸易大学宁远楼",
+      "aliases": ["宁远楼", "贸大宁远楼"]
+    },
+    {
+      "key": "chengxin",
+      "location": "对外经济贸易大学诚信楼",
+      "aliases": ["诚信楼", "贸大诚信楼"]
+    },
+    {
+      "key": "keyan",
+      "location": "对外经济贸易大学科研楼",
+      "aliases": ["科研楼", "逸夫科研楼", "贸大科研楼"]
+    },
+    {
+      "key": "qiuzhen",
+      "location": "对外经济贸易大学求真楼",
+      "aliases": ["求真楼", "贸大求真楼"]
+    },
+    {
+      "key": "zhixing",
+      "location": "对外经济贸易大学知行楼",
+      "aliases": ["知行楼", "贸大知行楼"]
+    },
+    {
+      "key": "library",
+      "location": "对外经济贸易大学图书馆",
+      "aliases": ["图书馆", "贸大图书馆"]
+    },
+    {
+      "key": "hongyuan",
+      "location": "对外经济贸易大学虹远楼",
+      "aliases": ["虹远楼", "贸大虹远楼"]
+    }
+  ]
+}

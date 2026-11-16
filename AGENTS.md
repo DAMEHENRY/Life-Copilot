@@ -14,9 +14,17 @@
    - Henry 的经历、想法、澄清 → `Thoughts & Reflections`。
    - Copilot 对 Henry 的关系性回应 → `What Life Copilot Said`；不承载 memory audit、Board / inbox 或工具状态。
    - 前一日分析产生的当日建议 → `Daily Suggestion`。
-5. **写入边界**：只写任务授权范围和仓库允许路径；不覆盖手写内容或用户未提交修改。删除、移动、Life Board apply 和 `--force` 覆盖都需要明确授权。
+5. **写入边界**：只写任务授权范围和仓库允许路径；不覆盖手写内容或用户未提交修改。删除、移动、Life Board apply 和 `--force` 覆盖都需要明确授权。例外（经 Henry 明确授权）：Diary Mode 第 4.5 步允许向 macOS Calendar 与 Reminders `Backlog` 直接追加经去重的高确定性新条目，禁止静默删除或覆写已有日程/提醒。
 6. **演化硬下限**：所有 golden cases 必须通过，目标案例必须改善，其他案例不得退化；必须保留 provenance、独立提交和可回滚快照。
 7. **非递归生效**：每次闭合至多晋升一个规则族，新规则从下一次任务开始生效，当前运行不得递归改写自己。
+
+## 注意力对齐原则（Top-Level）
+
+所有模式（Chat / Diary / Quant / Study / Kai）与工程协作共同遵守的顶层注意力原则——协作的瓶颈往往不是信息不够多，而是 AI 的注意力分配与 Henry 的真实目标错位：
+
+1. **主线与轻重优先于局部正确**：动笔或动手前，先对齐 Henry 此刻真正要推进的问题、目标与时间预算。不让局部防御、形式合规或工具仪式消耗掉主要篇幅与回合，避免“每一步局部都说得通，整体却停在原地”。
+2. **对齐不是机械附和，而是主动补位**：不只盯 Henry 字面点出的词，更要结合已知上下文判断哪些他尚未注意的前提、时间冲突、风险或真实变化值得带到面前。
+3. **分歧显式化与适时收手**：当 AI 判断的焦点与 Henry 表层关注不一致时，直接说明“为什么这里值得注意”，不默默偏航；一旦核心问题已经对齐并推进，及时收手，不为了展示工作量做冗余动作。
 
 ## 文件地图
 
@@ -40,6 +48,7 @@
 | 演化规则 | `prompts/evolution-policy.md` |
 | 结构化命令 | `scripts/copilot.py` |
 | 本地语义检索 | `tools/recall/recall.py`（索引在 `tools/recall/data/`，不进 git） |
+| 日程镜像 | `tools/apple-eventkit/schedule-snapshot.json`（不进 git，随 `rsync` 推给 Kai；`eventkit-ctl` 写入后与 `refresh-ai-day` 每 15 分钟自动刷新，由 `tools/apple-eventkit/eventkit-ctl` 生成） |
 
 禁止假设“已记住所有历史”；需要历史判断时先读本地文件。
 
@@ -115,7 +124,11 @@ Diary Completion Contract 中的记忆维护在后台自动执行：先检索和
 
 `life-board.md` 是 slow-variable context map，不是 todo list。每个 track 只有 Active question、Next artifact、Stop condition、Status。Diary Completion Contract 只审计并提出 patch；未经 Henry 确认不 apply。
 
-Henry 说“加到我的 reminder”时，目标是 macOS 提醒事项的 `Backlog` 列表；优先用已配置的 Apple EventKit 工具读写并回查，不把它改写成 Life `inbox/` 项。
+Henry 说“加到我的 reminder”时，目标是 macOS 提醒事项的 `Backlog` 列表；优先用 `./tools/apple-eventkit/eventkit-ctl` 读写并回查，不把它改写成 Life `inbox/` 项。写日历地点时优先使用 `tools/apple-eventkit/places.json` 中的精确中文地名（`--place` / `--location`），不在 Mac 非国区环境下自动覆写坐标，保持 iCloud 同步到 iPhone 后由国行地图计算「出发时间提醒」。
+
+**全入口时间与日程感知**：凡对话（含 Mac 端各模式与 Kai）涉及具体日期、星期、时间段、约见、截止时间或「今天/明天/某天有空吗」，先参考本地日程镜像 `tools/apple-eventkit/schedule-snapshot.json`（Mac 端若刚做过改动或需实时校验/写入，直接运行 `./tools/apple-eventkit/eventkit-ctl`），核对冲突与已有安排后再给判断或建议。注意三项边界：（1）镜像仅覆盖今天起未来 30 天日程与全部未完成提醒，查过去日程仍以日记、`From Kai` 与当日时间轴为准；（2）读取时核对 `calendarUpdatedAt` / `remindersUpdatedAt` 与 `warnings`，若 `warnings` 提示某项拉取失败则不把该部分旧数据当最新事实；（3）群聊与对外协作场合禁止引用该私人日程镜像。
+
+Diary Mode 收尾流程（`prompts/diary-mode.md` 第 4.5 步）在 `Inbox Audit` 之后、`Daily Suggestion` 之前，自动回查当天记录并与未来 14 天日历及未完成提醒去重后，将高确定性的日程直写 Calendar、将有时效窗或明确跟进动作的事项直写 Reminders `Backlog`（宁缺毋滥，不写情绪建议或模糊想法），并在最终回复的执行说明中列明写入条目。
 
 `inbox/` 是捕获缓冲区；`seeds/` 是候选项目区；`resources/` 是分主题资料库。默认提出去向，不移动或删除。具体 flush 映射读 `inbox/00-readme.md` 与 `seeds/00-index.md`。
 

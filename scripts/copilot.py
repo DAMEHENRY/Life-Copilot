@@ -7691,6 +7691,39 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
     print(result["journal"])
 
 
+def refresh_schedule_snapshot(max_age_sec: int = 900) -> bool:
+    """Best-effort refresh of the Calendar/Reminders mirror for Kai and local chats."""
+    ctl = ROOT / "tools" / "apple-eventkit" / "eventkit-ctl"
+    if not ctl.exists():
+        return False
+    out_path = ROOT / "tools" / "apple-eventkit" / "schedule-snapshot.json"
+    try:
+        proc = subprocess.run(
+            [
+                str(ctl),
+                "snapshot",
+                "--out",
+                str(out_path),
+                "--max-age-sec",
+                str(max_age_sec),
+                "--best-effort",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return False
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return False
+    return bool(payload.get("changed"))
+
+
 def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
     """Bring the day's traces and timeline up to date between diary analyses.
 
@@ -7732,6 +7765,8 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
         line.split("wrote:", 1)[1].strip().rsplit("/", 1)[-1]
         for line in log.splitlines() if "wrote:" in line
     ]
+    if refresh_schedule_snapshot(max_age_sec=900):
+        wrote.append("schedule-snapshot.json")
     if wrote:
         for line in log.splitlines():
             if "WARNING" in line:

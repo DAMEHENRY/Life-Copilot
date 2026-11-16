@@ -156,6 +156,18 @@ class RefreshAiDayTest(unittest.TestCase):
         self.assertEqual(result["journal"], str(self.journal))
         self.assertEqual(result["openclaw_status"], "pulled")
 
+    def test_schedule_snapshot_refresh_is_reported_when_changed_and_nonfatal_on_error(self):
+        ctl = self.root / "tools" / "apple-eventkit" / "eventkit-ctl"
+        ctl.parent.mkdir(parents=True)
+        ctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        with patch.object(copilot.subprocess, "run", return_value=type("P", (), {"returncode": 0, "stdout": '{"ok": true, "changed": true}'})()):
+            output = self._refresh("--no-openclaw")
+        self.assertIn("schedule-snapshot.json", output)
+
+        with patch.object(copilot.subprocess, "run", side_effect=OSError("boom")):
+            output_err = self._refresh("--no-openclaw")
+        self.assertEqual(output_err.strip(), "openclaw: skipped")
+
 
 if __name__ == "__main__":
     unittest.main()
