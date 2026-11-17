@@ -49,6 +49,8 @@ class RefreshAiDayTest(unittest.TestCase):
             patch.object(copilot, "export_life_claude_renderer_day_transcript", return_value=("", 0, 0)),
             patch.object(copilot, "export_claude_code_day_transcript", return_value=("", 0, 0)),
             patch.object(copilot, "openclaw_day_source_records", return_value=[]),
+            patch.object(copilot, "zshs_sync_day",
+                         return_value={"status": "empty", "codex_files": 0, "claude_files": 0}),
             patch.object(copilot, "refresh_web_chats_for_writeback",
                          side_effect=AssertionError("the refresh must never sync web chats")),
         ]
@@ -94,7 +96,7 @@ class RefreshAiDayTest(unittest.TestCase):
         for path in paths:
             os.utime(path, ns=(1_000_000_000, 1_000_000_000))
         output = self._refresh()
-        self.assertEqual(output.strip(), "openclaw: pulled")
+        self.assertEqual(output.strip(), "zshs: empty\nopenclaw: pulled")
         self.assertEqual([path.stat().st_mtime_ns for path in paths], [1_000_000_000] * len(paths))
 
     def test_new_message_rewrites_only_the_trace_that_changed(self):
@@ -125,14 +127,14 @@ class RefreshAiDayTest(unittest.TestCase):
         archived = kai_trace.read_text(encoding="utf-8")
         self.export_openclaw.side_effect = copilot.OpenClawImportUnavailable("ssh timed out")
         output = self._refresh()
-        self.assertEqual(output.strip(), "openclaw: unavailable")
+        self.assertEqual(output.strip(), "zshs: empty\nopenclaw: unavailable")
         self.assertEqual(kai_trace.read_text(encoding="utf-8"), archived)
 
     def test_day_without_conversations_is_not_an_error(self):
         self.export_openclaw.return_value = ("", 0, 0)
         with patch.object(copilot, "export_codex_day_transcript", return_value=""):
             output = self._refresh()
-        self.assertEqual(output.strip(), "openclaw: pulled")
+        self.assertEqual(output.strip(), "zshs: empty\nopenclaw: pulled")
         self.assertFalse(self.traces.exists())
 
     def test_kept_lost_messages_stay_in_the_trace_without_a_warning_each_run(self):
@@ -166,7 +168,19 @@ class RefreshAiDayTest(unittest.TestCase):
 
         with patch.object(copilot.subprocess, "run", side_effect=OSError("boom")):
             output_err = self._refresh("--no-openclaw")
-        self.assertEqual(output_err.strip(), "openclaw: skipped")
+        self.assertEqual(output_err.strip(), "zshs: empty\nopenclaw: skipped")
+
+    def test_unreachable_zshs_is_one_line_and_keeps_its_trace(self):
+        with patch.object(copilot, "export_zshs_codex_day_transcript",
+                          return_value=(CODEX_THREAD + "\n\n" + _msg(9, 5, "Henry", "工位上的话") + "\n")):
+            self._refresh()
+        zshs_trace = self.traces / "2026-08-13-zshs-codex-trace.md"
+        archived = zshs_trace.read_text(encoding="utf-8")
+        with patch.object(copilot, "zshs_sync_day",
+                          side_effect=copilot.ZshsImportUnavailable("connect timed out")):
+            output = self._refresh()
+        self.assertEqual(output.strip(), "zshs: unavailable\nopenclaw: pulled")
+        self.assertEqual(zshs_trace.read_text(encoding="utf-8"), archived)
 
 
 if __name__ == "__main__":

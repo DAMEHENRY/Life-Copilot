@@ -347,7 +347,9 @@ class TestAntigravityAndGeminiTimelineWriteback(unittest.TestCase):
 
     def test_writeback_and_refresh_write_antigravity_trace(self) -> None:
         # refresh-ai-day writes trace + timeline without requiring or touching journal.
-        args = copilot.build_parser().parse_args(["refresh-ai-day", "--date", "2026-11-14", "--no-openclaw"])
+        args = copilot.build_parser().parse_args([
+            "refresh-ai-day", "--date", "2026-11-14", "--no-openclaw", "--no-zshs",
+        ])
         with redirect_stdout(io.StringIO()):
             args.func(args)
         ag_trace = self.trace_dir / "2026-11-14-antigravity-trace.md"

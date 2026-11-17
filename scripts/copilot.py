@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -29,6 +30,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -174,6 +176,216 @@ OPENCLAW_MANUAL_BLOCK_RE = re.compile(
     r"<!-- openclaw-manual-end -->",
     re.DOTALL,
 )
+# The internship Windows host (zshs) keeps its own Codex / Claude Code
+# histories. They are read over SSH, only for the day being archived, and
+# rendered with the same visible-message rules as the Mac sources. The host is
+# optional: the daily archive reports one line and keeps the existing traces
+# when it cannot be reached.
+ZSHS_SSH_HOST = os.environ.get("LIFE_ZSHS_SSH_HOST", "zshs9@zshs")
+ZSHS_CODEX_SESSIONS_DIR = os.environ.get(
+    "LIFE_ZSHS_CODEX_SESSIONS_DIR", "C:/Users/zshs9/.codex/sessions"
+)
+ZSHS_CLAUDE_PROJECTS_DIR = os.environ.get(
+    "LIFE_ZSHS_CLAUDE_PROJECTS_DIR", "C:/Users/zshs9/.claude/projects"
+)
+# The cache is derived and disposable, so it lives in the user's temp area:
+# that is writable under the agent's workspace sandbox, unlike Application
+# Support, and it is never synced to iCloud. The durable corpus is in the
+# vault; a reboot only costs a refetch.
+ZSHS_CACHE_DIR = Path(os.environ.get(
+    "LIFE_ZSHS_CACHE_DIR",
+    str(Path(tempfile.gettempdir()) / "life-copilot-zshs"),
+))
+ZSHS_CODEX_CACHE_DIR = ZSHS_CACHE_DIR / "codex" / "sessions"
+ZSHS_CLAUDE_CACHE_DIR = ZSHS_CACHE_DIR / "claude-code" / "projects"
+ZSHS_CATPAW_DB = os.environ.get(
+    "LIFE_ZSHS_CATPAW_DB",
+    "C:/Users/zshs9/AppData/Roaming/catpaw-moon/catpaw-memory-909489.db",
+)
+ZSHS_CATPAW_CACHE_DIR = ZSHS_CACHE_DIR / "catpaw"
+ZSHS_UNREACHABLE_MARKER = ZSHS_CACHE_DIR / "last-unreachable"
+ZSHS_UNREACHABLE_COOLDOWN = 600
+# The host key was accepted under the Tailscale address, so keep that alias
+# when the machine is reached through its LAN name.
+ZSHS_SSH_OPTIONS = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "ConnectionAttempts=1",
+    "-o", "ServerAliveInterval=10",
+    "-o", "ServerAliveCountMax=2",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "HostKeyAlias=100.86.105.53",
+]
+ZSHS_POWERSHELL = os.environ.get(
+    "LIFE_ZSHS_POWERSHELL",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+)
+ZSHS_PYTHON = os.environ.get(
+    "LIFE_ZSHS_PYTHON",
+    "C:\\ProgramData\\anaconda3\\python.exe",
+)
+ZSHS_REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+# Runs on zshs with the host's Python and prints one filtered tar.gz as base64.
+# Only visible user/assistant records are kept; the Mac re-renders them with
+# the same cleaners as the local sources.
+ZSHS_FILTER_READER = r'''
+import base64, io, json, os, tarfile
+from datetime import date, timedelta
+import zstandard
+
+P = PARAMS
+start = date.fromisoformat(P["start"])
+end = date.fromisoformat(P["end"])
+mode = P["mode"]
+buf = io.BytesIO()
+kept_files = 0
+kept_records = 0
+
+def add(tar, name, data):
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    tar.addfile(info, io.BytesIO(data))
+
+def read_lines(path):
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if path.endswith(".zst"):
+        data = zstandard.ZstdDecompressor().decompress(data)
+    return data.decode("utf-8", "replace").splitlines()
+
+with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    if mode == "codex":
+        root = P["root"]
+        day = start - timedelta(days=1)
+        while day <= end:
+            folder = os.path.join(root, day.strftime("%Y"), day.strftime("%m"), day.strftime("%d"))
+            if os.path.isdir(folder):
+                for name in sorted(os.listdir(folder)):
+                    if not (name.endswith(".jsonl") or name.endswith(".jsonl.zst")):
+                        continue
+                    path = os.path.join(folder, name)
+                    kept = []
+                    primary = True
+                    for line in read_lines(path):
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except Exception:
+                            continue
+                        kind = record.get("type")
+                        if kind == "session_meta":
+                            payload = record.get("payload") or {}
+                            primary = payload.get("thread_source") in (None, "user")
+                            if not primary:
+                                break
+                            kept.append(line)
+                        elif kind == "response_item":
+                            payload = record.get("payload") or {}
+                            if payload.get("type") == "message" and payload.get("role") in ("user", "assistant"):
+                                kept.append(line)
+                    if len(kept) > 1:
+                        out_name = "%s/%s/%s/%s" % (
+                            day.strftime("%Y"), day.strftime("%m"), day.strftime("%d"),
+                            name[:-4] if name.endswith(".zst") else name,
+                        )
+                        add(tar, out_name, ("\n".join(kept) + "\n").encode("utf-8"))
+                        kept_files += 1
+                        kept_records += len(kept)
+            day += timedelta(days=1)
+    elif mode == "catpaw":
+        import sqlite3
+        from datetime import datetime
+        path = P["db"]
+        lo = int(datetime.combine(start - timedelta(days=1), datetime.min.time()).timestamp() * 1000)
+        hi = int(datetime.combine(end + timedelta(days=2), datetime.min.time()).timestamp() * 1000)
+        con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+        con.execute("pragma query_only = on")
+        rows = con.execute(
+            "select m.conversation_id, coalesce(s.title,''), m.created_at_ms, m.role, m.payload "
+            "from ui_sdk_messages m left join sessions s on s.id = m.conversation_id "
+            "where m.role in ('user','assistant') and m.created_at_ms >= ? and m.created_at_ms < ? "
+            "order by m.created_at_ms",
+            (lo, hi),
+        )
+        buckets = {}
+        for conversation, title, ms, role, payload in rows:
+            try:
+                obj = json.loads(payload)
+            except Exception:
+                continue
+            content = obj.get("content")
+            parts = []
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                        parts.append(part["text"])
+            text = (chr(10) * 2).join(p for p in parts if p.strip()).strip()
+            if not text:
+                continue
+            stamp = datetime.fromtimestamp(ms / 1000).astimezone().isoformat()
+            bucket = buckets.setdefault(conversation, {"title": title or "", "rows": []})
+            bucket["rows"].append({
+                "session": conversation,
+                "title": bucket["title"],
+                "ts": stamp,
+                "role": role,
+                "text": text,
+            })
+        for conversation, bucket in buckets.items():
+            data = chr(10).join(json.dumps(row, ensure_ascii=False) for row in bucket["rows"]) + chr(10)
+            add(tar, "%s.jsonl" % conversation, data.encode("utf-8"))
+            kept_files += 1
+            kept_records += len(bucket["rows"])
+    else:
+        root = P["root"]
+        lower = (start - timedelta(days=1)).isoformat()
+        upper = (end + timedelta(days=1)).isoformat()
+        for current, dirs, files in os.walk(root):
+            for name in files:
+                if not name.endswith(".jsonl"):
+                    continue
+                path = os.path.join(current, name)
+                try:
+                    stamp = date.fromtimestamp(os.path.getmtime(path))
+                except OSError:
+                    continue
+                if stamp < start - timedelta(days=1) or stamp > end + timedelta(days=1):
+                    continue
+                kept = []
+                for line in read_lines(path):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    kind = record.get("type")
+                    if kind not in ("user", "assistant"):
+                        continue
+                    if record.get("isSidechain") is True or record.get("isMeta") is True:
+                        continue
+                    message = record.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    if kind == "user":
+                        content = message.get("content")
+                        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "tool_result" for p in content):
+                            continue
+                    else:
+                        if record.get("isApiErrorMessage") is True or message.get("model") == "<synthetic>":
+                            continue
+                    kept.append(line)
+                if kept:
+                    relative = os.path.relpath(path, root).replace("\\", "/")
+                    add(tar, relative, ("\n".join(kept) + "\n").encode("utf-8"))
+                    kept_files += 1
+                    kept_records += len(kept)
+print("KEPT %d %d" % (kept_files, kept_records))
+print(base64.b64encode(buf.getvalue()).decode("ascii"))
+'''
 # Claude / ChatGPT web chats: the Chrome extension + native host in
 # tools/web-chat-archiver keep a raw local archive that writeback-ai-day reads.
 WEB_CHATS_DIR = Path(os.environ.get(
@@ -445,12 +657,14 @@ def ai_trace_path_for_date(d: date, source: str) -> Path:
     sources = {
         "codex", "claude-code", "claudian", "life-claude-renderer", "openclaw",
         "antigravity", "claude-web", "chatgpt-web", "deepseek-web", "gemini-web",
+        "zshs-codex", "zshs-claude-code", "zshs-catpaw",
     }
     if source not in sources:
         raise ValueError(
             f"Unsupported source: {source}. "
             "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', 'openclaw', "
-            "'antigravity', 'claude-web', 'chatgpt-web', 'deepseek-web', or 'gemini-web'."
+            "'antigravity', 'claude-web', 'chatgpt-web', 'deepseek-web', 'gemini-web', "
+            "'zshs-codex', 'zshs-claude-code', or 'zshs-catpaw'."
         )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
@@ -1360,10 +1574,20 @@ def claude_projects_dirs(projects_dir: Optional[Path] = None) -> List[Path]:
     return dirs
 
 
-def claude_code_session_files(projects_dirs: List[Path]) -> List[Path]:
-    """Every Claude Code session file across the given project directories."""
+def claude_code_session_files(
+    projects_dirs: List[Path],
+    *,
+    recursive: bool = False,
+) -> List[Path]:
+    """Every Claude Code session file across the given project directories.
+
+    'recursive' is for a cache root that still holds the source's one
+    directory per project (the zshs host); the local vault source points at
+    one project directory, so its own glob stays shallow.
+    """
+    pattern = "**/*.jsonl" if recursive else "*.jsonl"
     return sorted(
-        (path for projects_dir in projects_dirs for path in projects_dir.glob("*.jsonl")),
+        (path for projects_dir in projects_dirs for path in projects_dir.glob(pattern)),
         key=lambda path: path.name,
     )
 
@@ -1473,6 +1697,7 @@ def export_claude_code_day_transcript(
     renderer_history_path: Optional[Path] = None,
     user_name: str = "Henry",
     assistant_name: str = "Claude",
+    recursive: bool = False,
 ) -> Tuple[str, int, int]:
     """Build the visible transcript from native Claude Code project sessions.
 
@@ -1488,7 +1713,7 @@ def export_claude_code_day_transcript(
     # (started, session_id, custom title, [(ts, role, text, uuid)])
     sessions: List[Tuple[str, str, str, List[Tuple[str, str, str, str]]]] = []
 
-    for jsonl_path in claude_code_session_files(projects_dirs):
+    for jsonl_path in claude_code_session_files(projects_dirs, recursive=recursive):
         session_id = jsonl_path.stem
         if session_id in excluded:
             continue
@@ -2843,6 +3068,880 @@ def preserve_manual_openclaw_blocks(
     parts = [part for part in [*manual_blocks, transcript] if part]
     return "\n\n".join(parts).rstrip() + ("\n" if parts else "")
 
+# ---------------------------------------------------------------------------
+# zshs: the internship Windows host
+# ---------------------------------------------------------------------------
+class ZshsImportUnavailable(RuntimeError):
+    """Raised when the optional zshs host cannot be reached or read."""
+
+
+def zshs_powershell_bytes(script: str) -> bytes:
+    """Encode a PowerShell script for ``-EncodedCommand`` (UTF-16LE)."""
+    return base64.b64encode(script.encode("utf-16-le"))
+
+
+def zshs_run_ssh(
+    remote_args: List[str],
+    *,
+    timeout: int = 60,
+    attempts: int = 2,
+    stdin_data: Optional[bytes] = None,
+) -> bytes:
+    """Run one read-only command on zshs and return its raw stdout.
+
+    Every call opens its own connection: an SSH control master to this host
+    went stale across a network drop and hung the whole backfill, and the
+    per-call handshake is the cheaper failure. Failures are retried once,
+    except authentication and host-key errors, which retrying cannot fix.
+    """
+    command = ["ssh", *ZSHS_SSH_OPTIONS, ZSHS_SSH_HOST, *remote_args]
+    failures: List[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                command,
+                input=stdin_data,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(str(exc))
+        else:
+            if result.returncode == 0:
+                return result.stdout
+            stderr = result.stderr.decode("utf-8", "replace").strip()
+            failures.append(stderr or f"ssh exited {result.returncode}")
+            if "Permission denied" in stderr or "Host key verification failed" in stderr:
+                break
+        if attempt < attempts:
+            time.sleep(attempt)
+    detail = failures[-1] if failures else "unknown SSH failure"
+    raise ZshsImportUnavailable(
+        f"cannot reach {ZSHS_SSH_HOST} after {attempts} attempt(s): {detail}"
+    )
+
+
+def zshs_powershell(
+    script: str,
+    *,
+    timeout: int = 60,
+    attempts: int = 2,
+) -> str:
+    """Run a PowerShell script on zshs and decode its UTF-8 stdout."""
+    wrapped = (
+        "$ProgressPreference='SilentlyContinue';"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+        "$OutputEncoding=[Console]::OutputEncoding;"
+        + script
+    )
+    payload = zshs_run_ssh(
+        [
+            ZSHS_POWERSHELL,
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            zshs_powershell_bytes(wrapped).decode("ascii"),
+        ],
+        timeout=timeout,
+        attempts=attempts,
+    )
+    return payload.decode("utf-8", "replace")
+
+
+def zshs_python(
+    script: str,
+    *,
+    timeout: int = 120,
+    attempts: int = 1,
+) -> str:
+    """Run a Python script on zshs, with the script on stdin.
+
+    stdin avoids the Windows command-line length limit, which a base64 script
+    sent as -c already crossed for the range reader. Nothing is written to the
+    host: the interpreter is the Anaconda Python already there.
+    """
+    payload = zshs_run_ssh(
+        [ZSHS_PYTHON, "-X", "utf8", "-"],
+        timeout=timeout,
+        attempts=attempts,
+        stdin_data=script.encode("utf-8"),
+    )
+    return payload.decode("utf-8", "replace")
+
+
+def zshs_list_codex_days(
+    *,
+    timeout: int = 60,
+    attempts: int = 1,
+) -> List[str]:
+    """Every ``YYYY/MM/DD`` directory that holds Codex sessions on zshs."""
+    script = (
+        "$root='%(root)s';"
+        "if (Test-Path -LiteralPath $root) {"
+        "  Get-ChildItem -LiteralPath $root -Directory | ForEach-Object {"
+        "    $y=$_.Name;"
+        r"    if ($y -match '^\d{4}$') {"
+        "      Get-ChildItem -LiteralPath $_.FullName -Directory | ForEach-Object {"
+        "        $m=$_.Name;"
+        r"        if ($m -match '^\d{2}$') {"
+        "          Get-ChildItem -LiteralPath $_.FullName -Directory | ForEach-Object {"
+        "            $d=$_.Name;"
+        r"            if ($d -match '^\d{2}$') { Write-Output ($y + '/' + $m + '/' + $d) }"
+        "          }"
+        "        }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    ) % {"root": ZSHS_CODEX_SESSIONS_DIR}
+    output = zshs_powershell(script, timeout=timeout, attempts=attempts).lstrip("\ufeff")
+    return sorted({line.strip() for line in output.splitlines() if re.fullmatch(r"\d{4}/\d{2}/\d{2}", line.strip())})
+
+
+def zshs_list_claude_files(
+    lo: date,
+    hi: date,
+    *,
+    timeout: int = 60,
+    attempts: int = 1,
+) -> List[str]:
+    """Claude Code session files on zshs touched in ``[lo, hi)``."""
+    script = (
+        "$root='%(root)s';"
+        "$lo=[datetime]'%(lo)s';"
+        "$hi=[datetime]'%(hi)s';"
+        "if (Test-Path -LiteralPath $root) {"
+        "  Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.jsonl'"
+        "  | Where-Object { $_.LastWriteTime -ge $lo -and $_.LastWriteTime -lt $hi }"
+        "  | ForEach-Object { $_.FullName.Substring($root.Length + 1) }"
+        "}"
+    ) % {"root": ZSHS_CLAUDE_PROJECTS_DIR, "lo": lo.isoformat(), "hi": hi.isoformat()}
+    output = zshs_powershell(script, timeout=timeout, attempts=attempts).lstrip("\ufeff")
+    return sorted({
+        line.strip().replace("\\", "/")
+        for line in output.splitlines()
+        if line.strip() and ZSHS_REMOTE_NAME_RE.fullmatch(line.strip().replace("\\", "/"))
+    })
+
+
+def zshs_extract_archive(payload: bytes, destination: Path) -> List[Path]:
+    """Extract a tar stream below ``destination``, refusing unsafe names."""
+    written: List[Path] = []
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(payload), mode="r:")
+    except tarfile.TarError as exc:
+        raise ZshsImportUnavailable(f"unreadable archive from {ZSHS_SSH_HOST}: {exc}") from exc
+    with archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            relative = member.name.replace("\\", "/").lstrip("/")
+            parts = [part for part in relative.split("/") if part not in ("", ".")]
+            if parts and (parts[-1].startswith("._") or parts[-1] == ".DS_Store"):
+                continue
+            if not parts or any(part == ".." or re.match(r"^[A-Za-z]:$", part) for part in parts):
+                raise ZshsImportUnavailable(
+                    f"refusing unsafe path in archive from {ZSHS_SSH_HOST}: {member.name}"
+                )
+            target = destination.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            handle = archive.extractfile(member)
+            if handle is None:
+                continue
+            target.write_bytes(handle.read())
+            written.append(target)
+    return written
+
+
+def zshs_extract_range(
+    start: date,
+    end: date,
+    source: str,
+    *,
+    timeout: int = 1800,
+    attempts: int = 1,
+    archive_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Pull the visible records in a date range as filtered JSONL.
+
+    The host reads its own rollout files (including the .zst ones), keeps only
+    session metadata and visible user/assistant records, and sends one
+    gzipped tar. At the office link's speed the full raw tree is hours of
+    transfer; the filtered records are a few MB and re-render identically.
+    """
+    if source == "codex":
+        root = ZSHS_CODEX_SESSIONS_DIR
+        destination = ZSHS_CODEX_CACHE_DIR
+        mode = "codex"
+    elif source == "claude-code":
+        root = ZSHS_CLAUDE_PROJECTS_DIR
+        destination = ZSHS_CLAUDE_CACHE_DIR
+        mode = "claude"
+    elif source == "catpaw":
+        root = ZSHS_CATPAW_DB
+        destination = ZSHS_CATPAW_CACHE_DIR
+        mode = "catpaw"
+    else:
+        raise ValueError(f"Unsupported zshs source: {source}")
+    params = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "mode": mode,
+        "root": root,
+        "db": ZSHS_CATPAW_DB if source == "catpaw" else "",
+    }
+    script = "PARAMS = " + repr(params) + chr(10) + ZSHS_FILTER_READER
+    output = zshs_python(script, timeout=timeout, attempts=attempts)
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    header = next((line for line in lines if line.startswith("KEPT ")), "")
+    # Join non-header lines: a console may wrap a multi-megabyte base64 stream.
+    payload_line = "".join(line for line in lines if not line.startswith("KEPT "))
+    if not header:
+        raise ZshsImportUnavailable("zshs filter returned no header")
+    if not payload_line:
+        return {"status": "empty", "files": 0, "records": 0}
+    try:
+        payload = base64.b64decode(payload_line)
+        raw = gzip.decompress(payload)
+    except (ValueError, OSError) as exc:
+        raise ZshsImportUnavailable(f"unreadable filtered payload from zshs: {exc}") from exc
+    if archive_path is not None:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_bytes(payload)
+    files = zshs_extract_archive(raw, destination)
+    records = 0
+    try:
+        records = int(header.split()[2])
+    except (IndexError, ValueError):
+        pass
+    return {
+        "status": "pulled" if records else "empty",
+        "files": len(files),
+        "records": records,
+        "archive": str(archive_path) if archive_path is not None else "",
+    }
+
+
+def zshs_unreachable_cooldown() -> int:
+    """Seconds left in the post-failure cooldown, or 0 when a retry is due."""
+    try:
+        age = time.time() - ZSHS_UNREACHABLE_MARKER.stat().st_mtime
+    except OSError:
+        return 0
+    return max(0, int(ZSHS_UNREACHABLE_COOLDOWN - age))
+
+
+def zshs_mark_unreachable() -> None:
+    try:
+        ZSHS_UNREACHABLE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        ZSHS_UNREACHABLE_MARKER.write_text(
+            datetime.now().astimezone().isoformat(timespec="seconds") + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        # A read-only or sandboxed cache only costs the cooldown, not the run.
+        pass
+
+
+def zshs_clear_unreachable() -> None:
+    try:
+        ZSHS_UNREACHABLE_MARKER.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def zshs_sync_day(
+    target: date,
+    *,
+    respect_cooldown: bool = True,
+    attempts: int = 2,
+) -> Dict[str, object]:
+    """Fetch both sources for ``target``; never writes outside the cache."""
+    if respect_cooldown:
+        remaining = zshs_unreachable_cooldown()
+        if remaining:
+            raise ZshsImportUnavailable(
+                f"zshs was unreachable recently; next retry in {remaining}s"
+            )
+    try:
+        codex = zshs_extract_range(
+            target, target + timedelta(days=1), "codex", timeout=240, attempts=attempts
+        )
+        claude = zshs_extract_range(
+            target, target, "claude-code", timeout=240, attempts=attempts
+        )
+        catpaw = zshs_extract_range(
+            target, target, "catpaw", timeout=240, attempts=attempts
+        )
+    except ZshsImportUnavailable:
+        zshs_mark_unreachable()
+        raise
+    zshs_clear_unreachable()
+    pulled = bool(codex["records"] or claude["records"] or catpaw["records"])
+    return {
+        "status": "pulled" if pulled else "empty",
+        "codex_files": codex["files"],
+        "claude_files": claude["files"],
+        "catpaw_files": catpaw["files"],
+        "codex_records": codex["records"],
+        "claude_records": claude["records"],
+        "catpaw_records": catpaw["records"],
+    }
+
+
+def zshs_zstd_decompress(data: bytes, label: str) -> bytes:
+    try:
+        return openclaw_zstd_decompress(data)
+    except OpenClawImportUnavailable as exc:
+        raise ZshsImportUnavailable(f"cannot decompress {label}: {exc}") from exc
+
+
+def zshs_codex_session_files_for_date(d: date) -> List[Path]:
+    day_dir = ZSHS_CODEX_CACHE_DIR / d.strftime("%Y") / d.strftime("%m") / d.strftime("%d")
+    if not day_dir.is_dir():
+        return []
+    files: List[Path] = []
+    for path in sorted(day_dir.iterdir()):
+        if path.name.startswith("._") or not path.is_file():
+            continue
+        if path.name.endswith(".jsonl"):
+            files.append(path)
+            continue
+        if not path.name.endswith(".jsonl.zst"):
+            continue
+        plain = path.with_suffix("")
+        try:
+            if not plain.exists() or plain.stat().st_mtime < path.stat().st_mtime:
+                plain.write_bytes(zshs_zstd_decompress(path.read_bytes(), path.name))
+        except (OSError, ZshsImportUnavailable) as exc:
+            print(f"  warning: skipped {path.name}: {exc}", file=sys.stderr)
+            continue
+        files.append(plain)
+    return files
+
+
+def zshs_codex_session_files_for_date_range(d: date) -> List[Path]:
+    seen: set = set()
+    result: List[Path] = []
+    for offset in (-1, 0, 1):
+        for path in zshs_codex_session_files_for_date(d + timedelta(days=offset)):
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+    return result
+
+
+def zshs_claude_session_files() -> List[Path]:
+    if not ZSHS_CLAUDE_CACHE_DIR.is_dir():
+        return []
+    return sorted(
+        path for path in ZSHS_CLAUDE_CACHE_DIR.rglob("*.jsonl")
+        if not path.name.startswith("._")
+    )
+
+
+def export_zshs_codex_day_transcript(d: date) -> str:
+    blocks: List[str] = []
+    for session_file in zshs_codex_session_files_for_date_range(d):
+        if not codex_session_is_primary_thread(session_file):
+            continue
+        transcript = export_codex_transcript(session_file, target_date=d).strip()
+        if transcript:
+            blocks.append(
+                f"### zshs Codex Thread {codex_thread_label(session_file)}\n\n{transcript}"
+            )
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
+
+
+def export_zshs_claude_code_day_transcript(d: date) -> Tuple[str, int, int]:
+    if not zshs_claude_session_files():
+        return "", 0, 0
+    text, messages, sessions = export_claude_code_day_transcript(
+        d,
+        projects_dir=ZSHS_CLAUDE_CACHE_DIR,
+        renderer_history_path=ZSHS_CACHE_DIR / "no-renderer-history.json",
+        recursive=True,
+    )
+    text = re.sub(r"(?m)^### Claude Code Session ", "### zshs Claude Code Session ", text)
+    return text, messages, sessions
+
+
+def zshs_codex_day_source_records(d: date) -> List[SourceRecord]:
+    records: List[SourceRecord] = []
+    for session_file in zshs_codex_session_files_for_date_range(d):
+        thread = codex_thread_label(session_file)
+        for raw in read_text(session_file).splitlines():
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            payload = record.get("payload")
+            ts = str(record.get("timestamp") or "")
+            if (
+                record.get("type") != "response_item"
+                or not isinstance(payload, dict)
+                or payload.get("type") != "message"
+                or payload.get("role") not in {"user", "assistant"}
+                or timestamp_to_local_date(ts) != d
+            ):
+                continue
+            content = payload.get("content")
+            text = "\n".join(
+                part["text"]
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+            reply = summarize_codex_question_reply(text)
+            records.append((
+                thread,
+                format_chat_timestamp(ts),
+                payload["role"],
+                trace_match_text(text, reply if reply != text else None),
+            ))
+    return records
+
+
+def zshs_claude_code_day_source_records(d: date) -> List[SourceRecord]:
+    records: List[SourceRecord] = []
+    for jsonl_path in zshs_claude_session_files():
+        for raw in read_text(jsonl_path).splitlines():
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            role = record.get("type")
+            message = record.get("message")
+            ts = str(record.get("timestamp") or "")
+            if role not in {"user", "assistant"} or not isinstance(message, dict) or timestamp_to_local_date(ts) != d:
+                continue
+            content = message.get("content")
+            texts = [content] if isinstance(content, str) else [
+                part.get("text")
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            records.append((jsonl_path.stem, format_chat_timestamp(ts), role, trace_match_text(*texts)))
+    return records
+
+
+
+
+ZSHS_CATPAW_INJECTED_RE = re.compile(
+    r"<(?:expert_instructions|sandbox_context|environment_context|user_instructions)"
+    r"\b[^>]*>.*?</(?:expert_instructions|sandbox_context|environment_context|user_instructions)>",
+    re.DOTALL,
+)
+
+
+def clean_catpaw_text(text: str) -> str:
+    return ZSHS_CATPAW_INJECTED_RE.sub("", text).strip()
+
+
+def zshs_catpaw_session_files() -> List[Path]:
+    if not ZSHS_CATPAW_CACHE_DIR.is_dir():
+        return []
+    return sorted(ZSHS_CATPAW_CACHE_DIR.glob("*.jsonl"))
+
+
+def zshs_catpaw_day_messages(d: date) -> List[dict]:
+    rows: List[dict] = []
+    for path in zshs_catpaw_session_files():
+        for line in read_text(path).splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = str(record.get("ts") or "")
+            if not ts or timestamp_to_local_date(ts) != d:
+                continue
+            text = clean_catpaw_text(str(record.get("text") or ""))
+            if not text:
+                continue
+            rows.append({
+                "session": str(record.get("session") or path.stem),
+                "title": str(record.get("title") or ""),
+                "ts": ts,
+                "role": str(record.get("role") or ""),
+                "text": text,
+            })
+    return sorted(rows, key=lambda row: row["ts"])
+
+
+def export_zshs_catpaw_day_transcript(d: date) -> Tuple[str, int, int]:
+    groups: Dict[str, dict] = {}
+    for row in zshs_catpaw_day_messages(d):
+        group = groups.setdefault(row["session"], {"title": row["title"], "rows": []})
+        group["rows"].append(row)
+    blocks: List[str] = []
+    for session, group in sorted(groups.items(), key=lambda item: item[1]["rows"][0]["ts"]):
+        lines = [
+            f"[{format_chat_timestamp(row['ts'])}] "
+            f"{'Henry' if row['role'] == 'user' else 'CatPaw'}: {row['text']}"
+            for row in group["rows"]
+        ]
+        heading = f"### zshs CatPaw Session {session}"
+        title = re.sub(r"\s+", " ", group["title"]).strip()
+        if title:
+            heading += f" - {title}"
+        blocks.append(heading + chr(10) + chr(10) + (chr(10) * 2).join(lines))
+    messages = sum(len(group["rows"]) for group in groups.values())
+    return (
+        (chr(10) * 2).join(blocks).rstrip() + (chr(10) if blocks else ""),
+        messages,
+        len(groups),
+    )
+
+
+def zshs_catpaw_day_source_records(d: date) -> List[SourceRecord]:
+    return [
+        (
+            row["session"],
+            format_chat_timestamp(row["ts"]),
+            row["role"],
+            trace_match_text(row["text"]),
+        )
+        for row in zshs_catpaw_day_messages(d)
+    ]
+
+
+def zshs_inventory() -> Dict[str, object]:
+    """Read-only map of the agent app data on zshs.
+
+    Used to decide how to read a new app before writing an adapter: the paths,
+    file counts, newest timestamps and top-level names are enough to tell a
+    SQLite store from a JSONL tree. It reads no message text.
+    """
+    candidates = [
+        ("codex", "$env:USERPROFILE", ".codex/sessions"),
+        ("claude-code", "$env:USERPROFILE", ".claude/projects"),
+        ("workbuddy", "$env:USERPROFILE", ".workbuddy"),
+        ("workbuddy-roaming", "$env:APPDATA", "WorkBuddy"),
+        ("workbuddy-local", "$env:LOCALAPPDATA", "WorkBuddy"),
+        ("catpaw", "$env:APPDATA", "catpaw-moon"),
+        ("catpaw-local", "$env:LOCALAPPDATA", "catpaw-moon"),
+        ("catpaw-programs", "$env:LOCALAPPDATA", "Programs/CatPawAI"),
+        ("openai", "$env:APPDATA", "OpenAI"),
+    ]
+    entries = ",".join(
+        "@{name='%s'; root=%s; rel='%s'}" % (name, root, relative)
+        for name, root, relative in candidates
+    )
+    script = (
+        "$out=@();"
+        f"$candidates=@({entries});"
+        "foreach ($c in $candidates) {"
+        "  $p=Join-Path $c.root $c.rel;"
+        "  $item=[ordered]@{name=$c.name; path=$p; exists=(Test-Path -LiteralPath $p)};"
+        "  if ($item.exists) {"
+        "    $files=@(Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 3000);"
+        "    $item.files=$files.Count;"
+        "    $item.bytes=($files | Measure-Object Length -Sum).Sum;"
+        "    $newest=$files | Sort-Object LastWriteTime -Descending | Select-Object -First 1;"
+        "    if ($newest) { $item.newest=$newest.LastWriteTime.ToString('s') } else { $item.newest='' };"
+        "    $item.extensions=@($files | Group-Object Extension | Sort-Object Count -Descending | Select-Object -First 6 | ForEach-Object { $_.Name + ':' + $_.Count });"
+        "    $item.children=@(Get-ChildItem -LiteralPath $p -ErrorAction SilentlyContinue | Select-Object -First 25 | ForEach-Object { $_.Name });"
+        "  }"
+        "  $out += $item;"
+        "}"
+        "$out | ConvertTo-Json -Depth 6 -Compress"
+    )
+    raw = zshs_powershell(script, timeout=120, attempts=1).strip().lstrip("\ufeff")
+    if not raw:
+        raise ZshsImportUnavailable("zshs inventory returned no output")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ZshsImportUnavailable(f"unreadable zshs inventory: {exc}") from exc
+    return {"host": ZSHS_SSH_HOST, "entries": parsed if isinstance(parsed, list) else [parsed]}
+
+
+def cmd_zshs_inventory(args: argparse.Namespace) -> None:
+    try:
+        result = zshs_inventory()
+    except ZshsImportUnavailable as exc:
+        raise SystemExit(f"zshs inventory failed: {exc}") from exc
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(f"zshs inventory: {result['host']}")
+    for entry in result["entries"]:
+        state = "ok" if entry.get("exists") else "missing"
+        print(f"  {entry.get('name')}: {state}  {entry.get('path')}")
+        if not entry.get("exists"):
+            continue
+        size = entry.get("bytes") or 0
+        print(
+            f"    files {entry.get('files', 0)}, {size / (1024 * 1024):.1f} MiB, "
+            f"newest {entry.get('newest') or '-'}"
+        )
+        extensions = entry.get("extensions") or []
+        if extensions:
+            print("    extensions: " + ", ".join(extensions))
+        children = entry.get("children") or []
+        if children:
+            print("    children: " + ", ".join(children))
+
+
+def zshs_corpus_dir(start: date, end: date) -> Path:
+    return AI_CONVERSATIONS_DIR / f"zshs-internship-{start.isoformat()}-to-{end.isoformat()}"
+
+
+def zshs_codex_days_in_range(start: date, end: date, days: List[str]) -> List[str]:
+    selected: List[str] = []
+    for relative in days:
+        try:
+            day = date.fromisoformat(relative.replace("/", "-"))
+        except ValueError:
+            continue
+        if start <= day <= end:
+            selected.append(relative)
+    return selected
+
+
+def zshs_trace_counts(text: str) -> Tuple[int, int]:
+    sessions = len(re.findall(r"(?m)^### ", text))
+    messages = len(re.findall(r"(?m)^\[\d{1,2}/\d{1,2}/\d{2} ", text))
+    return sessions, messages
+
+
+def backfill_zshs(
+    start: date,
+    end: date,
+    *,
+    dry_run: bool = False,
+) -> Dict[str, object]:
+    """Import the visible zshs records in a date range into one corpus.
+
+    The host filters its own rollout files (Codex .jsonl and .jsonl.zst,
+    Claude Code .jsonl) down to session metadata and visible user/assistant
+    records, then sends one gzipped tar per source. The full raw tree is
+    hundreds of MB, and the office link made a raw copy an hours-long
+    transfer; the filtered originals re-render identically and stay under
+    visible/. The full raw remains on zshs at the paths recorded in the
+    manifest. Per-day traces go to their normal files. Diaries are never
+    touched: this adds source evidence, it does not rewrite the journal.
+    """
+    if end < start:
+        raise ValueError("--until must not be before --since")
+    nl = chr(10)
+    corpus = zshs_corpus_dir(start, end)
+    visible = corpus / "visible"
+    print(f"zshs: extracting visible records from {start} to {end}")
+
+    if dry_run:
+        available_days = zshs_codex_days_in_range(start, end, zshs_list_codex_days())
+        claude_files = zshs_list_claude_files(start - timedelta(days=1), end + timedelta(days=2))
+        print(f"zshs: {len(available_days)} Codex day folder(s) between {start} and {end}")
+        print(f"zshs: {len(claude_files)} Claude Code session file(s) touched in the range")
+        print(f"would write: {corpus.relative_to(ROOT)}")
+        return {
+            "codex_days": len(available_days),
+            "claude_files": len(claude_files),
+            "corpus": str(corpus),
+            "dry_run": True,
+        }
+
+    # The cache is derived; a stale raw or filtered file must not double up
+    # with the new filtered export.
+    for root in (ZSHS_CODEX_CACHE_DIR, ZSHS_CLAUDE_CACHE_DIR, ZSHS_CATPAW_CACHE_DIR):
+        if root.exists():
+            shutil.rmtree(root)
+    sources = [
+        ("codex", "codex-filtered.tar.gz", ZSHS_CODEX_CACHE_DIR),
+        ("claude-code", "claude-code-filtered.tar.gz", ZSHS_CLAUDE_CACHE_DIR),
+        ("catpaw", "catpaw-filtered.tar.gz", ZSHS_CATPAW_CACHE_DIR),
+    ]
+    results: Dict[str, dict] = {}
+    for source, archive_name, destination in sources:
+        archive = visible / archive_name
+        if archive.exists():
+            try:
+                raw = gzip.decompress(archive.read_bytes())
+                files = zshs_extract_archive(raw, destination)
+                results[source] = {
+                    "status": "reused",
+                    "files": len(files),
+                    "records": sum(len(read_text(path).splitlines()) for path in files),
+                    "archive": str(archive),
+                }
+                print(f"zshs: reused {archive_name}")
+                continue
+            except (OSError, ZshsImportUnavailable) as exc:
+                print(f"  warning: could not reuse {archive_name} ({exc}); refetching")
+        results[source] = zshs_extract_range(
+            start, end, source, timeout=3600, archive_path=archive,
+        )
+    codex_result = results["codex"]
+    claude_result = results["claude-code"]
+    catpaw_result = results["catpaw"]
+    print(
+        f"zshs: codex {codex_result['files']} file(s) / {codex_result['records']} record(s); "
+        f"claude {claude_result['files']} file(s) / {claude_result['records']} record(s); "
+        f"catpaw {catpaw_result['files']} file(s) / {catpaw_result['records']} record(s)"
+    )
+
+    files: List[dict] = []
+    total_bytes = 0
+    for root, source in (
+        (ZSHS_CODEX_CACHE_DIR, "zshs-codex"),
+        (ZSHS_CLAUDE_CACHE_DIR, "zshs-claude-code"),
+        (ZSHS_CATPAW_CACHE_DIR, "zshs-catpaw"),
+    ):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.jsonl")):
+            if path.name.startswith("._"):
+                continue
+            data = path.read_bytes()
+            total_bytes += len(data)
+            files.append({
+                "source": source,
+                "path": str(path.relative_to(root)),
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+    print(f"zshs: visible {len(files)} file(s), {total_bytes / (1024 * 1024):.1f} MiB")
+
+    written_traces: List[str] = []
+    rows = [
+        "| Date | Codex threads | Codex messages | Claude Code sessions | "
+        "Claude Code messages | CatPaw sessions | CatPaw messages | Traces |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    day_summaries: List[dict] = []
+    for offset in range((end - start).days + 1):
+        day = start + timedelta(days=offset)
+        codex_text = ""
+        claude_text = ""
+        catpaw_text = ""
+        try:
+            codex_text = export_zshs_codex_day_transcript(day)
+            claude_text, _, _ = export_zshs_claude_code_day_transcript(day)
+            catpaw_text, _, _ = export_zshs_catpaw_day_transcript(day)
+        except Exception as exc:
+            print(f"  warning: could not render {day}: {exc}")
+        codex_sessions, codex_messages = zshs_trace_counts(codex_text)
+        claude_sessions, claude_messages = zshs_trace_counts(claude_text)
+        catpaw_sessions, catpaw_messages = zshs_trace_counts(catpaw_text)
+        links: List[str] = []
+        trace_labels = {
+            "zshs-codex": ("Codex", zshs_codex_day_source_records),
+            "zshs-claude-code": ("Claude Code", zshs_claude_code_day_source_records),
+            "zshs-catpaw": ("CatPaw", zshs_catpaw_day_source_records),
+        }
+        for source, path, text in (
+            ("zshs-codex", ai_trace_path_for_date(day, "zshs-codex"), codex_text),
+            ("zshs-claude-code", ai_trace_path_for_date(day, "zshs-claude-code"), claude_text),
+            ("zshs-catpaw", ai_trace_path_for_date(day, "zshs-catpaw"), catpaw_text),
+        ):
+            if not text:
+                continue
+            label, record_reader = trace_labels[source]
+            header = [
+                "---",
+                f"date: {day.isoformat()}",
+                f"source: {source}",
+                "host: zshs",
+                "generated_by: scripts/copilot.py backfill-zshs",
+                "---",
+                "",
+                f"# {day.isoformat()} zshs {label} Trace",
+                "",
+            ]
+            write_ai_trace(
+                path, header, text, source,
+                lambda d=day, read=record_reader: read(d),
+                skip_unchanged=True,
+            )
+            written_traces.append(path.name)
+            links.append(f"[[{path.stem}]]")
+        if codex_sessions or claude_sessions or catpaw_sessions:
+            rows.append(
+                f"| {day} | {codex_sessions} | {codex_messages} | {claude_sessions} | "
+                f"{claude_messages} | {catpaw_sessions} | {catpaw_messages} | "
+                f"{' '.join(links) or '-'} |"
+            )
+        day_summaries.append({
+            "date": day.isoformat(),
+            "codex_threads": codex_sessions,
+            "codex_messages": codex_messages,
+            "claude_sessions": claude_sessions,
+            "claude_messages": claude_messages,
+            "catpaw_sessions": catpaw_sessions,
+            "catpaw_messages": catpaw_messages,
+            "traces": links,
+        })
+
+    manifest = {
+        "version": 1,
+        "host": ZSHS_SSH_HOST,
+        "range": {"start": start.isoformat(), "end": end.isoformat()},
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "generator": "scripts/copilot.py backfill-zshs",
+        "scope": "visible user/assistant records only; the full raw tree remains on zshs",
+        "remote_raw": {
+            "codex": ZSHS_CODEX_SESSIONS_DIR,
+            "claude-code": ZSHS_CLAUDE_PROJECTS_DIR,
+            "catpaw": ZSHS_CATPAW_DB,
+        },
+        "extraction": {
+            "codex": codex_result,
+            "claude-code": claude_result,
+            "catpaw": catpaw_result,
+        },
+        "files": files,
+        "days": day_summaries,
+    }
+    write_text(corpus / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + nl)
+
+    index = [
+        f"# zshs internship agent records ({start} to {end})",
+        "",
+        "Read-only import from the internship Windows host. The host filtered its own",
+        "Codex, Claude Code and CatPaw (Miaoshou) stores down to the visible",
+        "user/assistant records; the filtered originals are under visible/ and each",
+        "day's messages are in the normal per-day traces linked below. The full raw",
+        "data stays on zshs at the paths in manifest.json; the diary is not modified.",
+        "",
+        f"- Host: {ZSHS_SSH_HOST}",
+        f"- Visible files: {len(files)} ({total_bytes / (1024 * 1024):.1f} MiB)",
+        f"- Days with records: {sum(1 for day in day_summaries if day['traces'])}",
+        f"- Generated: {manifest['generated_at']}",
+        "",
+        *rows,
+        "",
+        "Full file inventory, hashes and the remote raw paths: manifest.json.",
+        "",
+    ]
+    write_text(corpus / "index.md", nl.join(index))
+    print(f"zshs: corpus {corpus.relative_to(ROOT)}")
+    return {
+        "corpus": str(corpus),
+        "files": len(files),
+        "bytes": total_bytes,
+        "days": day_summaries,
+        "traces": written_traces,
+        "codex": codex_result,
+        "claude": claude_result,
+        "catpaw": catpaw_result,
+    }
+
+
+def cmd_backfill_zshs(args: argparse.Namespace) -> None:
+    start = parse_date_str(args.since)
+    end = parse_date_str(args.until) if args.until else date.today()
+    try:
+        result = backfill_zshs(start, end, dry_run=bool(args.dry_run))
+    except ZshsImportUnavailable as exc:
+        raise SystemExit(f"zshs backfill failed: {exc}") from exc
+    if not result.get("dry_run"):
+        print(
+            f"zshs backfill done: {result['files']} visible file(s), "
+            f"{len(result['traces'])} trace file(s) in {result['corpus']}"
+        )
 
 # ---------------------------------------------------------------------------
 # Claude / ChatGPT web chats
@@ -6208,10 +7307,14 @@ TRACE_ASSISTANTS: Dict[str, str] = {
     "life-claude-renderer": "Claude",
     "antigravity": "Antigravity",
     "openclaw": "Kai",
+    "zshs-codex": "Codex",
+    "zshs-claude-code": "Claude",
+    "zshs-catpaw": "CatPaw",
     **{source: assistant for source, assistant, _, _ in WEB_CHAT_SOURCES.values()},
 }
 TRACE_SESSION_HEADING_RE = re.compile(
-    r"^### (?:Codex Thread|(?:Claude Code|Life Claude Renderer|Antigravity|Kai / \S+) Session"
+    r"^### (?:(?:zshs )?Codex Thread"
+    r"|(?:zshs Claude Code|zshs CatPaw|Claude Code|Life Claude Renderer|Antigravity|Kai / \S+) Session"
     r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web Conversation) (?P<session>\S+)"
 )
 # Henry's manual OpenClaw blocks put U+202F before AM/PM.
@@ -6676,10 +7779,14 @@ def codex_day_source_records(d: date) -> List[SourceRecord]:
 def claude_code_day_source_records(
     d: date,
     projects_dir: Optional[Path] = None,
+    *,
+    recursive: bool = False,
 ) -> List[SourceRecord]:
     """Every user/assistant message the Claude Code project still holds for ``d``."""
     records: List[SourceRecord] = []
-    for jsonl_path in claude_code_session_files(claude_projects_dirs(projects_dir)):
+    for jsonl_path in claude_code_session_files(
+        claude_projects_dirs(projects_dir), recursive=recursive
+    ):
         for raw in read_text(jsonl_path).splitlines():
             try:
                 record = json.loads(raw)
@@ -6914,7 +8021,8 @@ TIMELINE_TOPIC_CHARS = 48
 # ("### Codex Thread <id>") must not open a session. Web chats put tags such
 # as [Health] between the id and the title.
 TIMELINE_SESSION_HEADING_RE = re.compile(
-    r"^### (?P<label>Codex|Claude Code|Life Claude Renderer|Claudian|Antigravity|Kai / \S+"
+    r"^### (?P<label>zshs Codex|zshs Claude Code|zshs CatPaw|Codex|Claude Code|Life Claude Renderer"
+    r"|Claudian|Antigravity|Kai / \S+"
     r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web) (?:Thread|Session|Conversation) "
     r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)(?P<tags>(?: \[[^\]\n]+\])*)(?: - (?P<title>.+))?$"
 )
@@ -7344,6 +8452,8 @@ def writeback_ai_day(
     web_chats_synced: bool = False,
     update_journal: bool = True,
     pull_openclaw: bool = True,
+    pull_zshs: bool = False,
+    zshs_respect_cooldown: bool = True,
     skip_unchanged: bool = False,
 ) -> dict:
     """Refresh daily traces and journal links, optionally closing a hook turn.
@@ -7360,6 +8470,9 @@ def writeback_ai_day(
     turns `pull_openclaw` off on the runs that should not open an SSH
     connection, which leaves the existing Kai trace as it is; and sets
     `skip_unchanged` so identical traces are not written again.
+    `pull_zshs` reads the optional internship host (zshs): when it is
+    unreachable the run prints one warning and leaves its traces alone, so a
+    missing machine never stops the archive.
     """
     jp = journal_path_for_date(target)
     if update_journal and not jp.exists() and not create_journal:
@@ -7428,6 +8541,25 @@ def writeback_ai_day(
             "  warning: OpenClaw unavailable; intentionally skipped Kai / "
             f"direct-message trace because --allow-missing-openclaw was set ({exc})"
         )
+    zshs_status = "skipped"
+    zshs_detail = ""
+    zshs_codex_transcript = ""
+    zshs_claude_transcript = ""
+    zshs_catpaw_transcript = ""
+    if pull_zshs:
+        try:
+            zshs_result = zshs_sync_day(target, respect_cooldown=zshs_respect_cooldown)
+            zshs_status = str(zshs_result["status"])
+        except ZshsImportUnavailable as exc:
+            zshs_status, zshs_detail = "unavailable", str(exc)
+            print(
+                "  warning: zshs unavailable; skipped the internship-host "
+                f"Codex/Claude Code records for {target.isoformat()} ({exc})"
+            )
+        if zshs_status in {"pulled", "empty"}:
+            zshs_codex_transcript = export_zshs_codex_day_transcript(target)
+            zshs_claude_transcript, _, _ = export_zshs_claude_code_day_transcript(target)
+            zshs_catpaw_transcript, _, _ = export_zshs_catpaw_day_transcript(target)
     web_transcripts: Dict[str, str] = {}
     if web_chats:
         for provider in WEB_CHAT_SOURCES:
@@ -7448,12 +8580,16 @@ def writeback_ai_day(
         and not claude_code_transcript
         and not antigravity_transcript
         and not openclaw_transcript
+        and not zshs_codex_transcript
+        and not zshs_claude_transcript
+        and not zshs_catpaw_transcript
         and not any(web_transcripts.values())
         and not wechat_import.read_day(ROOT, target)['messages']
     ):
         raise ValueError(
             "No AI conversations (Codex, Claude Code, Life Claude Renderer, Antigravity, "
-            f"OpenClaw, or Claude/ChatGPT/DeepSeek/Gemini web) found for date: {target.isoformat()}"
+            "OpenClaw, zshs Codex/Claude Code, or Claude/ChatGPT/DeepSeek/Gemini web) "
+            f"found for date: {target.isoformat()}"
         )
 
     codex_path = ai_trace_path_for_date(target, "codex")
@@ -7461,11 +8597,17 @@ def writeback_ai_day(
     claude_code_path = ai_trace_path_for_date(target, "claude-code")
     antigravity_path = ai_trace_path_for_date(target, "antigravity")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
+    zshs_codex_path = ai_trace_path_for_date(target, "zshs-codex")
+    zshs_claude_path = ai_trace_path_for_date(target, "zshs-claude-code")
+    zshs_catpaw_path = ai_trace_path_for_date(target, "zshs-catpaw")
     codex_link = obsidian_wikilink_for_path(codex_path)
     renderer_link = obsidian_wikilink_for_path(renderer_path)
     claude_code_link = obsidian_wikilink_for_path(claude_code_path)
     antigravity_link = obsidian_wikilink_for_path(antigravity_path)
     openclaw_link = obsidian_wikilink_for_path(openclaw_path)
+    zshs_codex_link = obsidian_wikilink_for_path(zshs_codex_path)
+    zshs_claude_link = obsidian_wikilink_for_path(zshs_claude_path)
+    zshs_catpaw_link = obsidian_wikilink_for_path(zshs_catpaw_path)
 
     if openclaw_transcript and openclaw_path.exists():
         openclaw_transcript = preserve_manual_openclaw_blocks(
@@ -7486,6 +8628,12 @@ def writeback_ai_day(
         ("openclaw", openclaw_path, "Kai / OpenClaw Direct-Message Trace",
          ["channels: telegram, openclaw-weixin"], openclaw_transcript,
          lambda: openclaw_day_source_records(target, openclaw_retained)),
+        ("zshs-codex", zshs_codex_path, "zshs Codex Trace", ["host: zshs"],
+         zshs_codex_transcript, lambda: zshs_codex_day_source_records(target)),
+        ("zshs-claude-code", zshs_claude_path, "zshs Claude Code Trace", ["host: zshs"],
+         zshs_claude_transcript, lambda: zshs_claude_code_day_source_records(target)),
+        ("zshs-catpaw", zshs_catpaw_path, "zshs CatPaw Trace", ["host: zshs"],
+         zshs_catpaw_transcript, lambda: zshs_catpaw_day_source_records(target)),
     ]
     web_paths: Dict[str, Path] = {}
     for provider, (source, _, label, _) in WEB_CHAT_SOURCES.items():
@@ -7559,6 +8707,24 @@ def writeback_ai_day(
                 openclaw_link,
                 "Kai / OpenClaw direct conversations.",
             )
+        if zshs_codex_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                zshs_codex_link,
+                "Codex conversations on the internship host (zshs).",
+            )
+        if zshs_claude_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                zshs_claude_link,
+                "Claude Code conversations on the internship host (zshs).",
+            )
+        if zshs_catpaw_transcript:
+            journal_text = ensure_single_from_kai_link(
+                journal_text,
+                zshs_catpaw_link,
+                "CatPaw (Miaoshou) conversations on the internship host (zshs).",
+            )
         for provider, web_path in web_paths.items():
             journal_text = ensure_single_from_kai_link(
                 journal_text,
@@ -7590,6 +8756,11 @@ def writeback_ai_day(
         "renderer_trace": str(renderer_path) if renderer_transcript else "",
         "antigravity_trace": str(antigravity_path) if antigravity_transcript else "",
         "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
+        "zshs_status": zshs_status,
+        "zshs_detail": zshs_detail,
+        "zshs_codex_trace": str(zshs_codex_path) if zshs_codex_transcript else "",
+        "zshs_claude_code_trace": str(zshs_claude_path) if zshs_claude_transcript else "",
+        "zshs_catpaw_trace": str(zshs_catpaw_path) if zshs_catpaw_transcript else "",
         "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
         "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
         "deepseek_web_trace": str(web_paths["deepseek"]) if "deepseek" in web_paths else "",
@@ -7665,11 +8836,14 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         # The CLI parser turns web chats on; programmatic callers opt in.
         "web_chats": bool(getattr(args, "web_chats", False)),
         "allow_missing_web_chats": bool(getattr(args, "allow_missing_web_chats", False)),
+        "pull_zshs": not bool(getattr(args, "no_zshs", False)),
     }
     result = writeback_ai_day(
         target,
         create_journal=bool(getattr(args, "create_journal", False)),
         force=bool(getattr(args, "force", False)),
+        # The nightly archive always tries, even inside the refresh cooldown.
+        zshs_respect_cooldown=False,
         **options,
     )
     # The sync above fetched every changed web conversation, the earlier day's too.
@@ -7732,8 +8906,8 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
     to Kai reaches this vault the next time the Mac is awake. It is a courtesy
     copy: the nightly `writeback-ai-day` stays the authoritative archive. So
     it never touches the diary, never syncs web chats (that opens Chrome),
-    never forces, treats an unreachable Kai as normal, and prints one line
-    only when it wrote something.
+    never forces, treats an unreachable Kai or zshs as normal, and prints one
+    line only when it wrote something.
     """
     target = parse_date_or_today(getattr(args, "date", None))
     captured = io.StringIO()
@@ -7744,6 +8918,7 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
             update_journal=False,
             allow_missing_openclaw=True,
             pull_openclaw=not getattr(args, "no_openclaw", False),
+            pull_zshs=not getattr(args, "no_zshs", False),
             skip_unchanged=True,
         )
     except ValueError as exc:
@@ -7759,6 +8934,12 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
             else "unavailable" if "OpenClaw unavailable" in log
             else "pulled"
         )
+    if "zshs_status" not in result:
+        result["zshs_status"] = (
+            "skipped" if getattr(args, "no_zshs", False)
+            else "unavailable" if "zshs unavailable" in log
+            else "empty"
+        )
     if getattr(args, "verbose", False):
         print(log, end="")
     wrote = [
@@ -7772,6 +8953,8 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
             if "WARNING" in line:
                 print(line.strip())
         print(f"refreshed {target.isoformat()}: {', '.join(wrote)}")
+    # One line for the optional internship host; absent is a normal day.
+    print(f"zshs: {result.get('zshs_status', 'skipped')}")
     # The sync job reads this line to decide when Kai was last pulled.
     print(f"openclaw: {result.get('openclaw_status', 'skipped')}")
 
@@ -8942,6 +10125,14 @@ def build_parser() -> argparse.ArgumentParser:
             "has. Only with Henry's explicit approval."
         ),
     )
+    s.add_argument(
+        "--no-zshs",
+        action="store_true",
+        help=(
+            "Do not read the optional internship host (zshs); its existing traces are "
+            "left as they are."
+        ),
+    )
     s.set_defaults(func=cmd_writeback_ai_day, web_chats=True)
 
     s = sub.add_parser("refresh-ai-day")
@@ -8951,8 +10142,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not connect to Kai on this run; the existing Kai trace is left as it is.",
     )
+    s.add_argument(
+        "--no-zshs",
+        action="store_true",
+        help="Do not connect to the optional internship host (zshs) on this run.",
+    )
     s.add_argument("--verbose", action="store_true", help="Print the full writeback log.")
     s.set_defaults(func=cmd_refresh_ai_day)
+
+    s = sub.add_parser(
+        "backfill-zshs",
+        help="Import every zshs session in a date range into one corpus and per-day traces.",
+    )
+    s.add_argument("--since", required=True, help="First date to import (YYYY-MM-DD).")
+    s.add_argument("--until", help="Last date to import (YYYY-MM-DD). Defaults to today.")
+    s.add_argument("--dry-run", action="store_true", help="List what would be fetched without writing.")
+    s.set_defaults(func=cmd_backfill_zshs)
+
+    s = sub.add_parser(
+        "zshs-inventory",
+        help="Read-only map of the agent app data on zshs (paths, sizes, file types).",
+    )
+    s.add_argument("--json", action="store_true", help="Emit the raw JSON instead of a report.")
+    s.set_defaults(func=cmd_zshs_inventory)
 
     s = sub.add_parser("sync-web-chats")
     s.add_argument(

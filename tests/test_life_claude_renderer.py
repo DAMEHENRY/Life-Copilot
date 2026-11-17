@@ -603,7 +603,7 @@ class TestWritebackPreservesClaudian(unittest.TestCase):
              _patch.object(copilot_module, "export_codex_day_transcript", return_value=""), \
              _patch.object(copilot_module, "export_openclaw_day_transcript", return_value=("", 0, 0)), \
              redirect_stdout(io.StringIO()):
-            cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06"))
+            cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06", no_zshs=True))
 
         trace_path = tmp_path / "journal" / "ai-conversations" / "2026" / "06" / "2026-06-06-life-claude-renderer-trace.md"
         journal_path = tmp_path / "journal" / "2026" / "06" / "2026-06-06.md"

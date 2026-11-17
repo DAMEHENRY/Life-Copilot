@@ -337,8 +337,8 @@ class TestClaudeCodeTranscript(unittest.TestCase):
                 context.start()
             try:
                 with redirect_stdout(io.StringIO()):
-                    copilot.cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06"))
-                    copilot.cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06"))
+                    copilot.cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06", no_zshs=True))
+                    copilot.cmd_writeback_ai_day(SimpleNamespace(date="2026-06-06", no_zshs=True))
             finally:
                 for context in reversed(common_patches):
                     context.stop()

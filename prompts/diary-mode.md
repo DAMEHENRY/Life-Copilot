@@ -31,7 +31,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 # Context & Evidence Rules
 
 **要读的文件（按顺序）：**
-0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 AI 对话归档为 `journal/ai-conversations/YYYY/MM/` 下的独立 trace，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引；覆盖哪些来源、Chrome 同步方式和 `--allow-missing-*` 何时可用，以 `AGENTS.md` 的结构化写回为准。OpenClaw/Kai（经 Tailscale SSH 只读取得的 Windows Telegram 与微信私聊）与 ChatGPT 网页对话为必需证据源，不可达或同步失败时停止分析：前者修复或重试，后者（如登录过期、人机验证）请 Henry 在 Chrome 中处理后重试；Claude、DeepSeek 与 Gemini 网页版为可选来源，同步失败只打印 warning 并注明当天对应来源可能不全，不中断分析。若日记文件不存在，说明后跳过；当天某一渠道或全部私聊、网页对话为零消息都是正常结果。
+0. 若目标日期日记文件已存在，先执行 `python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD`，把当天全部 AI 对话归档为 `journal/ai-conversations/YYYY/MM/` 下的独立 trace，并在日记 `## 💬 From Kai` 保持每来源一个 wikilink 索引；覆盖哪些来源、Chrome 同步方式和 `--allow-missing-*` 何时可用，以 `AGENTS.md` 的结构化写回为准。OpenClaw/Kai（经 Tailscale SSH 只读取得的 Windows Telegram 与微信私聊）与 ChatGPT 网页对话为必需证据源，不可达或同步失败时停止分析：前者修复或重试，后者（如登录过期、人机验证）请 Henry 在 Chrome 中处理后重试；Claude、DeepSeek 与 Gemini 网页版为可选来源，同步失败只打印 warning 并注明当天对应来源可能不全，不中断分析。`zshs`（实习 Windows 主机）的 Codex / Claude Code / CatPaw（妙手）记录同样是可选来源：机器不可达时命令只打印一行并保留已有 trace，分析开始时用一句话说明并跳过，不算失败。若日记文件不存在，说明后跳过；当天某一渠道或全部私聊、网页对话为零消息都是正常结果。
 0.5. 先读 `writeback-ai-day` 列在最前的当日时间轴（各会话的先后、并行与空白；它是索引，原话仍引 trace），再按清单整读当天每份 trace，每份只读一次，之后核对原话用 `grep -F`，不重读；提取尚未进入日记正文的 Henry 经历、想法和澄清。排除工具过程、AI 分析及已有日记内容；若有新增内容，合并成一个输入文件并运行 `python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file <tmp-capture-file>`。该命令按稳定 `capture-id` 更新当日唯一系统生成块，不覆盖手写内容；若没有新内容则 no-op。
    微信原文同样整读并查看相关图片；转发保留引用层级，不重复抄入 capture。详见 `AGENTS.md`。
 1. `journal/YYYY/MM/YYYY-MM-DD.md`（目标日记）

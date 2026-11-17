@@ -111,7 +111,8 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot's relational response to Henry | `What Life Copilot Said` | `writeback-journal` |
 | Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / native Claude Code / Life Claude Renderer / Antigravity / OpenClaw-Kai / Claude, ChatGPT (incl. Health), DeepSeek, Gemini web daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / native Claude Code / Life Claude Renderer / Antigravity / OpenClaw-Kai / zshs Codex, Claude Code and CatPaw / Claude, ChatGPT (incl. Health), DeepSeek, Gemini web daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| The internship period's zshs sessions, kept in one corpus | `journal/ai-conversations/zshs-internship-<start>-to-<end>/` (filtered visible records, manifest with hashes and remote raw paths, index) | `backfill-zshs` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | The same traces, kept current between diary analyses | `journal/ai-conversations/` (traces and timeline only; the diary is not touched) | `refresh-ai-day`, run by the laptop's sync job |
 | Manually selected WeChat share exports | Raw ZIPs in `journal/wechat-imports/`; daily records and attachments in `journal/wechat/`; diary `From WeChat` index | `import-wechat`; also ingested by `writeback-ai-day` and `refresh-ai-day` |
@@ -132,6 +133,7 @@ Common commands:
 python3 scripts/copilot.py preview-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py writeback-ai-day --date YYYY-MM-DD
 python3 scripts/copilot.py refresh-ai-day
+python3 scripts/copilot.py backfill-zshs --since 2026-07-27
 python3 scripts/copilot.py import-wechat --dry-run
 python3 scripts/copilot.py import-wechat
 python3 scripts/copilot.py writeback-chat-capture --date YYYY-MM-DD --input-file /tmp/capture.md
@@ -153,6 +155,21 @@ python3 scripts/copilot.py append-insight --date YYYY-MM-DD --kind "pattern" --c
 source to be reachable over Tailscale SSH. They fail before writing a partial
 archive if that source cannot be read. Use `--allow-missing-openclaw` only when
 an intentionally incomplete archive has been explicitly accepted.
+
+The internship Windows host (`zshs`) is optional. When it is reachable over
+SSH, the same command also writes `YYYY-MM-DD-zshs-codex-trace.md`,
+`YYYY-MM-DD-zshs-claude-code-trace.md` and `YYYY-MM-DD-zshs-catpaw-trace.md`
+and adds their `From Kai` links; when it
+is not, the run prints one line and leaves any existing zshs traces alone. The
+host key is pinned to the Tailscale address `100.86.105.53`; set
+`LIFE_ZSHS_SSH_HOST` for a different SSH name. `backfill-zshs --since
+2026-07-27 --until YYYY-MM-DD` imports a whole period into one corpus under
+`journal/ai-conversations/zshs-internship-<start>-to-<end>/`: the host filters
+its own sessions down to the visible user/assistant records and sends them as
+`visible/*.tar.gz`; `manifest.json` records sizes, SHA-256 and where the full
+raw tree still lives on zshs, and `index.md` links the per-day traces. The
+filter is what keeps a four-month import minutes rather than hours on the
+office link. It never rewrites a diary.
 
 `writeback-ai-day` also syncs ChatGPT web conversations (including ChatGPT
 Health), and optional Claude / DeepSeek / Gemini web conversations before

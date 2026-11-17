@@ -683,6 +683,7 @@ class TestOpenClawTranscript(unittest.TestCase):
                         SimpleNamespace(
                             date="2026-07-26",
                             allow_missing_openclaw=False,
+                            no_zshs=True,
                         )
                     )
 
@@ -713,6 +714,7 @@ class TestOpenClawTranscript(unittest.TestCase):
                     SimpleNamespace(
                         date="2026-07-26",
                         allow_missing_openclaw=True,
+                        no_zshs=True,
                     )
                 )
 
