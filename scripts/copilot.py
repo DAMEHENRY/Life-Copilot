@@ -32,6 +32,8 @@ import sys
 import tarfile
 import tempfile
 import time
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -206,6 +208,10 @@ ZSHS_CATPAW_DB = os.environ.get(
 ZSHS_CATPAW_CACHE_DIR = ZSHS_CACHE_DIR / "catpaw"
 ZSHS_UNREACHABLE_MARKER = ZSHS_CACHE_DIR / "last-unreachable"
 ZSHS_UNREACHABLE_COOLDOWN = 600
+ZSHS_DAILY_TIMEOUT = 20
+DEEPSEEK_HARNESS_SESSIONS_DIR = Path(os.environ.get(
+    "LIFE_DEEPSEEK_HARNESS_SESSIONS_DIR", str(Path.home() / ".dsh" / "sessions")
+))
 # The host key was accepted under the Tailscale address, so keep that alias
 # when the machine is reached through its LAN name.
 ZSHS_SSH_OPTIONS = [
@@ -254,6 +260,18 @@ def read_lines(path):
         data = zstandard.ZstdDecompressor().decompress(data)
     return data.decode("utf-8", "replace").splitlines()
 
+def text_parts(content, text_types, image_type):
+    parts = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        if kind in text_types and isinstance(part.get("text"), str):
+            parts.append({"type": kind, "text": part["text"]})
+        elif kind == image_type:
+            parts.append({"type": kind})
+    return parts
+
 with tarfile.open(fileobj=buf, mode="w:gz") as tar:
     if mode == "codex":
         root = P["root"]
@@ -267,6 +285,7 @@ with tarfile.open(fileobj=buf, mode="w:gz") as tar:
                     path = os.path.join(folder, name)
                     kept = []
                     primary = True
+                    has_message = False
                     for line in read_lines(path):
                         if not line.strip():
                             continue
@@ -280,12 +299,25 @@ with tarfile.open(fileobj=buf, mode="w:gz") as tar:
                             primary = payload.get("thread_source") in (None, "user")
                             if not primary:
                                 break
-                            kept.append(line)
+                            kept.append(json.dumps({
+                                "type": kind, "timestamp": record.get("timestamp"),
+                                "payload": {"id": payload.get("id"), "thread_source": "user"},
+                            }))
                         elif kind == "response_item":
                             payload = record.get("payload") or {}
-                            if payload.get("type") == "message" and payload.get("role") in ("user", "assistant"):
-                                kept.append(line)
-                    if len(kept) > 1:
+                            role = payload.get("role")
+                            if payload.get("type") != "message" or role not in ("user", "assistant"):
+                                continue
+                            if role == "assistant" and payload.get("phase") == "commentary":
+                                continue
+                            parts = text_parts(payload.get("content"), ("input_text", "output_text"), "input_image")
+                            if parts:
+                                has_message = True
+                                kept.append(json.dumps({
+                                    "type": kind, "timestamp": record.get("timestamp"),
+                                    "payload": {"type": "message", "role": role, "content": parts},
+                                }))
+                    if primary and has_message:
                         out_name = "%s/%s/%s/%s" % (
                             day.strftime("%Y"), day.strftime("%m"), day.strftime("%d"),
                             name[:-4] if name.endswith(".zst") else name,
@@ -342,8 +374,6 @@ with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             kept_records += len(bucket["rows"])
     else:
         root = P["root"]
-        lower = (start - timedelta(days=1)).isoformat()
-        upper = (end + timedelta(days=1)).isoformat()
         for current, dirs, files in os.walk(root):
             for name in files:
                 if not name.endswith(".jsonl"):
@@ -371,14 +401,20 @@ with tarfile.open(fileobj=buf, mode="w:gz") as tar:
                     message = record.get("message")
                     if not isinstance(message, dict):
                         continue
+                    content = message.get("content")
                     if kind == "user":
-                        content = message.get("content")
                         if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "tool_result" for p in content):
                             continue
-                    else:
-                        if record.get("isApiErrorMessage") is True or message.get("model") == "<synthetic>":
-                            continue
-                    kept.append(line)
+                        if isinstance(content, str):
+                            content = [{"type": "text", "text": content}]
+                    elif record.get("isApiErrorMessage") is True or message.get("model") == "<synthetic>":
+                        continue
+                    parts = text_parts(content, ("text",), "image" if kind == "user" else None)
+                    if any(part.get("text", "").strip() for part in parts):
+                        kept.append(json.dumps({
+                            "type": kind, "timestamp": record.get("timestamp"), "uuid": record.get("uuid"),
+                            "message": {"content": parts},
+                        }))
                 if kept:
                     relative = os.path.relpath(path, root).replace("\\", "/")
                     add(tar, relative, ("\n".join(kept) + "\n").encode("utf-8"))
@@ -514,6 +550,27 @@ def read_text(path: Path) -> str:
             time.sleep(0.05)
     raw = path.read_bytes()
     return raw.decode("utf-8", errors="replace")
+
+
+def write_zshs_file(path: Path, data: bytes, *, replace: bool = False) -> bool:
+    """Publish a complete private file. Backfill never replaces an existing file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temp:
+        staged = Path(temp.name)
+        try:
+            temp.write(data)
+            temp.close()
+            if replace:
+                staged.replace(path)
+            else:
+                os.link(staged, path)
+        except FileExistsError:
+            if replace:
+                raise
+            return False
+        finally:
+            staged.unlink(missing_ok=True)
+    return True
 
 
 def write_text(path: Path, content: str) -> None:
@@ -658,14 +715,14 @@ def ai_trace_path_for_date(d: date, source: str) -> Path:
     sources = {
         "codex", "claude-code", "claudian", "life-claude-renderer", "openclaw",
         "antigravity", "claude-web", "chatgpt-web", "deepseek-web", "gemini-web",
-        "zshs-codex", "zshs-claude-code", "zshs-catpaw",
+        "zshs-codex", "zshs-claude-code", "zshs-catpaw", "deepseek-harness",
     }
     if source not in sources:
         raise ValueError(
             f"Unsupported source: {source}. "
             "Use 'codex', 'claude-code', 'claudian', 'life-claude-renderer', 'openclaw', "
             "'antigravity', 'claude-web', 'chatgpt-web', 'deepseek-web', 'gemini-web', "
-            "'zshs-codex', 'zshs-claude-code', or 'zshs-catpaw'."
+            "'zshs-codex', 'zshs-claude-code', 'zshs-catpaw', or 'deepseek-harness'."
         )
     return ai_conversation_dir_for_date(d) / f"{d.isoformat()}-{source}-trace.md"
 
@@ -3084,7 +3141,7 @@ def zshs_powershell_bytes(script: str) -> bytes:
 def zshs_run_ssh(
     remote_args: List[str],
     *,
-    timeout: int = 60,
+    timeout: float = 60,
     attempts: int = 2,
     stdin_data: Optional[bytes] = None,
 ) -> bytes:
@@ -3106,13 +3163,15 @@ def zshs_run_ssh(
                 timeout=timeout,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired:
+            failures.append(f"SSH timed out after {timeout:.1f}s")
+        except OSError as exc:
             failures.append(str(exc))
         else:
             if result.returncode == 0:
                 return result.stdout
             stderr = result.stderr.decode("utf-8", "replace").strip()
-            failures.append(stderr or f"ssh exited {result.returncode}")
+            failures.append(stderr.splitlines()[-1] if stderr else f"ssh exited {result.returncode}")
             if "Permission denied" in stderr or "Host key verification failed" in stderr:
                 break
         if attempt < attempts:
@@ -3153,7 +3212,7 @@ def zshs_powershell(
 def zshs_python(
     script: str,
     *,
-    timeout: int = 120,
+    timeout: float = 120,
     attempts: int = 1,
 ) -> str:
     """Run a Python script on zshs, with the script on stdin.
@@ -3226,33 +3285,123 @@ def zshs_list_claude_files(
     })
 
 
-def zshs_extract_archive(payload: bytes, destination: Path) -> List[Path]:
-    """Extract a tar stream below ``destination``, refusing unsafe names."""
-    written: List[Path] = []
+def zshs_tar_members(payload: bytes) -> Dict[str, bytes]:
+    """Read a complete tar before publishing any of its members."""
+    members: Dict[str, bytes] = {}
     try:
-        archive = tarfile.open(fileobj=io.BytesIO(payload), mode="r:")
-    except tarfile.TarError as exc:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                relative = member.name.replace("\\", "/")
+                parts = [part for part in relative.split("/") if part not in ("", ".")]
+                if relative.startswith("/") or not parts or any(
+                    part == ".." or re.match(r"^[A-Za-z]:", part) for part in parts
+                ):
+                    raise ZshsImportUnavailable("unsafe path in zshs archive")
+                if parts[-1].startswith("._") or not parts[-1].endswith(".jsonl"):
+                    continue
+                handle = archive.extractfile(member)
+                if handle is not None:
+                    members["/".join(parts)] = handle.read()
+    except (tarfile.TarError, EOFError, OSError) as exc:
         raise ZshsImportUnavailable(f"unreadable archive from {ZSHS_SSH_HOST}: {exc}") from exc
-    with archive:
-        for member in archive.getmembers():
-            if not member.isfile():
+    return members
+
+
+def zshs_write_members(members: Dict[str, bytes], destination: Path) -> List[Path]:
+    paths = []
+    for name, data in members.items():
+        target = destination / name
+        if not target.resolve().is_relative_to(destination.resolve()):
+            raise ZshsImportUnavailable("zshs cache path resolves outside the cache")
+        write_zshs_file(target, data, replace=True)
+        paths.append(target)
+    return paths
+
+
+def zshs_visible_jsonl(data: bytes, source: str) -> bytes:
+    """Project native records onto the text and identifiers needed for rendering."""
+    kept: List[dict] = []
+    metadata = None
+    for line in data.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError) as exc:
+            raise ZshsImportUnavailable("invalid JSONL in zshs archive") from exc
+        if not isinstance(row, dict):
+            raise ZshsImportUnavailable("non-object JSONL in zshs archive")
+        if source == "codex":
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
                 continue
-            relative = member.name.replace("\\", "/").lstrip("/")
-            parts = [part for part in relative.split("/") if part not in ("", ".")]
-            if parts and (parts[-1].startswith("._") or parts[-1] == ".DS_Store"):
+            if row.get("type") == "session_meta":
+                if payload.get("thread_source") not in (None, "user"):
+                    return b""
+                metadata = {
+                    "type": "session_meta",
+                    "timestamp": row.get("timestamp"),
+                    "payload": {"id": payload.get("id"), "thread_source": "user"},
+                }
                 continue
-            if not parts or any(part == ".." or re.match(r"^[A-Za-z]:$", part) for part in parts):
-                raise ZshsImportUnavailable(
-                    f"refusing unsafe path in archive from {ZSHS_SSH_HOST}: {member.name}"
-                )
-            target = destination.joinpath(*parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            handle = archive.extractfile(member)
-            if handle is None:
+            if row.get("type") != "response_item" or payload.get("type") != "message":
                 continue
-            target.write_bytes(handle.read())
-            written.append(target)
-    return written
+            role = payload.get("role")
+            if role == "user":
+                body = clean_codex_user_text(codex_user_parts_to_text(payload.get("content")))
+            elif role == "assistant" and payload.get("phase") != "commentary":
+                body = clean_codex_assistant_text(content_parts_to_text(payload.get("content")))
+            else:
+                continue
+            if body:
+                kept.append({
+                    "type": "response_item",
+                    "timestamp": row.get("timestamp"),
+                    "payload": {
+                        "type": "message", "role": role,
+                        "content": [{"type": "input_text" if role == "user" else "output_text", "text": body}],
+                    },
+                })
+        elif source == "claude-code":
+            visible = claude_code_visible_message(row)
+            if visible is not None:
+                role, body = visible
+                kept.append({
+                    "type": role, "timestamp": row.get("timestamp"), "uuid": row.get("uuid"),
+                    "message": {"content": [{"type": "text", "text": body}]},
+                })
+        elif source == "catpaw" and row.get("role") in ("user", "assistant"):
+            body = clean_catpaw_text(str(row.get("text") or ""))
+            if body:
+                kept.append({**{key: row.get(key) for key in ("session", "title", "ts", "role")}, "text": body})
+    if kept and metadata is not None:
+        kept.insert(0, metadata)
+    return b"".join((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8") for row in kept)
+
+
+def zshs_pack_visible(members: Dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:") as archive:
+        for name, data in sorted(members.items()):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o600
+            archive.addfile(info, io.BytesIO(data))
+    return gzip.compress(buffer.getvalue(), mtime=0)
+
+
+def zshs_visible_archive(payload: bytes, source: str) -> Dict[str, bytes]:
+    try:
+        raw = gzip.decompress(payload)
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ZshsImportUnavailable(f"unreadable compressed zshs archive: {exc}") from exc
+    return {
+        name: visible
+        for name, data in zshs_tar_members(raw).items()
+        if (visible := zshs_visible_jsonl(data, source))
+    }
 
 
 def zshs_extract_range(
@@ -3260,9 +3409,10 @@ def zshs_extract_range(
     end: date,
     source: str,
     *,
-    timeout: int = 1800,
+    timeout: float = 1800,
     attempts: int = 1,
     archive_path: Optional[Path] = None,
+    destination: Optional[Path] = None,
 ) -> Dict[str, object]:
     """Pull the visible records in a date range as filtered JSONL.
 
@@ -3273,15 +3423,15 @@ def zshs_extract_range(
     """
     if source == "codex":
         root = ZSHS_CODEX_SESSIONS_DIR
-        destination = ZSHS_CODEX_CACHE_DIR
+        destination = destination or ZSHS_CODEX_CACHE_DIR
         mode = "codex"
     elif source == "claude-code":
         root = ZSHS_CLAUDE_PROJECTS_DIR
-        destination = ZSHS_CLAUDE_CACHE_DIR
+        destination = destination or ZSHS_CLAUDE_CACHE_DIR
         mode = "claude"
     elif source == "catpaw":
         root = ZSHS_CATPAW_DB
-        destination = ZSHS_CATPAW_CACHE_DIR
+        destination = destination or ZSHS_CATPAW_CACHE_DIR
         mode = "catpaw"
     else:
         raise ValueError(f"Unsupported zshs source: {source}")
@@ -3298,24 +3448,19 @@ def zshs_extract_range(
     header = next((line for line in lines if line.startswith("KEPT ")), "")
     # Join non-header lines: a console may wrap a multi-megabyte base64 stream.
     payload_line = "".join(line for line in lines if not line.startswith("KEPT "))
-    if not header:
-        raise ZshsImportUnavailable("zshs filter returned no header")
-    if not payload_line:
-        return {"status": "empty", "files": 0, "records": 0}
+    counts = re.fullmatch(r"KEPT (\d+) (\d+)", header)
+    if counts is None or (not payload_line and counts.groups() != ("0", "0")):
+        raise ZshsImportUnavailable("zshs filter returned an incomplete response")
     try:
-        payload = base64.b64decode(payload_line)
-        raw = gzip.decompress(payload)
-    except (ValueError, OSError) as exc:
+        payload = base64.b64decode(payload_line, validate=True)
+    except ValueError as exc:
         raise ZshsImportUnavailable(f"unreadable filtered payload from zshs: {exc}") from exc
+    members = zshs_visible_archive(payload, source) if payload else {}
     if archive_path is not None:
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        archive_path.write_bytes(payload)
-    files = zshs_extract_archive(raw, destination)
-    records = 0
-    try:
-        records = int(header.split()[2])
-    except (IndexError, ValueError):
-        pass
+        if not write_zshs_file(archive_path, zshs_pack_visible(members)):
+            members = zshs_visible_archive(archive_path.read_bytes(), source)
+    files = zshs_write_members(members, destination)
+    records = sum(data.count(b"\n") for data in members.values())
     return {
         "status": "pulled" if records else "empty",
         "files": len(files),
@@ -3356,28 +3501,39 @@ def zshs_sync_day(
     target: date,
     *,
     respect_cooldown: bool = True,
-    attempts: int = 2,
 ) -> Dict[str, object]:
-    """Fetch both sources for ``target``; never writes outside the cache."""
+    """Fetch all optional sources within one shared daily SSH budget."""
     if respect_cooldown:
         remaining = zshs_unreachable_cooldown()
         if remaining:
             raise ZshsImportUnavailable(
                 f"zshs was unreachable recently; next retry in {remaining}s"
             )
+    deadline = time.monotonic() + ZSHS_DAILY_TIMEOUT
+    sources = ("codex", "claude-code", "catpaw")
+
+    def pull(source: str) -> Dict[str, object]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ZshsImportUnavailable(f"daily pull timed out after {ZSHS_DAILY_TIMEOUT}s")
+        end = target + timedelta(days=1) if source == "codex" else target
+        try:
+            return zshs_extract_range(target, end, source, timeout=remaining)
+        except ZshsImportUnavailable as exc:
+            raise ZshsImportUnavailable(f"{source}: {exc}") from exc
+
     try:
-        codex = zshs_extract_range(
-            target, target + timedelta(days=1), "codex", timeout=240, attempts=attempts
-        )
-        claude = zshs_extract_range(
-            target, target, "claude-code", timeout=240, attempts=attempts
-        )
-        catpaw = zshs_extract_range(
-            target, target, "catpaw", timeout=240, attempts=attempts
-        )
-    except ZshsImportUnavailable:
+        # Each pull uses its own cache directory. Running them together keeps
+        # the daily deadline independent of the number of installed clients.
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            codex, claude, catpaw = pool.map(pull, sources)
+        if time.monotonic() >= deadline:
+            raise ZshsImportUnavailable(f"daily pull timed out after {ZSHS_DAILY_TIMEOUT}s")
+    except (ZshsImportUnavailable, OSError) as exc:
         zshs_mark_unreachable()
-        raise
+        if isinstance(exc, ZshsImportUnavailable):
+            raise
+        raise ZshsImportUnavailable(f"zshs cache unavailable: {exc}") from exc
     zshs_clear_unreachable()
     pulled = bool(codex["records"] or claude["records"] or catpaw["records"])
     return {
@@ -3398,8 +3554,8 @@ def zshs_zstd_decompress(data: bytes, label: str) -> bytes:
         raise ZshsImportUnavailable(f"cannot decompress {label}: {exc}") from exc
 
 
-def zshs_codex_session_files_for_date(d: date) -> List[Path]:
-    day_dir = ZSHS_CODEX_CACHE_DIR / d.strftime("%Y") / d.strftime("%m") / d.strftime("%d")
+def zshs_codex_session_files_for_date(d: date, cache: Optional[Path] = None) -> List[Path]:
+    day_dir = (cache or ZSHS_CODEX_CACHE_DIR) / d.strftime("%Y") / d.strftime("%m") / d.strftime("%d")
     if not day_dir.is_dir():
         return []
     files: List[Path] = []
@@ -3414,7 +3570,8 @@ def zshs_codex_session_files_for_date(d: date) -> List[Path]:
         plain = path.with_suffix("")
         try:
             if not plain.exists() or plain.stat().st_mtime < path.stat().st_mtime:
-                plain.write_bytes(zshs_zstd_decompress(path.read_bytes(), path.name))
+                data = zshs_zstd_decompress(path.read_bytes(), path.name)
+                write_zshs_file(plain, zshs_visible_jsonl(data, "codex"), replace=True)
         except (OSError, ZshsImportUnavailable) as exc:
             print(f"  warning: skipped {path.name}: {exc}", file=sys.stderr)
             continue
@@ -3422,29 +3579,30 @@ def zshs_codex_session_files_for_date(d: date) -> List[Path]:
     return files
 
 
-def zshs_codex_session_files_for_date_range(d: date) -> List[Path]:
+def zshs_codex_session_files_for_date_range(d: date, cache: Optional[Path] = None) -> List[Path]:
     seen: set = set()
     result: List[Path] = []
     for offset in (-1, 0, 1):
-        for path in zshs_codex_session_files_for_date(d + timedelta(days=offset)):
+        for path in zshs_codex_session_files_for_date(d + timedelta(days=offset), cache):
             if path not in seen:
                 seen.add(path)
                 result.append(path)
     return result
 
 
-def zshs_claude_session_files() -> List[Path]:
-    if not ZSHS_CLAUDE_CACHE_DIR.is_dir():
+def zshs_claude_session_files(cache: Optional[Path] = None) -> List[Path]:
+    root = cache or ZSHS_CLAUDE_CACHE_DIR
+    if not root.is_dir():
         return []
     return sorted(
-        path for path in ZSHS_CLAUDE_CACHE_DIR.rglob("*.jsonl")
+        path for path in root.rglob("*.jsonl")
         if not path.name.startswith("._")
     )
 
 
-def export_zshs_codex_day_transcript(d: date) -> str:
+def export_zshs_codex_day_transcript(d: date, cache: Optional[Path] = None) -> str:
     blocks: List[str] = []
-    for session_file in zshs_codex_session_files_for_date_range(d):
+    for session_file in zshs_codex_session_files_for_date_range(d, cache):
         if not codex_session_is_primary_thread(session_file):
             continue
         transcript = export_codex_transcript(session_file, target_date=d).strip()
@@ -3455,12 +3613,12 @@ def export_zshs_codex_day_transcript(d: date) -> str:
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
 
 
-def export_zshs_claude_code_day_transcript(d: date) -> Tuple[str, int, int]:
-    if not zshs_claude_session_files():
+def export_zshs_claude_code_day_transcript(d: date, cache: Optional[Path] = None) -> Tuple[str, int, int]:
+    if not zshs_claude_session_files(cache):
         return "", 0, 0
     text, messages, sessions = export_claude_code_day_transcript(
         d,
-        projects_dir=ZSHS_CLAUDE_CACHE_DIR,
+        projects_dir=cache or ZSHS_CLAUDE_CACHE_DIR,
         renderer_history_path=ZSHS_CACHE_DIR / "no-renderer-history.json",
         recursive=True,
     )
@@ -3539,15 +3697,16 @@ def clean_catpaw_text(text: str) -> str:
     return ZSHS_CATPAW_INJECTED_RE.sub("", text).strip()
 
 
-def zshs_catpaw_session_files() -> List[Path]:
-    if not ZSHS_CATPAW_CACHE_DIR.is_dir():
+def zshs_catpaw_session_files(cache: Optional[Path] = None) -> List[Path]:
+    root = cache or ZSHS_CATPAW_CACHE_DIR
+    if not root.is_dir():
         return []
-    return sorted(ZSHS_CATPAW_CACHE_DIR.glob("*.jsonl"))
+    return sorted(root.glob("*.jsonl"))
 
 
-def zshs_catpaw_day_messages(d: date) -> List[dict]:
+def zshs_catpaw_day_messages(d: date, cache: Optional[Path] = None) -> List[dict]:
     rows: List[dict] = []
-    for path in zshs_catpaw_session_files():
+    for path in zshs_catpaw_session_files(cache):
         for line in read_text(path).splitlines():
             if not line.strip():
                 continue
@@ -3571,9 +3730,9 @@ def zshs_catpaw_day_messages(d: date) -> List[dict]:
     return sorted(rows, key=lambda row: row["ts"])
 
 
-def export_zshs_catpaw_day_transcript(d: date) -> Tuple[str, int, int]:
+def export_zshs_catpaw_day_transcript(d: date, cache: Optional[Path] = None) -> Tuple[str, int, int]:
     groups: Dict[str, dict] = {}
-    for row in zshs_catpaw_day_messages(d):
+    for row in zshs_catpaw_day_messages(d, cache):
         group = groups.setdefault(row["session"], {"title": row["title"], "rows": []})
         group["rows"].append(row)
     blocks: List[str] = []
@@ -3708,6 +3867,21 @@ def zshs_trace_counts(text: str) -> Tuple[int, int]:
     return sessions, messages
 
 
+ZSHS_ARCHIVES = {
+    "codex": "codex-filtered.tar.gz",
+    "claude-code": "claude-code-filtered.tar.gz",
+    "catpaw": "catpaw-filtered.tar.gz",
+}
+
+
+def zshs_file_inventory(source: str, members: Dict[str, bytes]) -> List[dict]:
+    return [
+        {"source": f"zshs-{source}", "path": name, "bytes": len(data),
+         "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in sorted(members.items())
+    ]
+
+
 def backfill_zshs(
     start: date,
     end: date,
@@ -3727,7 +3901,6 @@ def backfill_zshs(
     """
     if end < start:
         raise ValueError("--until must not be before --since")
-    nl = chr(10)
     corpus = zshs_corpus_dir(start, end)
     visible = corpus / "visible"
     print(f"zshs: extracting visible records from {start} to {end}")
@@ -3745,36 +3918,53 @@ def backfill_zshs(
             "dry_run": True,
         }
 
-    # The cache is derived; a stale raw or filtered file must not double up
-    # with the new filtered export.
-    for root in (ZSHS_CODEX_CACHE_DIR, ZSHS_CLAUDE_CACHE_DIR, ZSHS_CATPAW_CACHE_DIR):
-        if root.exists():
-            shutil.rmtree(root)
-    sources = [
-        ("codex", "codex-filtered.tar.gz", ZSHS_CODEX_CACHE_DIR),
-        ("claude-code", "claude-code-filtered.tar.gz", ZSHS_CLAUDE_CACHE_DIR),
-        ("catpaw", "catpaw-filtered.tar.gz", ZSHS_CATPAW_CACHE_DIR),
-    ]
+    manifest_path = corpus / "manifest.json"
+    if manifest_path.exists() and (corpus / "index.md").exists():
+        manifest = json.loads(read_text(manifest_path))
+        print(f"zshs: existing corpus preserved at {corpus.relative_to(ROOT)}")
+        return {
+            "corpus": str(corpus), "files": len(manifest["files"]),
+            "bytes": sum(item["bytes"] for item in manifest["files"]),
+            "days": manifest["days"], "traces": [],
+            "codex": manifest["extraction"]["codex"],
+            "claude": manifest["extraction"]["claude-code"],
+            "catpaw": manifest["extraction"]["catpaw"],
+        }
+    with tempfile.TemporaryDirectory(prefix="life-zshs-backfill-") as temp:
+        return build_zshs_corpus(start, end, corpus, Path(temp))
+
+
+def build_zshs_corpus(start: date, end: date, corpus: Path, cache: Path) -> Dict[str, object]:
+    """Resume incomplete backfills without sharing the live refresh cache."""
+    visible = corpus / "visible"
+    nl = "\n"
     results: Dict[str, dict] = {}
-    for source, archive_name, destination in sources:
+    files: List[dict] = []
+    for source, archive_name in ZSHS_ARCHIVES.items():
         archive = visible / archive_name
+        destination = cache / source
         if archive.exists():
-            try:
-                raw = gzip.decompress(archive.read_bytes())
-                files = zshs_extract_archive(raw, destination)
-                results[source] = {
-                    "status": "reused",
-                    "files": len(files),
-                    "records": sum(len(read_text(path).splitlines()) for path in files),
-                    "archive": str(archive),
-                }
-                print(f"zshs: reused {archive_name}")
-                continue
-            except (OSError, ZshsImportUnavailable) as exc:
-                print(f"  warning: could not reuse {archive_name} ({exc}); refetching")
-        results[source] = zshs_extract_range(
-            start, end, source, timeout=3600, archive_path=archive,
-        )
+            payload = archive.read_bytes()
+            members = zshs_visible_archive(payload, source)
+            if members != zshs_tar_members(gzip.decompress(payload)):
+                raise ZshsImportUnavailable(f"existing archive needs visible-only cleanup: {archive_name}")
+            zshs_write_members(members, destination)
+            results[source] = {
+                "status": "reused",
+                "files": len(members),
+                "records": sum(data.count(b"\n") for data in members.values()),
+                "archive": str(archive),
+            }
+            print(f"zshs: reused {archive_name}")
+        else:
+            results[source] = zshs_extract_range(
+                start, end, source, timeout=3600, archive_path=archive, destination=destination,
+            )
+            members = {
+                path.relative_to(destination).as_posix(): path.read_bytes()
+                for path in destination.rglob("*.jsonl")
+            }
+        files.extend(zshs_file_inventory(source, members))
     codex_result = results["codex"]
     claude_result = results["claude-code"]
     catpaw_result = results["catpaw"]
@@ -3784,26 +3974,7 @@ def backfill_zshs(
         f"catpaw {catpaw_result['files']} file(s) / {catpaw_result['records']} record(s)"
     )
 
-    files: List[dict] = []
-    total_bytes = 0
-    for root, source in (
-        (ZSHS_CODEX_CACHE_DIR, "zshs-codex"),
-        (ZSHS_CLAUDE_CACHE_DIR, "zshs-claude-code"),
-        (ZSHS_CATPAW_CACHE_DIR, "zshs-catpaw"),
-    ):
-        if not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*.jsonl")):
-            if path.name.startswith("._"):
-                continue
-            data = path.read_bytes()
-            total_bytes += len(data)
-            files.append({
-                "source": source,
-                "path": str(path.relative_to(root)),
-                "bytes": len(data),
-                "sha256": hashlib.sha256(data).hexdigest(),
-            })
+    total_bytes = sum(item["bytes"] for item in files)
     print(f"zshs: visible {len(files)} file(s), {total_bytes / (1024 * 1024):.1f} MiB")
 
     written_traces: List[str] = []
@@ -3815,23 +3986,22 @@ def backfill_zshs(
     day_summaries: List[dict] = []
     for offset in range((end - start).days + 1):
         day = start + timedelta(days=offset)
-        codex_text = ""
-        claude_text = ""
-        catpaw_text = ""
-        try:
-            codex_text = export_zshs_codex_day_transcript(day)
-            claude_text, _, _ = export_zshs_claude_code_day_transcript(day)
-            catpaw_text, _, _ = export_zshs_catpaw_day_transcript(day)
-        except Exception as exc:
-            print(f"  warning: could not render {day}: {exc}")
-        codex_sessions, codex_messages = zshs_trace_counts(codex_text)
-        claude_sessions, claude_messages = zshs_trace_counts(claude_text)
-        catpaw_sessions, catpaw_messages = zshs_trace_counts(catpaw_text)
+        texts = (
+            export_zshs_codex_day_transcript(day, cache / "codex"),
+            export_zshs_claude_code_day_transcript(day, cache / "claude-code")[0],
+            export_zshs_catpaw_day_transcript(day, cache / "catpaw")[0],
+        )
         links: List[str] = []
-        for spec, text in zip(ZSHS_SOURCE_SPECS, (codex_text, claude_text, catpaw_text)):
+        counts = []
+        for spec, text in zip(ZSHS_SOURCE_SPECS, texts):
+            path = ai_trace_path_for_date(day, spec.name)
+            if path.exists():
+                counts.append(zshs_trace_counts(read_text(path)))
+                links.append(f"[[{path.stem}]]")
+                continue
+            counts.append(zshs_trace_counts(text))
             if not text:
                 continue
-            path = ai_trace_path_for_date(day, spec.name)
             header = [
                 "---",
                 f"date: {day.isoformat()}",
@@ -3843,12 +4013,11 @@ def backfill_zshs(
                 f"# {day.isoformat()} {spec.trace_title}",
                 "",
             ]
-            write_ai_trace(
-                path, header, text, spec.name, spec.records_for(day),
-                skip_unchanged=True,
-            )
-            written_traces.append(path.name)
+            if write_zshs_file(path, nl.join([*header, text]).encode("utf-8")):
+                print(f"  wrote: {path.relative_to(ROOT)}")
+                written_traces.append(path.name)
             links.append(f"[[{path.stem}]]")
+        (codex_sessions, codex_messages), (claude_sessions, claude_messages), (catpaw_sessions, catpaw_messages) = counts
         if codex_sessions or claude_sessions or catpaw_sessions:
             rows.append(
                 f"| {day} | {codex_sessions} | {codex_messages} | {claude_sessions} | "
@@ -3868,6 +4037,7 @@ def backfill_zshs(
 
     manifest = {
         "version": 1,
+        "visible_filter_version": 2,
         "host": ZSHS_SSH_HOST,
         "range": {"start": start.isoformat(), "end": end.isoformat()},
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -3886,8 +4056,6 @@ def backfill_zshs(
         "files": files,
         "days": day_summaries,
     }
-    write_text(corpus / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + nl)
-
     index = [
         f"# zshs internship agent records ({start} to {end})",
         "",
@@ -3907,7 +4075,11 @@ def backfill_zshs(
         "Full file inventory, hashes and the remote raw paths: manifest.json.",
         "",
     ]
-    write_text(corpus / "index.md", nl.join(index))
+    write_zshs_file(corpus / "index.md", nl.join(index).encode("utf-8"))
+    write_zshs_file(
+        corpus / "manifest.json",
+        (json.dumps(manifest, ensure_ascii=False, indent=2) + nl).encode("utf-8"),
+    )
     print(f"zshs: corpus {corpus.relative_to(ROOT)}")
     return {
         "corpus": str(corpus),
@@ -7307,6 +7479,7 @@ TRACE_ASSISTANTS: Dict[str, str] = {
     "claude-code": "Claude",
     "life-claude-renderer": "Claude",
     "antigravity": "Antigravity",
+    "deepseek-harness": "DeepSeek Harness",
     "openclaw": "Kai",
     "zshs-codex": "Codex",
     "zshs-claude-code": "Claude",
@@ -7315,7 +7488,7 @@ TRACE_ASSISTANTS: Dict[str, str] = {
 }
 TRACE_SESSION_HEADING_RE = re.compile(
     r"^### (?P<label>zshs Codex|zshs Claude Code|zshs CatPaw|Codex|Claude Code"
-    r"|Life Claude Renderer|Claudian|Antigravity|Kai / \S+"
+    r"|Life Claude Renderer|Claudian|Antigravity|DeepSeek Harness|Kai / \S+"
     r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web)"
     r" (?:Thread|Session|Conversation) "
     r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)"
@@ -8229,6 +8402,100 @@ def pull_antigravity(target: date, options: Optional[SourceOptions] = None) -> S
     )
 
 
+def deepseek_harness_session(
+    data: bytes, target: date
+) -> Tuple[str, str, List[Tuple[datetime, str, str]]]:
+    """Read what the Harness showed in a version 4 session event log."""
+    rows = iter(line for line in data.split(b"\n") if line.strip())
+    header = json.loads(next(rows, b"{}"))
+    if header.get("type") != "session" or header.get("version") != 4:
+        raise ValueError("unsupported DeepSeek Harness session format")
+    session = header.get("id", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", session):
+        raise ValueError("invalid DeepSeek Harness session ID")
+    if header.get("delegationDepth", 0) != 0:
+        return session, "", []
+    seeded = header.get("isSeeded") is True
+    title = ""
+    messages = []
+    for line in rows:
+        event = json.loads(line)
+        kind = event.get("type")
+        payload = event.get("data", {})
+        if kind == "session/end-seed":
+            seeded = False
+        elif kind == "session/title" and isinstance(payload.get("title"), str):
+            title = " ".join(payload["title"].split())
+        elif not seeded and kind in ("user/message", "assistant/message"):
+            if kind == "user/message":
+                if payload.get("source", {}).get("kind") != "user":
+                    continue
+                role, message = "user", payload
+            else:
+                role, message = "assistant", payload.get("message", {})
+            parts = message.get("content", [])
+            body = "\n\n".join(
+                part["text"] for part in parts
+                if part.get("type") == "text" and isinstance(part.get("text"), str)
+            )
+            body = sanitize_codex_transcript_text(body).strip()
+            if not body:
+                continue
+            stamp = datetime.fromtimestamp(event["time"] / 1000, tz=timezone.utc)
+            if stamp.astimezone().date() == target:
+                messages.append((stamp, role, body))
+    return session, title, messages
+
+
+def pull_deepseek_harness(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    # Harness appends separate Zstandard frames. The CLI reads all frames,
+    # including those written since the previous refresh.
+    paths = sorted(DEEPSEEK_HARNESS_SESSIONS_DIR.glob("*/session-*/session.v4.jsonl.zstd"))
+    if not paths:
+        return SourceResult("empty")
+    binary = shutil.which("zstd") or next(
+        (str(path) for path in (Path("/opt/homebrew/bin/zstd"), Path("/usr/local/bin/zstd"))
+         if path.is_file()), None,
+    )
+    if binary is None:
+        print("  warning: DeepSeek Harness skipped (zstd is unavailable)")
+        return SourceResult("unavailable", detail="zstd is unavailable")
+    sessions = []
+    skipped = 0
+    for path in paths:
+        try:
+            if datetime.fromtimestamp(path.stat().st_mtime).date() < target:
+                continue
+            decoded = subprocess.run(
+                [binary, "-qdc", str(path)], capture_output=True, check=True, timeout=10,
+            )
+            session, title, messages = deepseek_harness_session(decoded.stdout, target)
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            skipped += 1
+            continue
+        if messages:
+            sessions.append((messages[0][0], session, title, messages))
+    detail = f"{skipped} session log(s) unreadable" if skipped else ""
+    if detail:
+        print(f"  warning: DeepSeek Harness ({detail}); existing messages preserved")
+    records = []
+    blocks = []
+    for _, session, title, messages in sorted(sessions):
+        heading = f"### DeepSeek Harness Session {session}" + (f" - {title}" if title else "")
+        lines = []
+        for stamp, role, body in messages:
+            ts = format_chat_timestamp(stamp.isoformat())
+            speaker = "Henry" if role == "user" else "DeepSeek Harness"
+            lines.append(f"[{ts}] {speaker}: {body}")
+            records.append((session, ts, role, trace_match_text(body)))
+        blocks.append(heading + "\n\n" + "\n\n".join(lines))
+    return SourceResult(
+        status="pulled" if blocks else "unavailable" if skipped else "empty",
+        transcript="\n\n".join(blocks) + ("\n" if blocks else ""),
+        records=records, detail=detail, message_count=len(records), session_count=len(blocks),
+    )
+
+
 def pull_openclaw(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
     options = options or SourceOptions()
     if not options.pull_openclaw:
@@ -8287,11 +8554,14 @@ def pull_zshs_group(target: date, options: SourceOptions) -> SourceGroupResult:
         )
     try:
         sync = zshs_sync_day(target, respect_cooldown=options.zshs_respect_cooldown)
-    except ZshsImportUnavailable as exc:
-        detail = str(exc)
+        results = {
+            spec.name: spec.pull(target, options)  # type: ignore[misc]
+            for spec in members
+        }
+    except (ZshsImportUnavailable, OSError) as exc:
+        detail = " ".join(str(exc).split())
         print(
-            "  warning: zshs unavailable; skipped the internship-host "
-            f"Codex/Claude Code records for {target.isoformat()} ({exc})"
+            f"  warning: zshs unavailable; skipped internship records for {target.isoformat()} ({detail})"
         )
         return SourceGroupResult(
             "unavailable",
@@ -8300,10 +8570,6 @@ def pull_zshs_group(target: date, options: SourceOptions) -> SourceGroupResult:
                 spec.name: SourceResult("unavailable", detail=detail) for spec in members
             },
         )
-    results = {
-        spec.name: spec.pull(target, options)  # type: ignore[misc]
-        for spec in members
-    }
     return SourceGroupResult(str(sync.get("status") or "empty"), results=results)
 
 
@@ -8370,6 +8636,11 @@ SOURCES: Tuple[SourceSpec, ...] = (
         preview_label="Antigravity",
         preview_empty="(no sessions for this date)",
         records=antigravity_day_source_records,
+    ),
+    SourceSpec(
+        "deepseek-harness", "DeepSeek Harness", "DeepSeek Harness Session",
+        "DeepSeek Harness Trace", "Local DeepSeek Harness conversations.",
+        pull=pull_deepseek_harness, preview_label="DeepSeek Harness",
     ),
     SourceSpec(
         "openclaw", "Kai", "Kai / Telegram Session",
@@ -9053,10 +9324,14 @@ def writeback_ai_day(
         write_day_timeline(date.fromisoformat(day))
 
     wechat_messages = wechat_import.read_day(ROOT, target)['messages']
-    if not any(result.transcript for result in results.values()) and not wechat_messages:
+    if (
+        not any(result.transcript for result in results.values())
+        and not wechat_messages
+        and not (update_journal and zshs_status == "unavailable")
+    ):
         raise NoAIConversations(
             "No AI conversations (Codex, Claude Code, Life Claude Renderer, Antigravity, "
-            "OpenClaw, zshs Codex/Claude Code, or Claude/ChatGPT/DeepSeek/Gemini web) "
+            "DeepSeek Harness, OpenClaw, zshs, or Claude/ChatGPT/DeepSeek/Gemini web) "
             f"found for date: {target.isoformat()}",
             results,
             group_results,
@@ -9154,6 +9429,7 @@ def writeback_ai_day(
         "claude_code_trace": written_trace("claude-code"),
         "renderer_trace": written_trace("life-claude-renderer"),
         "antigravity_trace": written_trace("antigravity"),
+        "deepseek_harness_trace": written_trace("deepseek-harness"),
         "openclaw_trace": written_trace("openclaw"),
         "zshs_status": zshs_status,
         "zshs_detail": zshs_detail,
@@ -9268,6 +9544,8 @@ def cmd_writeback_ai_day(args: argparse.Namespace) -> None:
         **options,
     )
     # The sync above fetched every changed web conversation, the earlier day's too.
+    if result.get("zshs_status") == "unavailable":
+        options["pull_zshs"] = False
     earlier = archive_earlier_day_again(target, web_chats_synced=True, **options)
     if earlier:
         print(earlier)

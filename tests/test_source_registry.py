@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ EXPECTED_ORDER = [
     "life-claude-renderer",
     "claude-code",
     "antigravity",
+    "deepseek-harness",
     "openclaw",
     "zshs-codex",
     "zshs-claude-code",
@@ -38,6 +40,7 @@ TIMELINE_LABELS = {
     "life-claude-renderer": "Life Claude Renderer",
     "claude-code": "Claude Code",
     "antigravity": "Antigravity",
+    "deepseek-harness": "DeepSeek Harness",
     "openclaw": "Kai / Telegram",
     "zshs-codex": "zshs Codex",
     "zshs-claude-code": "zshs Claude Code",
@@ -127,7 +130,14 @@ class WritebackGoldenTest(unittest.TestCase):
         self.journal.parent.mkdir(parents=True)
         self.journal.write_text("# 2026-08-13\n\n## 💬 From Kai\n", encoding="utf-8")
         self.transcripts = _transcripts()
+        harness = copilot.SourceResult(
+            "pulled", self.transcripts["deepseek-harness"], message_count=2, session_count=1
+        )
         self.patchers = [
+            patch.object(copilot, "SOURCES", tuple(
+                replace(spec, pull=lambda _day, _options: harness)
+                if spec.name == "deepseek-harness" else spec for spec in copilot.SOURCES
+            )),
             patch.object(copilot, "ROOT", self.root),
             patch.object(copilot, "JOURNAL_DIR", self.root / "journal"),
             patch.object(copilot, "AI_CONVERSATIONS_DIR", self.root / "journal" / "ai-conversations"),

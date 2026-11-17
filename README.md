@@ -111,7 +111,7 @@ The most important safety rule is that different kinds of text go to different p
 | Consolidated Chat experiences / thoughts | One generated `Thoughts & Reflections` block | `writeback-chat-capture` |
 | Copilot's relational response to Henry | `What Life Copilot Said` | `writeback-journal` |
 | Target-day direction (action, boundary, permission, or no-new-task) | `Daily Suggestion` (next day's diary) | `writeback-daily-suggestion` |
-| Codex / native Claude Code / Life Claude Renderer / Antigravity / OpenClaw-Kai / zshs Codex, Claude Code and CatPaw / Claude, ChatGPT (incl. Health), DeepSeek, Gemini web daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
+| Codex / native Claude Code / Life Claude Renderer / Antigravity / DeepSeek Harness / OpenClaw-Kai / zshs Codex, Claude Code and CatPaw / Claude, ChatGPT (incl. Health), DeepSeek, Gemini web daily traces | `journal/ai-conversations/` + diary wikilink index | `writeback-ai-day` |
 | The internship period's zshs sessions, kept in one corpus | `journal/ai-conversations/zshs-internship-<start>-to-<end>/` (filtered visible records, manifest with hashes and remote raw paths, index) | `backfill-zshs` |
 | Telegram / Kai raw conversation | Diary `From Kai` section | Manual paste |
 | The same traces, kept current between diary analyses | `journal/ai-conversations/` (traces and timeline only; the diary is not touched) | `refresh-ai-day`, run by the laptop's sync job |
@@ -159,17 +159,20 @@ an intentionally incomplete archive has been explicitly accepted.
 The internship Windows host (`zshs`) is optional. When it is reachable over
 SSH, the same command also writes `YYYY-MM-DD-zshs-codex-trace.md`,
 `YYYY-MM-DD-zshs-claude-code-trace.md` and `YYYY-MM-DD-zshs-catpaw-trace.md`
-and adds their `From Kai` links; when it
-is not, the run prints one line and leaves any existing zshs traces alone. The
-host key is pinned to the Tailscale address `100.86.105.53`; set
-`LIFE_ZSHS_SSH_HOST` for a different SSH name. `backfill-zshs --since
+and adds their `From Kai` links. All three daily pulls share a 20-second budget.
+Connection, timeout, or data errors produce one line and preserve existing
+zshs traces. The host key is pinned to the Tailscale address `100.86.105.53`.
+Set `LIFE_ZSHS_SSH_HOST` for a different SSH name. `backfill-zshs --since
 2026-07-27 --until YYYY-MM-DD` imports a whole period into one corpus under
-`journal/ai-conversations/zshs-internship-<start>-to-<end>/`: the host filters
-its own sessions down to the visible user/assistant records and sends them as
-`visible/*.tar.gz`; `manifest.json` records sizes, SHA-256 and where the full
-raw tree still lives on zshs, and `index.md` links the per-day traces. The
-filter is what keeps a four-month import minutes rather than hours on the
-office link. It never rewrites a diary.
+`journal/ai-conversations/zshs-internship-<start>-to-<end>/`.
+`visible/*.tar.gz` holds visible user and assistant text, image placeholders,
+and identifiers for re-rendering. `manifest.json` records sizes, SHA-256
+hashes, and the location of the raw records on zshs. `index.md` links the
+per-day traces. Re-running a backfill only creates missing output.
+
+Local DeepSeek Harness conversations from `~/.dsh/sessions/` appear in their
+own `From Kai` link and timeline entries. The importer reads compressed logs
+with `zstd` and keeps visible user and assistant text.
 
 `writeback-ai-day` also syncs ChatGPT web conversations (including ChatGPT
 Health), and optional Claude / DeepSeek / Gemini web conversations before

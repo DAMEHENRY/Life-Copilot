@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -143,7 +144,7 @@ class ZshsCacheTest(unittest.TestCase):
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
         with self.assertRaises(copilot.ZshsImportUnavailable):
-            copilot.zshs_extract_archive(buffer.getvalue(), self.cache / "out")
+            copilot.zshs_tar_members(buffer.getvalue())
 
     def test_sync_day_reports_pulled_and_clears_the_failure_marker(self) -> None:
         copilot.ZSHS_UNREACHABLE_MARKER.write_text("old", encoding="utf-8")
@@ -182,6 +183,42 @@ class ZshsCacheTest(unittest.TestCase):
         self.assertTrue(copilot.ZSHS_UNREACHABLE_MARKER.exists())
         with self.assertRaisesRegex(copilot.ZshsImportUnavailable, "recently"):
             copilot.zshs_sync_day(DAY)
+
+    def test_truncated_transport_becomes_optional_source_failure(self) -> None:
+        broken = base64.b64encode(copilot.zshs_pack_visible({})[:-4]).decode("ascii")
+        with patch.object(copilot, "zshs_python", return_value=f"KEPT 0 0\n{broken}"):
+            with self.assertRaisesRegex(copilot.ZshsImportUnavailable, "compressed"):
+                copilot.zshs_sync_day(DAY)
+        self.assertTrue(copilot.ZSHS_UNREACHABLE_MARKER.exists())
+
+    def test_daily_ssh_timeout_does_not_retry(self) -> None:
+        with patch.object(copilot.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired("ssh", 15)) as ssh:
+            with self.assertRaisesRegex(copilot.ZshsImportUnavailable, "timed out"):
+                copilot.zshs_sync_day(DAY)
+        self.assertLessEqual(ssh.call_count, 3)
+        self.assertTrue(all(
+            call.kwargs["timeout"] <= copilot.ZSHS_DAILY_TIMEOUT for call in ssh.call_args_list
+        ))
+
+    def test_visible_archive_preserves_text_and_omits_native_internals(self) -> None:
+        rows = claude_rows()
+        rows[-1]["message"]["content"] += [
+            {"type": "thinking", "thinking": "hidden"},
+            {"type": "tool_use", "input": {"secret": "hidden"}},
+        ]
+        rows[0]["message"]["content"] = [
+            {"type": "image", "source": {"data": "hidden"}},
+            {"type": "text", "text": "visible"},
+        ]
+        data = ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+        payload = copilot.zshs_pack_visible({"session.jsonl": data})
+        result = copilot.zshs_visible_archive(payload, "claude-code")["session.jsonl"]
+        projected = [json.loads(line) for line in result.splitlines()]
+        self.assertEqual(copilot.claude_code_visible_message(projected[0]), ("user", "[Image]\n\nvisible"))
+        self.assertEqual(copilot.claude_code_visible_message(projected[1]), ("assistant", "claude 的回答"))
+        self.assertNotIn(b"hidden", result)
+        self.assertEqual(copilot.zshs_visible_jsonl(result, "claude-code"), result)
 
 
 class ZshsWritebackTest(unittest.TestCase):
@@ -231,13 +268,13 @@ class ZshsWritebackTest(unittest.TestCase):
         trace = self.root / "journal" / "ai-conversations" / "2026" / "11" / "2026-11-17-zshs-codex-trace.md"
         trace.parent.mkdir(parents=True)
         trace.write_text("archived\n", encoding="utf-8")
+        output = io.StringIO()
         with patch.object(copilot, "zshs_sync_day",
-                          side_effect=copilot.ZshsImportUnavailable("connect timed out")), \
-                patch.object(copilot, "export_codex_day_transcript",
-                             return_value="[11/17/26 9:00 AM] Henry: 别的来源\n"):
-            with redirect_stdout(io.StringIO()):
+                          side_effect=copilot.ZshsImportUnavailable("connect timed out")):
+            with redirect_stdout(output):
                 result = copilot.writeback_ai_day(DAY, pull_zshs=True, pull_openclaw=False)
         self.assertEqual(result["zshs_status"], "unavailable")
+        self.assertEqual(output.getvalue().count("warning: zshs unavailable"), 1)
         self.assertEqual(trace.read_text(encoding="utf-8"), "archived\n")
 
     def test_cli_defaults_to_reading_zshs_and_can_skip_it(self) -> None:
@@ -277,24 +314,29 @@ class ZshsBackfillTest(unittest.TestCase):
 
     def test_backfill_writes_visible_corpus_index_and_daily_traces(self) -> None:
         def extract(_start, _end, source, **kwargs):
+            destination = kwargs["destination"]
             if source == "codex":
                 write_jsonl(
-                    copilot.ZSHS_CODEX_CACHE_DIR / "2026" / "11" / "17" / "rollout-2026-11-17T09-43-00.jsonl",
+                    destination / "2026" / "11" / "17" / "rollout-2026-11-17T09-43-00.jsonl",
                     codex_rows(),
                 )
             elif source == "claude-code":
                 write_jsonl(
-                    copilot.ZSHS_CLAUDE_CACHE_DIR / "-Users-zshs9-internship" / "22222222-2222-4222-8222-222222222222.jsonl",
+                    destination / "-Users-zshs9-internship" / "22222222-2222-4222-8222-222222222222.jsonl",
                     claude_rows(),
                 )
             else:
-                write_jsonl(copilot.ZSHS_CATPAW_CACHE_DIR / "c1.jsonl", catpaw_rows())
+                write_jsonl(destination / "c1.jsonl", catpaw_rows())
             archive = kwargs.get("archive_path")
             if archive is not None:
                 archive.parent.mkdir(parents=True, exist_ok=True)
                 archive.write_bytes(b"filtered-archive")
             return {"status": "pulled", "files": 1, "records": 2, "archive": str(archive or "")}
 
+        existing = copilot.ai_trace_path_for_date(DAY, "zshs-catpaw")
+        existing.parent.mkdir(parents=True)
+        preserved = "### zshs CatPaw Session c1\n\n[11/17/26 10:01 AM] CatPaw: 已归档正文\n"
+        existing.write_text(preserved, encoding="utf-8")
         with patch.object(copilot, "zshs_extract_range", side_effect=extract), \
                 redirect_stdout(io.StringIO()):
             result = copilot.backfill_zshs(DAY, DAY)
@@ -309,6 +351,12 @@ class ZshsBackfillTest(unittest.TestCase):
         trace = self.root / "journal" / "ai-conversations" / "2026" / "11" / "2026-11-17-zshs-codex-trace.md"
         self.assertIn("source: zshs-codex", trace.read_text(encoding="utf-8"))
         self.assertEqual(result["files"], 3)
+        self.assertEqual(existing.read_text(encoding="utf-8"), preserved)
+        manifest_before = (corpus / "manifest.json").read_bytes()
+        with patch.object(copilot, "zshs_extract_range", side_effect=AssertionError("refetched")), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(copilot.backfill_zshs(DAY, DAY)["traces"], [])
+        self.assertEqual((corpus / "manifest.json").read_bytes(), manifest_before)
         timeline = copilot.render_day_timeline(DAY)
         self.assertIn("zshs Codex", timeline)
         self.assertIn("zshs Claude Code", timeline)
