@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -182,7 +183,10 @@ class WritebackGoldenTest(unittest.TestCase):
                 f"{DAY.isoformat()}-{spec.name}-trace.md"
             )
             self.assertEqual(path.read_text(encoding="utf-8"), expected, spec.name)
+            self.assertIsInstance(result[spec.name], copilot.SourceResult)
+            self.assertEqual(result[spec.name].status, "pulled")
         self.assertEqual(result["zshs_status"], "pulled")
+        self.assertEqual(result["openclaw_status"], "pulled")
 
     def test_from_kai_bullets_follow_registry_order_once_each(self) -> None:
         with redirect_stdout(io.StringIO()):
@@ -272,3 +276,131 @@ class PreviewZshsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequiredOptionalMatrixTest(unittest.TestCase):
+    """Required/optional policy is data on the spec, not prose in the pull path."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        self.journal = self.root / "journal" / "2026" / "08" / "2026-08-13.md"
+        self.journal.parent.mkdir(parents=True)
+        self.journal.write_text("# 2026-08-13\n\n## 💬 From Kai\n", encoding="utf-8")
+        self.patchers = [
+            patch.object(copilot, "ROOT", self.root),
+            patch.object(copilot, "JOURNAL_DIR", self.root / "journal"),
+            patch.object(copilot, "AI_CONVERSATIONS_DIR", self.root / "journal" / "ai-conversations"),
+            patch.object(copilot, "export_codex_day_transcript",
+                         return_value="### Codex Thread c1\n\n[8/13/26 9:00 AM] Henry: hi\n"),
+            patch.object(copilot, "export_life_claude_renderer_day_transcript", return_value=("", 0, 0)),
+            patch.object(copilot, "export_claude_code_day_transcript", return_value=("", 0, 0)),
+            patch.object(copilot, "export_antigravity_day_transcript", return_value=("", 0, 0)),
+            patch.object(copilot, "zshs_sync_day", return_value={"status": "empty"}),
+            patch.object(copilot, "export_zshs_codex_day_transcript", return_value=""),
+            patch.object(copilot, "export_zshs_claude_code_day_transcript", return_value=("", 0, 0)),
+            patch.object(copilot, "export_zshs_catpaw_day_transcript", return_value=("", 0, 0)),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+
+    def tearDown(self) -> None:
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temp.cleanup()
+
+    def test_openclaw_blocks_unless_the_flag_is_given(self) -> None:
+        with patch.object(copilot, "export_openclaw_day_transcript",
+                          side_effect=copilot.OpenClawImportUnavailable("offline")), \
+                self.assertRaisesRegex(copilot.OpenClawImportUnavailable, "no partial writeback"):
+            with redirect_stdout(io.StringIO()):
+                copilot.writeback_ai_day(DAY)
+        output = io.StringIO()
+        with patch.object(copilot, "export_openclaw_day_transcript",
+                          side_effect=copilot.OpenClawImportUnavailable("offline")), \
+                redirect_stdout(output):
+            result = copilot.writeback_ai_day(DAY, allow_missing_openclaw=True)
+        self.assertEqual(result["openclaw"].status, "unavailable")
+        self.assertIn("--allow-missing-openclaw was set", output.getvalue())
+
+    def test_zshs_is_optional_and_passes_the_cooldown_flag(self) -> None:
+        with patch.object(copilot, "zshs_sync_day",
+                          side_effect=copilot.ZshsImportUnavailable("offline")) as sync, \
+                redirect_stdout(io.StringIO()):
+            result = copilot.writeback_ai_day(
+                DAY, pull_zshs=True, zshs_respect_cooldown=False
+            )
+        sync.assert_called_once_with(DAY, respect_cooldown=False)
+        self.assertEqual(result["zshs_status"], "unavailable")
+        self.assertEqual(result["zshs_detail"], "offline")
+        self.assertEqual(result["zshs-codex"].status, "unavailable")
+
+    def test_chatgpt_web_is_required_while_the_other_web_sources_are_optional(self) -> None:
+        required = {spec.name for spec in copilot.SOURCES if spec.required}
+        self.assertEqual(required, {"openclaw", "chatgpt-web"})
+        self.assertEqual(
+            {spec.missing_flag for spec in copilot.SOURCES if spec.required},
+            {"--allow-missing-openclaw", "--allow-missing-web-chats"},
+        )
+        for name in ("claude-web", "deepseek-web", "gemini-web"):
+            self.assertFalse(copilot.SOURCE_BY_NAME[name].required, name)
+            self.assertEqual(
+                copilot.SOURCE_BY_NAME[name].missing_flag, "--allow-missing-web-chats"
+            )
+        # WeChat has its own importer and is deliberately outside the registry.
+        self.assertNotIn("wechat", {spec.name for spec in copilot.SOURCES})
+
+
+class Stage2ResultTest(unittest.TestCase):
+    """Results, not log substrings, carry the refresh status lines."""
+
+    def _refresh(self, args_namespace) -> str:
+        out = io.StringIO()
+        with patch.object(copilot, "refresh_schedule_snapshot", return_value=False), \
+                redirect_stdout(out):
+            copilot.cmd_refresh_ai_day(args_namespace)
+        return out.getvalue()
+
+    def test_refresh_reads_openclaw_and_zshs_status_from_results(self) -> None:
+        result = {
+            "openclaw": copilot.SourceResult("unavailable"),
+            "zshs_status": "empty",
+        }
+        with patch.object(copilot, "writeback_ai_day", return_value=result):
+            output = self._refresh(SimpleNamespace(
+                date=DAY.isoformat(), no_openclaw=False, no_zshs=False, verbose=False
+            ))
+        self.assertEqual(output.strip(), "zshs: empty\nopenclaw: unavailable")
+
+    def test_no_conversations_exception_carries_the_statuses(self) -> None:
+        failure = copilot.NoAIConversations(
+            "No AI conversations",
+            {"openclaw": copilot.SourceResult("unavailable")},
+            {"zshs": copilot.SourceGroupResult("unavailable")},
+        )
+        with patch.object(copilot, "writeback_ai_day", side_effect=failure):
+            output = self._refresh(SimpleNamespace(
+                date=DAY.isoformat(), no_openclaw=False, no_zshs=False, verbose=False
+            ))
+        self.assertEqual(output.strip(), "zshs: unavailable\nopenclaw: unavailable")
+
+    def test_finalize_output_stays_json_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            hook = Path(temp) / "hook.json"
+            hook.write_text(json.dumps({"date": DAY.isoformat()}), encoding="utf-8")
+            result = {
+                "journal": "/vault/journal/day.md",
+                "codex": copilot.SourceResult(
+                    "pulled", transcript="body", trace_path=Path("/vault/trace.md")
+                ),
+            }
+            out = io.StringIO()
+            with patch.object(copilot, "writeback_ai_day", return_value=result), \
+                    redirect_stdout(out):
+                copilot.cmd_finalize_ai_day(
+                    SimpleNamespace(hook_input_file=str(hook), date=None)
+                )
+            payload = json.loads(out.getvalue())
+        self.assertEqual(payload["codex"]["status"], "pulled")
+        self.assertEqual(payload["codex"]["transcript_chars"], 4)
+        self.assertEqual(payload["codex"]["trace"], "/vault/trace.md")

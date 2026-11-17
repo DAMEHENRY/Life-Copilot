@@ -8053,6 +8053,32 @@ class SourceGroupResult:
     results: Dict[str, SourceResult] = field(default_factory=dict)
 
 
+class NoAIConversations(ValueError):
+    """A day with no source transcript and no WeChat message.
+
+    Carries the per-source results and per-group statuses, so refresh-ai-day
+    can print its zshs/openclaw lines from data instead of searching the log.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        results: Dict[str, SourceResult],
+        groups: Optional[Dict[str, SourceGroupResult]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.results = results
+        self.groups = groups or {}
+
+    def source_status(self, name: str, default: str = "skipped") -> str:
+        result = self.results.get(name)
+        return result.status if result is not None else default
+
+    def group_status(self, name: str, default: str = "skipped") -> str:
+        group = self.groups.get(name)
+        return group.status if group is not None else default
+
+
 @dataclass(frozen=True)
 class SourceSpec:
     name: str
@@ -8924,17 +8950,7 @@ def writeback_ai_day(
     zshs_group = group_results.get("zshs", SourceGroupResult("skipped"))
     zshs_status = zshs_group.status
     zshs_detail = zshs_group.detail
-    zshs_codex_transcript = results["zshs-codex"].transcript
-    zshs_claude_transcript = results["zshs-claude-code"].transcript
-    zshs_catpaw_transcript = results["zshs-catpaw"].transcript
     openclaw_transcript = openclaw_result.transcript
-    renderer_transcript = results["life-claude-renderer"].transcript
-    claude_code_transcript = results["claude-code"].transcript
-    antigravity_transcript = results["antigravity"].transcript
-    web_transcripts: Dict[str, str] = {}
-    if web_chats:
-        for provider, (source, _, _, _) in WEB_CHAT_SOURCES.items():
-            web_transcripts[provider] = results.get(source, SourceResult("empty")).transcript
 
     wechat_result = wechat_import.import_exports(ROOT)
     for warning in wechat_result['warnings']:
@@ -8945,22 +8961,14 @@ def writeback_ai_day(
     for day in sorted(changed_wechat_days - {target.isoformat()}):
         write_day_timeline(date.fromisoformat(day))
 
-    if (
-        not codex_transcript
-        and not renderer_transcript
-        and not claude_code_transcript
-        and not antigravity_transcript
-        and not openclaw_transcript
-        and not zshs_codex_transcript
-        and not zshs_claude_transcript
-        and not zshs_catpaw_transcript
-        and not any(web_transcripts.values())
-        and not wechat_import.read_day(ROOT, target)['messages']
-    ):
-        raise ValueError(
+    wechat_messages = wechat_import.read_day(ROOT, target)['messages']
+    if not any(result.transcript for result in results.values()) and not wechat_messages:
+        raise NoAIConversations(
             "No AI conversations (Codex, Claude Code, Life Claude Renderer, Antigravity, "
             "OpenClaw, zshs Codex/Claude Code, or Claude/ChatGPT/DeepSeek/Gemini web) "
-            f"found for date: {target.isoformat()}"
+            f"found for date: {target.isoformat()}",
+            results,
+            group_results,
         )
 
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
@@ -9048,7 +9056,7 @@ def writeback_ai_day(
             return ""
         return str(result.trace_path)
 
-    return {
+    payload: Dict[str, object] = {
         "journal": str(jp) if update_journal else "",
         "openclaw_status": openclaw_result.status,
         "codex_trace": written_trace("codex"),
@@ -9070,6 +9078,28 @@ def writeback_ai_day(
         "fallback_used": fallback_used,
         "kept_lost_messages": kept_lost_messages,
     }
+    # One result per spec, in registry order, beside the top-level keys the CLI
+    # and tests already read. The flat *_trace keys above stay for those callers.
+    payload.update(results)
+    return payload
+
+
+def writeback_result_payload(result: Dict[str, object]) -> Dict[str, object]:
+    """Make a writeback result JSON-safe for the hook's one-line output."""
+    payload: Dict[str, object] = {}
+    for key, value in result.items():
+        if isinstance(value, SourceResult):
+            payload[key] = {
+                "status": value.status,
+                "transcript_chars": len(value.transcript),
+                "message_count": value.message_count,
+                "session_count": value.session_count,
+                "detail": value.detail,
+                "trace": str(value.trace_path) if value.trace_path else "",
+            }
+        else:
+            payload[key] = value
+    return payload
 
 
 # A day is archived when its diary analysis starts, and nothing archives it
@@ -9212,34 +9242,36 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
     target = parse_date_or_today(getattr(args, "date", None))
     captured = io.StringIO()
     stdout, sys.stdout = sys.stdout, captured
+    no_conversations: Optional[NoAIConversations] = None
     try:
-        result = writeback_ai_day(
-            target,
-            update_journal=False,
-            allow_missing_openclaw=True,
-            pull_openclaw=not getattr(args, "no_openclaw", False),
-            pull_zshs=not getattr(args, "no_zshs", False),
-            skip_unchanged=True,
-        )
-    except ValueError as exc:
-        if "No AI conversations" not in str(exc):
-            raise
-        result = {}
+        try:
+            result = writeback_ai_day(
+                target,
+                update_journal=False,
+                allow_missing_openclaw=True,
+                pull_openclaw=not getattr(args, "no_openclaw", False),
+                pull_zshs=not getattr(args, "no_zshs", False),
+                skip_unchanged=True,
+            )
+        except NoAIConversations as exc:
+            result = {}
+            no_conversations = exc
     finally:
         sys.stdout = stdout
     log = captured.getvalue()
-    if "openclaw_status" not in result:  # a day with nothing to archive yet
-        result["openclaw_status"] = (
-            "skipped" if getattr(args, "no_openclaw", False)
-            else "unavailable" if "OpenClaw unavailable" in log
-            else "pulled"
+    if no_conversations is not None:
+        # A day with nothing to archive yet: the exception carries the pull
+        # results, so the status lines never depend on the captured log text.
+        openclaw_status = no_conversations.source_status("openclaw")
+        zshs_status = no_conversations.group_status("zshs")
+    else:
+        openclaw_result = result.get("openclaw")
+        openclaw_status = (
+            openclaw_result.status
+            if isinstance(openclaw_result, SourceResult)
+            else "skipped"
         )
-    if "zshs_status" not in result:
-        result["zshs_status"] = (
-            "skipped" if getattr(args, "no_zshs", False)
-            else "unavailable" if "zshs unavailable" in log
-            else "empty"
-        )
+        zshs_status = str(result.get("zshs_status", "skipped"))
     if getattr(args, "verbose", False):
         print(log, end="")
     wrote = [
@@ -9254,9 +9286,9 @@ def cmd_refresh_ai_day(args: argparse.Namespace) -> None:
                 print(line.strip())
         print(f"refreshed {target.isoformat()}: {', '.join(wrote)}")
     # One line for the optional internship host; absent is a normal day.
-    print(f"zshs: {result.get('zshs_status', 'skipped')}")
+    print(f"zshs: {zshs_status}")
     # The sync job reads this line to decide when Kai was last pulled.
-    print(f"openclaw: {result.get('openclaw_status', 'skipped')}")
+    print(f"openclaw: {openclaw_status}")
 
 
 def cmd_sync_web_chats(args: argparse.Namespace) -> None:
@@ -9327,7 +9359,7 @@ def cmd_finalize_ai_day(args: argparse.Namespace) -> None:
         create_journal=True,
         hook_payload=payload,
     )
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(writeback_result_payload(result), ensure_ascii=False))
 
 
 # --- Memory commands ---
