@@ -404,3 +404,103 @@ class Stage2ResultTest(unittest.TestCase):
         self.assertEqual(payload["codex"]["status"], "pulled")
         self.assertEqual(payload["codex"]["transcript_chars"], 4)
         self.assertEqual(payload["codex"]["trace"], "/vault/trace.md")
+
+
+class SharedTraceParserTest(unittest.TestCase):
+    """The guard and the timeline read the same parser (stage 3)."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        self.trace_dir = self.root / "journal" / "ai-conversations" / "2026" / "08"
+        self.trace_dir.mkdir(parents=True)
+        self.patchers = [
+            patch.object(copilot, "ROOT", self.root),
+            patch.object(copilot, "JOURNAL_DIR", self.root / "journal"),
+            patch.object(copilot, "AI_CONVERSATIONS_DIR", self.root / "journal" / "ai-conversations"),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+
+    def tearDown(self) -> None:
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temp.cleanup()
+
+    def _text(self) -> str:
+        return "\n".join([
+            "---",
+            "date: 2026-08-13",
+            "source: chatgpt-web",
+            "---",
+            "",
+            "# 2026-08-13 ChatGPT Web Trace",
+            "",
+            "### ChatGPT Web Conversation abc12345 [Health] - sleep data",
+            "",
+            "Source: <https://chatgpt.com/c/abc12345>",
+            "",
+            _msg(9, "Henry", "question"),
+            "",
+            _msg(9, "ChatGPT", "answer"),
+            "",
+            "### Codex Thread <id> - quoted inside the answer",
+            "",
+            "<!-- openclaw-manual-begin channel=telegram source=henry-paste -->",
+            "### Kai / Telegram (supplied by Henry)",
+            "",
+            "[8/13/26 4:42 AM] Henry: pasted",
+            "",
+            "[8/13/26 4:43 AM] Kai: yes",
+            "<!-- openclaw-manual-end -->",
+            _msg(11, "Henry", "after the paste"),
+        ]) + "\n"
+
+    def test_sessions_keep_heading_metadata_and_manual_blocks(self) -> None:
+        text = self._text()
+        sessions = copilot.parse_trace(text, (copilot.TRACE_USER, *copilot.TIMELINE_ASSISTANTS))
+        web = next(session for session in sessions if session.label == "ChatGPT Web")
+        self.assertEqual(
+            (web.session, web.title, web.tags), ("abc12345", "sleep data", " [Health]")
+        )
+        manual = next(session for session in sessions if session.manual)
+        self.assertEqual((manual.label, manual.session), ("Kai", manual.heading))
+        self.assertTrue(all(unit["manual"] for unit in manual.units if unit["kind"] == "message"))
+        # A quoted heading is text, not a session, for both consumers now.
+        self.assertNotIn("<id>", {session.session for session in sessions})
+        # Units keep every line, so the trace can be rebuilt from them.
+        self.assertEqual(
+            "\n".join(unit for session in sessions for line in session.units for unit in line["lines"]),
+            text,
+        )
+
+    def test_guard_and_timeline_use_the_one_parser(self) -> None:
+        self.assertFalse(hasattr(copilot, "TIMELINE_SESSION_HEADING_RE"))
+        path = self.trace_dir / "2026-08-13-chatgpt-web-trace.md"
+        path.write_text(self._text(), encoding="utf-8")
+        guard_units = copilot.split_trace_units(self._text(), "ChatGPT")
+        self.assertEqual(
+            guard_units,
+            [
+                unit
+                for session in copilot.parse_trace(
+                    self._text(), (copilot.TRACE_USER, "ChatGPT")
+                )
+                for unit in session.units
+            ],
+        )
+        messages = copilot.day_timeline_messages(DAY)
+        self.assertEqual(
+            [message["label"] for message in messages],
+            ["ChatGPT Web", "ChatGPT Web", "Kai", "Kai", "chatgpt-web"],
+        )
+        self.assertEqual(
+            [message["text"] for message in messages],
+            [
+                "question\n",
+                "answer\n\n### Codex Thread <id> - quoted inside the answer\n",
+                "pasted\n",
+                "yes",
+                "after the paste\n",
+            ],
+        )

@@ -7314,9 +7314,13 @@ TRACE_ASSISTANTS: Dict[str, str] = {
     **{source: assistant for source, assistant, _, _ in WEB_CHAT_SOURCES.values()},
 }
 TRACE_SESSION_HEADING_RE = re.compile(
-    r"^### (?:(?:zshs )?Codex Thread"
-    r"|(?:zshs Claude Code|zshs CatPaw|Claude Code|Life Claude Renderer|Antigravity|Kai / \S+) Session"
-    r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web Conversation) (?P<session>\S+)"
+    r"^### (?P<label>zshs Codex|zshs Claude Code|zshs CatPaw|Codex|Claude Code"
+    r"|Life Claude Renderer|Claudian|Antigravity|Kai / \S+"
+    r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web)"
+    r" (?:Thread|Session|Conversation) "
+    r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)"
+    r"(?P<tags>(?: \[[^\]\n]+\])*)"
+    r"(?: - (?P<title>.+))?$"
 )
 # Henry's manual OpenClaw blocks put U+202F before AM/PM.
 TRACE_MESSAGE_RE = re.compile(
@@ -7338,6 +7342,21 @@ TRACE_ANNOTATION_RE = re.compile(
 SourceRecord = Tuple[str, str, str, str]
 
 
+@dataclass
+class TraceSession:
+    """One heading or manual block in a trace, with its units in file order."""
+
+    block: int
+    label: str = ""
+    session: str = ""
+    title: str = ""
+    tags: str = ""
+    heading: str = ""
+    manual: bool = False
+    fallback: bool = False
+    units: List[dict] = field(default_factory=list)
+
+
 def trace_match_text(*parts: object) -> str:
     """Normalize text for line lookups, undoing what importers strip."""
     text = "\n".join(part for part in parts if isinstance(part, str))
@@ -7346,27 +7365,51 @@ def trace_match_text(*parts: object) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def split_trace_units(body: str, assistant: str) -> List[dict]:
-    """Split a trace body into units, in file order.
+def parse_trace(
+    text: str,
+    speakers: Optional[Tuple[str, ...]] = None,
+) -> List[TraceSession]:
+    """Parse a trace into sessions of units, keeping every line verbatim.
 
-    A unit starts at a message line, a session heading, a web ``Source:``
-    line or a manual-block marker and runs to the next of these. Units keep
-    their lines verbatim, so joining all their lines with newlines rebuilds
-    ``body``. Units of one session heading share a ``block`` number.
+    This is the one parser of the trace format: the trace guard and the day
+    timeline both consume it. A unit starts at a message line, a session
+    heading, a web ``Source:`` line or a manual-block marker and runs to the
+    next of these; joining all units' lines with newlines rebuilds ``text``.
+    ``speakers`` limits which message lines become units: message-looking lines
+    from anyone else stay ordinary text, so the guard only counts its own
+    assistant while the timeline accepts every known speaker.
     """
+    allowed = set(speakers) if speakers is not None else None
     units: List[dict] = []
     block, session, manual = 0, "", False
-    for line in body.split("\n"):
+    meta: Dict[int, Dict[str, object]] = {}
+    for line in text.split("\n"):
         heading = None if manual else TRACE_SESSION_HEADING_RE.match(line)
         marker = TRACE_MANUAL_MARKER_RE.match(line)
         message = TRACE_MESSAGE_RE.match(line)
-        if message and message.group("speaker") not in (TRACE_USER, assistant):
+        if message and allowed is not None and message.group("speaker") not in allowed:
             message = None
         if heading:
             block, session = block + 1, heading.group("session")
+            meta[block] = {
+                "label": heading.group("label"),
+                "session": session,
+                "title": heading.group("title") or "",
+                "tags": heading.group("tags") or "",
+                "heading": line,
+                "manual": False,
+            }
         elif marker and marker.group("edge") == "begin":
             # A manual block is its own session, named by its begin marker.
             block, session, manual = block + 1, line, True
+            meta[block] = {
+                "label": "Kai",
+                "session": line,
+                "title": "",
+                "tags": "",
+                "heading": line,
+                "manual": True,
+            }
         kind = (
             "heading" if heading
             else "marker" if marker
@@ -7375,10 +7418,17 @@ def split_trace_units(body: str, assistant: str) -> List[dict]:
             else ""
         )
         if kind or not units:
-            units.append({"kind": kind or "text", "lines": [line], "block": block, "session": session})
+            units.append({
+                "kind": kind or "text",
+                "lines": [line],
+                "block": block,
+                "session": session,
+            })
             if kind == "message":
                 units[-1]["ts"] = re.sub(r"\s", " ", message.group("ts"))
-                units[-1]["role"] = "user" if message.group("speaker") == TRACE_USER else "assistant"
+                units[-1]["role"] = (
+                    "user" if message.group("speaker") == TRACE_USER else "assistant"
+                )
         else:
             units[-1]["lines"].append(line)
         if marker and marker.group("edge") == "end":
@@ -7390,11 +7440,42 @@ def split_trace_units(body: str, assistant: str) -> List[dict]:
         if unit["kind"] == "heading"
         and any(line.startswith("> hook-fallback-turn:") for line in unit["lines"])
     }
+    sessions: List[TraceSession] = []
+    by_block: Dict[int, TraceSession] = {}
     for unit in units:
         unit["text"] = "\n".join(line.rstrip() for line in unit["lines"]).strip()
         unit["fallback"] = unit["block"] in fallback_blocks
         unit["manual"] = unit["session"].startswith("<!--")
-    return units
+        current = by_block.get(unit["block"])
+        if current is None:
+            info = meta.get(unit["block"], {})
+            current = TraceSession(
+                block=unit["block"],
+                label=str(info.get("label", "")),
+                session=str(info.get("session", "")),
+                title=str(info.get("title", "")),
+                tags=str(info.get("tags", "")),
+                heading=str(info.get("heading", "")),
+                manual=bool(info.get("manual", False)),
+                fallback=unit["block"] in fallback_blocks,
+            )
+            by_block[unit["block"]] = current
+            sessions.append(current)
+        current.units.append(unit)
+    return sessions
+
+
+def split_trace_units(body: str, assistant: str) -> List[dict]:
+    """Flat units of one trace, in file order, for the trace guard.
+
+    The guard counts only Henry and this source's assistant as messages, so a
+    quoted ``[time] Other: ...`` line stays part of the surrounding text.
+    """
+    return [
+        unit
+        for session in parse_trace(body, (TRACE_USER, assistant))
+        for unit in session.units
+    ]
 
 
 def trace_message_lines(unit: dict) -> List[str]:
@@ -8429,15 +8510,9 @@ def preview_cached_zshs(spec: SourceSpec, target: date) -> SourceResult:
 TIMELINE_GAP_MINUTES = 20  # a silence longer than this ends a segment
 TIMELINE_QUIET_MINUTES = 60  # a silence at least this long gets a line of its own
 TIMELINE_TOPIC_CHARS = 48
-# The id has to look like one: a message that quotes the heading format
-# ("### Codex Thread <id>") must not open a session. Web chats put tags such
-# as [Health] between the id and the title.
-TIMELINE_SESSION_HEADING_RE = re.compile(
-    r"^### (?P<label>zshs Codex|zshs Claude Code|zshs CatPaw|Codex|Claude Code|Life Claude Renderer"
-    r"|Claudian|Antigravity|Kai / \S+"
-    r"|(?:Claude|ChatGPT|DeepSeek|Gemini) Web) (?:Thread|Session|Conversation) "
-    r"(?P<session>[0-9A-Za-z][0-9A-Za-z-]*)(?P<tags>(?: \[[^\]\n]+\])*)(?: - (?P<title>.+))?$"
-)
+# Session headings and message lines come from parse_trace, the same parser
+# the trace guard uses. Web chats put tags such as [Health] between the id and
+# the title; parse_trace keeps them for the timeline.
 TIMELINE_ASSISTANTS = frozenset({*TRACE_ASSISTANTS.values(), "Claudian", "Gemini"})
 # What a client wrote into Henry's turn: a page-open marker, pasted content
 # (whose closing tag repeats the id), an HTML comment, and the file list Codex
@@ -8456,40 +8531,56 @@ def day_timeline_path(target: date) -> Path:
 def day_timeline_messages(target: date) -> List[dict]:
     """Every timestamped message in the day's trace files, in file order."""
     messages: List[dict] = []
-    block = 0
+    speakers = (TRACE_USER, *TIMELINE_ASSISTANTS)
+    # Blocks must stay unique across the day's trace files; the old parser
+    # counted them in one global run, the shared parser counts per file.
+    next_block = 1
     for path in day_trace_paths(target):
         source = path.stem[len(target.isoformat()) + 1:].removesuffix("-trace")
-        label, session, title, manual = source, "", "", False
-        block += 1
-        for line in read_text(path).split("\n"):
-            marker = TRACE_MANUAL_MARKER_RE.match(line)
-            heading = None if manual or marker else TIMELINE_SESSION_HEADING_RE.match(line)
-            if marker:
-                # Henry's pasted record is a session of its own, as in the trace guard.
-                manual = marker.group("edge") == "begin"
-                label, session, title = ("Kai", "manual", "") if manual else (source, "", "")
-                block += 1
-                continue
-            if heading:
-                label, session = heading.group("label"), heading.group("session")[:8]
-                title = f"{heading.group('tags')} {heading.group('title') or ''}".strip()
-                block += 1
-                continue
-            message = TRACE_MESSAGE_RE.match(line)
-            if message and message.group("speaker") in (TRACE_USER, *TIMELINE_ASSISTANTS):
-                messages.append({
-                    "at": datetime.strptime(
-                        re.sub(r"\s", " ", message.group("ts")), "%m/%d/%y %I:%M %p"
-                    ),
-                    "henry": message.group("speaker") == TRACE_USER,
-                    "text": line[message.end():],
-                    "block": block,
-                    "label": label,
-                    "session": session,
-                    "title": title,
-                })
-            elif messages and messages[-1]["block"] == block:
-                messages[-1]["text"] += "\n" + line
+        sessions = parse_trace(read_text(path), speakers)
+        if not sessions:
+            continue
+        shift = next_block - sessions[0].block
+        for session in sessions:
+            session.block += shift
+            for unit in session.units:
+                unit["block"] += shift
+        next_block = max(session.block for session in sessions) + 1
+        for session in sessions:
+            if session.manual:
+                # Henry's pasted record is a session of its own, as in the guard.
+                label, session_id, title = "Kai", "manual", ""
+            elif session.label:
+                label = session.label
+                session_id = session.session[:8]
+                title = f"{session.tags} {session.title or ''}".strip()
+            else:
+                label, session_id, title = source, "", ""
+            for unit in session.units:
+                if unit["kind"] == "message":
+                    first = unit["lines"][0]
+                    message = TRACE_MESSAGE_RE.match(first)
+                    if message is None:
+                        continue
+                    text = first[message.end():]
+                    for extra in unit["lines"][1:]:
+                        text += "\n" + extra
+                    messages.append({
+                        "at": datetime.strptime(unit["ts"], "%m/%d/%y %I:%M %p"),
+                        "henry": message.group("speaker") == TRACE_USER,
+                        "text": text,
+                        "block": unit["block"],
+                        "label": label,
+                        "session": session_id,
+                        "title": title,
+                    })
+                elif (
+                    unit["kind"] not in ("marker", "heading")
+                    and messages
+                    and messages[-1]["block"] == unit["block"]
+                ):
+                    for extra in unit["lines"]:
+                        messages[-1]["text"] += "\n" + extra
     return messages
 
 
