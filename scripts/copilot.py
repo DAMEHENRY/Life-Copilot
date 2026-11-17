@@ -32,6 +32,7 @@ import sys
 import tarfile
 import tempfile
 import time
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -3827,33 +3828,23 @@ def backfill_zshs(
         claude_sessions, claude_messages = zshs_trace_counts(claude_text)
         catpaw_sessions, catpaw_messages = zshs_trace_counts(catpaw_text)
         links: List[str] = []
-        trace_labels = {
-            "zshs-codex": ("Codex", zshs_codex_day_source_records),
-            "zshs-claude-code": ("Claude Code", zshs_claude_code_day_source_records),
-            "zshs-catpaw": ("CatPaw", zshs_catpaw_day_source_records),
-        }
-        for source, path, text in (
-            ("zshs-codex", ai_trace_path_for_date(day, "zshs-codex"), codex_text),
-            ("zshs-claude-code", ai_trace_path_for_date(day, "zshs-claude-code"), claude_text),
-            ("zshs-catpaw", ai_trace_path_for_date(day, "zshs-catpaw"), catpaw_text),
-        ):
+        for spec, text in zip(ZSHS_SOURCE_SPECS, (codex_text, claude_text, catpaw_text)):
             if not text:
                 continue
-            label, record_reader = trace_labels[source]
+            path = ai_trace_path_for_date(day, spec.name)
             header = [
                 "---",
                 f"date: {day.isoformat()}",
-                f"source: {source}",
-                "host: zshs",
+                f"source: {spec.name}",
+                *spec.frontmatter,
                 "generated_by: scripts/copilot.py backfill-zshs",
                 "---",
                 "",
-                f"# {day.isoformat()} zshs {label} Trace",
+                f"# {day.isoformat()} {spec.trace_title}",
                 "",
             ]
             write_ai_trace(
-                path, header, text, source,
-                lambda d=day, read=record_reader: read(d),
+                path, header, text, spec.name, spec.records_for(day),
                 skip_unchanged=True,
             )
             written_traces.append(path.name)
@@ -7153,139 +7144,149 @@ def cmd_writeback_codex_day(args: argparse.Namespace) -> None:
 def cmd_preview_ai_day(args: argparse.Namespace) -> None:
     target = parse_date_str(args.date)
     jp = journal_path_for_date(target)
+    allow_missing_openclaw = bool(getattr(args, "allow_missing_openclaw", False))
+    include_web = bool(getattr(args, "web_chats", False))
+    options = SourceOptions(
+        pull_openclaw=True,
+        allow_missing_openclaw=allow_missing_openclaw,
+        pull_zshs=False,
+        web_chats=include_web,
+    )
 
-    codex_transcript = export_codex_day_transcript(target).strip()
+    results: Dict[str, SourceResult] = {}
+    openclaw_warning = ""
+    for spec in SOURCES:
+        if not include_web and spec.name in WEB_SOURCE_NAMES:
+            continue
+        if spec.preview_kind == "cache":
+            # Preview reads the last cached zshs trace; it never opens SSH.
+            results[spec.name] = preview_cached_zshs(spec, target)
+            continue
+        if spec.pull is None:
+            continue
+        try:
+            results[spec.name] = spec.pull(target, options)
+        except OpenClawImportUnavailable as exc:
+            if not allow_missing_openclaw:
+                raise OpenClawImportUnavailable(
+                    "OpenClaw/Kai is required for AI-day import. Restore the "
+                    "Tailscale/SSH link, or explicitly pass --allow-missing-openclaw "
+                    "for an intentionally incomplete preview. "
+                    f"Cause: {exc}"
+                ) from exc
+            results[spec.name] = SourceResult("unavailable", detail=str(exc))
+            openclaw_warning = str(exc)
+
+    def row(label: str, value: str = "") -> str:
+        return f"  {label}".ljust(35) + value
+
+    def print_source(spec: SourceSpec, result: SourceResult) -> None:
+        path = ai_trace_path_for_date(target, spec.name)
+        if spec.preview_kind == "cache":
+            if result.detail == "not cached":
+                print(row(f"{spec.preview_label}:", spec.preview_empty))
+                return
+            print(
+                row(
+                    f"{spec.preview_label} trace file:",
+                    f"{path.relative_to(ROOT)} ({result.detail})",
+                )
+            )
+        elif result.transcript:
+            print(row(f"{spec.preview_label} trace file:", str(path.relative_to(ROOT))))
+        else:
+            if spec.name == "openclaw" and openclaw_warning:
+                print(row(f"{spec.preview_label}:", f"(unavailable — {openclaw_warning})"))
+            else:
+                print(row(f"{spec.preview_label}:", spec.preview_empty))
+            return
+        first, second = spec.preview_counts
+        print(row(f"{spec.preview_label} {first}:", str(result.session_count)))
+        print(row(f"{spec.preview_label} {second}:", str(result.message_count)))
+        print(
+            row(
+                "Journal wikilink:",
+                f"- {obsidian_wikilink_for_path(path)}：{spec.from_kai_description}",
+            )
+        )
+
+    codex_transcript = results["codex"].transcript
     if codex_transcript:
         warn_if_oversized_codex_transcript(
             codex_transcript, f"Codex trace for {target.isoformat()}"
         )
-    codex_msg_count = codex_transcript.count("\n[") + (1 if codex_transcript.startswith("[") else 0) if codex_transcript else 0
-    codex_session_count = codex_transcript.count("### Codex Thread ") if codex_transcript else 0
+    codex_msg_count = (
+        codex_transcript.count("\n[")
+        + (1 if codex_transcript.startswith("[") else 0)
+        if codex_transcript
+        else 0
+    )
+    codex_session_count = (
+        codex_transcript.count("### Codex Thread ") if codex_transcript else 0
+    )
 
-    renderer_transcript, renderer_msg_count, renderer_session_count = export_life_claude_renderer_day_transcript(target)
-    claude_code_transcript, claude_code_msg_count, claude_code_session_count = export_claude_code_day_transcript(target)
-    antigravity_transcript, antigravity_msg_count, antigravity_session_count = export_antigravity_day_transcript(target)
-    openclaw_warning = ""
-    try:
-        openclaw_transcript, openclaw_msg_count, openclaw_session_count = export_openclaw_day_transcript(target)
-    except OpenClawImportUnavailable as exc:
-        if not getattr(args, "allow_missing_openclaw", False):
-            raise OpenClawImportUnavailable(
-                "OpenClaw/Kai is required for AI-day import. Restore the "
-                "Tailscale/SSH link, or explicitly pass --allow-missing-openclaw "
-                "for an intentionally incomplete preview. "
-                f"Cause: {exc}"
-            ) from exc
-        openclaw_transcript, openclaw_msg_count, openclaw_session_count = "", 0, 0
-        openclaw_warning = str(exc)
-
-    codex_path = ai_trace_path_for_date(target, "codex")
-    renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
-    claude_code_path = ai_trace_path_for_date(target, "claude-code")
-    antigravity_path = ai_trace_path_for_date(target, "antigravity")
+    openclaw_result = results.get("openclaw")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
-    codex_link = obsidian_wikilink_for_path(codex_path)
-    renderer_link = obsidian_wikilink_for_path(renderer_path)
-    claude_code_link = obsidian_wikilink_for_path(claude_code_path)
-    antigravity_link = obsidian_wikilink_for_path(antigravity_path)
-    openclaw_link = obsidian_wikilink_for_path(openclaw_path)
-
-    if openclaw_transcript and openclaw_path.exists():
-        openclaw_transcript = preserve_manual_openclaw_blocks(
-            openclaw_transcript,
+    if (
+        openclaw_result
+        and openclaw_result.transcript
+        and openclaw_path.exists()
+    ):
+        openclaw_result.transcript = preserve_manual_openclaw_blocks(
+            openclaw_result.transcript,
             read_text(openclaw_path),
         )
 
     print(f"=== AI Day Preview: {target.isoformat()} ===")
     print()
 
+    codex_path = ai_trace_path_for_date(target, "codex")
     if codex_transcript:
-        print(f"  Codex trace file:                {codex_path.relative_to(ROOT)}")
-        print(f"  Codex sessions:                  {codex_session_count}")
-        print(f"  Codex messages:                  {codex_msg_count}")
-        print(f"  Journal wikilink:                - {codex_link}：Life Copilot / planning / reflection conversations.")
-    else:
-        print("  Codex:                           (no messages for this date)")
-
-    print()
-
-    if renderer_transcript:
-        print(f"  Life Claude Renderer trace file: {renderer_path.relative_to(ROOT)}")
-        print(f"  Life Claude Renderer sessions:   {renderer_session_count}")
-        print(f"  Life Claude Renderer messages:   {renderer_msg_count}")
-        print(f"  Journal wikilink:                - {renderer_link}：Obsidian-rendered Claude Code conversations.")
-    else:
-        print("  Life Claude Renderer:            (no sessions for this date)")
-
-    print()
-
-    if claude_code_transcript:
-        print(f"  Claude Code trace file:          {claude_code_path.relative_to(ROOT)}")
-        print(f"  Claude Code sessions:            {claude_code_session_count}")
-        print(f"  Claude Code messages:            {claude_code_msg_count}")
-        print(f"  Journal wikilink:                - {claude_code_link}：Native Claude Code conversations.")
-    else:
-        print("  Claude Code:                     (no native sessions for this date)")
-
-    print()
-
-    if antigravity_transcript:
-        print(f"  Antigravity trace file:          {antigravity_path.relative_to(ROOT)}")
-        print(f"  Antigravity sessions:            {antigravity_session_count}")
-        print(f"  Antigravity messages:            {antigravity_msg_count}")
-        print(f"  Journal wikilink:                - {antigravity_link}：Antigravity sessions.")
-    else:
-        print("  Antigravity:                     (no sessions for this date)")
-
-    print()
-
-    if openclaw_transcript:
-        print(f"  OpenClaw trace file:             {openclaw_path.relative_to(ROOT)}")
-        print(f"  OpenClaw direct sessions:        {openclaw_session_count}")
-        print(f"  OpenClaw direct messages:        {openclaw_msg_count}")
-        print(f"  Journal wikilink:                - {openclaw_link}：Kai / OpenClaw direct conversations.")
-    elif openclaw_warning:
-        print(f"  OpenClaw:                        (unavailable — {openclaw_warning})")
-    else:
-        print("  OpenClaw:                        (no direct Telegram/WeChat messages for this date)")
-
-    print()
-
-    web_found = False
-    if getattr(args, "web_chats", False):
-        # Preview reads the local archive only; writeback-ai-day syncs first.
-        web_index = load_web_chats_index(WEB_CHATS_DIR)
-        for provider, (source, _, label, description) in WEB_CHAT_SOURCES.items():
-            transcript, msg_count, conv_count = export_web_chat_day_transcript(provider, target)
-            last_sync = (
-                web_index.get("providers", {}).get(provider, {}).get("last_success_at") or "never"
+        print(row("Codex trace file:", str(codex_path.relative_to(ROOT))))
+        print(row("Codex sessions:", str(codex_session_count)))
+        print(row("Codex messages:", str(codex_msg_count)))
+        print(
+            row(
+                "Journal wikilink:",
+                f"- {obsidian_wikilink_for_path(codex_path)}："
+                f"{SOURCE_BY_NAME['codex'].from_kai_description}",
             )
-            name = f"{label}:"
-            if transcript:
-                web_found = True
-                web_path = ai_trace_path_for_date(target, source)
-                print(f"  {label} trace file:".ljust(35) + f"{web_path.relative_to(ROOT)}")
-                print(f"  {label} conversations:".ljust(35) + f"{conv_count}")
-                print(f"  {label} messages:".ljust(35) + f"{msg_count}")
-                print("  Journal wikilink:".ljust(35) + f"- {obsidian_wikilink_for_path(web_path)}：{description}")
-            else:
-                print(f"  {name}".ljust(35) + "(no messages for this date in the local archive)")
-            print("  Last web sync:".ljust(35) + last_sync)
+        )
+    else:
+        print(row("Codex:", SOURCE_BY_NAME["codex"].preview_empty))
+    print()
+
+    for spec in SOURCES:
+        if spec.name in {"codex", *WEB_SOURCE_NAMES}:
+            continue
+        print_source(spec, results[spec.name])
+        print()
+
+    if include_web:
+        web_index = load_web_chats_index(WEB_CHATS_DIR)
+        for provider, (source, _, _, _) in WEB_CHAT_SOURCES.items():
+            spec = SOURCE_BY_NAME[source]
+            result = results.get(source, SourceResult("empty"))
+            last_sync = (
+                web_index.get("providers", {}).get(provider, {}).get("last_success_at")
+                or "never"
+            )
+            print_source(spec, result)
+            print(row("Last web sync:", last_sync))
             print()
 
     if jp.exists():
-        print(f"  Journal file:                    {jp.relative_to(ROOT)} (exists)")
+        print(row("Journal file:", f"{jp.relative_to(ROOT)} (exists)"))
     else:
-        print(f"  Journal file:                    {jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)")
+        print(row("Journal file:", f"{jp.relative_to(ROOT)} (NOT FOUND — writeback will skip)"))
 
-    if (
-        not codex_transcript
-        and not renderer_transcript
-        and not claude_code_transcript
-        and not antigravity_transcript
-        and not openclaw_transcript
-        and not web_found
-    ):
+    found = any(
+        result.message_count > 0
+        if SOURCE_BY_NAME[name].preview_kind == "cache"
+        else bool(result.transcript)
+        for name, result in results.items()
+    )
+    if not found:
         print("\n  No AI conversations found for this date.")
 
 
@@ -8009,6 +8010,391 @@ def web_chat_day_source_records(
     return records
 
 
+# ---------------------------------------------------------------------------
+# Source registry
+# ---------------------------------------------------------------------------
+# One object per daily source: its labels, its pull, its optionality and its
+# From Kai bullet. The registry order is the trace-writing order and the From
+# Kai bullet order, so adding a source is one entry (plus a pull function for a
+# new family) instead of the same edit in ten lists.
+
+@dataclass
+class SourceOptions:
+    pull_openclaw: bool = True
+    allow_missing_openclaw: bool = False
+    pull_zshs: bool = False
+    zshs_respect_cooldown: bool = True
+    web_chats: bool = False
+
+
+@dataclass
+class SourceResult:
+    status: str  # pulled | empty | skipped | unavailable
+    transcript: str = ""
+    records: List[SourceRecord] = field(default_factory=list)
+    detail: str = ""
+    trace_path: Optional[Path] = None
+    message_count: int = 0
+    session_count: int = 0
+    _records_loader: Optional[Callable[[], List[SourceRecord]]] = None
+
+    def load_records(self) -> List[SourceRecord]:
+        """Read the source records the trace guard needs, once and only if needed."""
+        if self._records_loader is not None:
+            self.records = list(self._records_loader())
+            self._records_loader = None
+        return self.records
+
+
+@dataclass
+class SourceGroupResult:
+    status: str
+    detail: str = ""
+    results: Dict[str, SourceResult] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    name: str
+    assistant: str
+    heading: str
+    trace_title: str
+    from_kai_description: str
+    pull: Optional[Callable[[date, SourceOptions], SourceResult]] = None
+    required: bool = False
+    missing_flag: str = ""
+    frontmatter: Tuple[str, ...] = ()
+    group: str = ""
+    preview_kind: str = "pull"  # pull | cache (zshs; never opens SSH) | web
+    preview_label: str = ""
+    preview_counts: Tuple[str, str] = ("sessions", "messages")
+    preview_empty: str = "(no messages for this date)"
+    records: Optional[Callable[[date], List[SourceRecord]]] = None
+
+    def records_for(self, day: date) -> Callable[[], List[SourceRecord]]:
+        reader = self.records
+        if reader is None:
+            return lambda: []
+        return lambda: reader(day)
+
+
+def pull_codex(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    transcript = export_codex_day_transcript(target).strip()
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        _records_loader=lambda: codex_day_source_records(target),
+    )
+
+
+def pull_life_claude_renderer(
+    target: date, options: Optional[SourceOptions] = None
+) -> SourceResult:
+    transcript, messages, sessions = export_life_claude_renderer_day_transcript(target)
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        message_count=messages,
+        session_count=sessions,
+        _records_loader=lambda: life_claude_renderer_day_source_records(target),
+    )
+
+
+def pull_claude_code(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    transcript, messages, sessions = export_claude_code_day_transcript(target)
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        message_count=messages,
+        session_count=sessions,
+        _records_loader=lambda: claude_code_day_source_records(target),
+    )
+
+
+def pull_antigravity(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    transcript, messages, sessions = export_antigravity_day_transcript(target)
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        message_count=messages,
+        session_count=sessions,
+        _records_loader=lambda: antigravity_day_source_records(target),
+    )
+
+
+def pull_openclaw(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    options = options or SourceOptions()
+    if not options.pull_openclaw:
+        return SourceResult("skipped")
+    retained: List[Tuple[str, str]] = []
+    transcript, messages, sessions = export_openclaw_day_transcript(target, retained=retained)
+    return SourceResult(
+        status="pulled",
+        transcript=transcript,
+        message_count=messages,
+        session_count=sessions,
+        _records_loader=lambda: openclaw_day_source_records(target, retained),
+    )
+
+
+def pull_zshs_codex(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    transcript = export_zshs_codex_day_transcript(target)
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        _records_loader=lambda: zshs_codex_day_source_records(target),
+    )
+
+
+def pull_zshs_claude_code(
+    target: date, options: Optional[SourceOptions] = None
+) -> SourceResult:
+    transcript, messages, sessions = export_zshs_claude_code_day_transcript(target)
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        message_count=messages,
+        session_count=sessions,
+        _records_loader=lambda: zshs_claude_code_day_source_records(target),
+    )
+
+
+def pull_zshs_catpaw(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+    transcript, messages, sessions = export_zshs_catpaw_day_transcript(target)
+    return SourceResult(
+        status="pulled" if transcript else "empty",
+        transcript=transcript,
+        message_count=messages,
+        session_count=sessions,
+        _records_loader=lambda: zshs_catpaw_day_source_records(target),
+    )
+
+
+def pull_zshs_group(target: date, options: SourceOptions) -> SourceGroupResult:
+    """Pull the optional internship host once for all three zshs sources."""
+    members = ZSHS_SOURCE_SPECS
+    if not options.pull_zshs:
+        return SourceGroupResult(
+            "skipped",
+            results={spec.name: SourceResult("skipped") for spec in members},
+        )
+    try:
+        sync = zshs_sync_day(target, respect_cooldown=options.zshs_respect_cooldown)
+    except ZshsImportUnavailable as exc:
+        detail = str(exc)
+        print(
+            "  warning: zshs unavailable; skipped the internship-host "
+            f"Codex/Claude Code records for {target.isoformat()} ({exc})"
+        )
+        return SourceGroupResult(
+            "unavailable",
+            detail=detail,
+            results={
+                spec.name: SourceResult("unavailable", detail=detail) for spec in members
+            },
+        )
+    results = {
+        spec.name: spec.pull(target, options)  # type: ignore[misc]
+        for spec in members
+    }
+    return SourceGroupResult(str(sync.get("status") or "empty"), results=results)
+
+
+def pull_web_chat(provider: str) -> Callable[[date, SourceOptions], SourceResult]:
+    def pull(target: date, options: Optional[SourceOptions] = None) -> SourceResult:
+        transcript, messages, conversations = export_web_chat_day_transcript(provider, target)
+        return SourceResult(
+            status="pulled" if transcript else "empty",
+            transcript=transcript,
+            message_count=messages,
+            session_count=conversations,
+            _records_loader=lambda: web_chat_day_source_records(provider, target),
+        )
+
+    return pull
+
+
+def web_chat_source_spec(provider: str) -> SourceSpec:
+    source, assistant, label, description = WEB_CHAT_SOURCES[provider]
+    return SourceSpec(
+        name=source,
+        assistant=assistant,
+        heading=f"{label} Conversation",
+        trace_title=f"{label} Trace",
+        from_kai_description=description,
+        pull=pull_web_chat(provider),
+        required=provider == "chatgpt",
+        missing_flag="--allow-missing-web-chats",
+        preview_kind="web",
+        preview_label=label,
+        preview_counts=("conversations", "messages"),
+        preview_empty="(no messages for this date in the local archive)",
+    )
+
+
+SOURCES: Tuple[SourceSpec, ...] = (
+    SourceSpec(
+        "codex", "Codex", "Codex Thread", "Codex Trace",
+        "Life Copilot / planning / reflection conversations.",
+        pull=pull_codex,
+        preview_label="Codex",
+        records=codex_day_source_records,
+    ),
+    SourceSpec(
+        "life-claude-renderer", "Claude", "Life Claude Renderer Session",
+        "Life Claude Renderer Trace", "Obsidian-rendered Claude Code conversations.",
+        pull=pull_life_claude_renderer,
+        preview_label="Life Claude Renderer",
+        preview_empty="(no sessions for this date)",
+        records=life_claude_renderer_day_source_records,
+    ),
+    SourceSpec(
+        "claude-code", "Claude", "Claude Code Session", "Claude Code Trace",
+        "Native Claude Code conversations.",
+        pull=pull_claude_code,
+        preview_label="Claude Code",
+        preview_empty="(no native sessions for this date)",
+        records=claude_code_day_source_records,
+    ),
+    SourceSpec(
+        "antigravity", "Antigravity", "Antigravity Session", "Antigravity Trace",
+        "Antigravity sessions.",
+        pull=pull_antigravity,
+        preview_label="Antigravity",
+        preview_empty="(no sessions for this date)",
+        records=antigravity_day_source_records,
+    ),
+    SourceSpec(
+        "openclaw", "Kai", "Kai / Telegram Session",
+        "Kai / OpenClaw Direct-Message Trace", "Kai / OpenClaw direct conversations.",
+        pull=pull_openclaw,
+        required=True,
+        missing_flag="--allow-missing-openclaw",
+        frontmatter=("channels: telegram, openclaw-weixin",),
+        preview_label="OpenClaw",
+        preview_counts=("direct sessions", "direct messages"),
+        preview_empty="(no direct Telegram/WeChat messages for this date)",
+    ),
+    SourceSpec(
+        "zshs-codex", "Codex", "zshs Codex Thread", "zshs Codex Trace",
+        "Codex conversations on the internship host (zshs).",
+        pull=pull_zshs_codex,
+        frontmatter=("host: zshs",),
+        group="zshs",
+        preview_kind="cache",
+        preview_label="zshs Codex",
+        preview_empty="(not cached for this date)",
+        records=zshs_codex_day_source_records,
+    ),
+    SourceSpec(
+        "zshs-claude-code", "Claude", "zshs Claude Code Session", "zshs Claude Code Trace",
+        "Claude Code conversations on the internship host (zshs).",
+        pull=pull_zshs_claude_code,
+        frontmatter=("host: zshs",),
+        group="zshs",
+        preview_kind="cache",
+        preview_label="zshs Claude Code",
+        preview_empty="(not cached for this date)",
+        records=zshs_claude_code_day_source_records,
+    ),
+    SourceSpec(
+        "zshs-catpaw", "CatPaw", "zshs CatPaw Session", "zshs CatPaw Trace",
+        "CatPaw (Miaoshou) conversations on the internship host (zshs).",
+        pull=pull_zshs_catpaw,
+        frontmatter=("host: zshs",),
+        group="zshs",
+        preview_kind="cache",
+        preview_label="zshs CatPaw",
+        preview_empty="(not cached for this date)",
+        records=zshs_catpaw_day_source_records,
+    ),
+    *(web_chat_source_spec(provider) for provider in WEB_CHAT_SOURCES),
+)
+SOURCE_BY_NAME: Dict[str, SourceSpec] = {spec.name: spec for spec in SOURCES}
+ZSHS_SOURCE_SPECS: Tuple[SourceSpec, ...] = tuple(
+    spec for spec in SOURCES if spec.group == "zshs"
+)
+WEB_SOURCE_SPECS: Tuple[SourceSpec, ...] = tuple(
+    spec for spec in SOURCES if spec.preview_kind == "web"
+)
+WEB_SOURCE_NAMES = frozenset(spec.name for spec in WEB_SOURCE_SPECS)
+GROUP_PULLS: Dict[str, Callable[[date, SourceOptions], SourceGroupResult]] = {
+    "zshs": pull_zshs_group,
+}
+
+
+def collect_source_results(
+    target: date,
+    options: SourceOptions,
+    *,
+    skip: Tuple[str, ...] = (),
+) -> Tuple[Dict[str, SourceResult], Dict[str, SourceGroupResult]]:
+    """Pull every active source once, in registry order.
+
+    Required sources raise when their ``--allow-missing-*`` flag was not given;
+    optional sources come back as ``unavailable`` with one printed warning.
+    Web providers only join when this run synced web chats, as before.
+    """
+    results: Dict[str, SourceResult] = {}
+    groups: Dict[str, SourceGroupResult] = {}
+    for spec in SOURCES:
+        if spec.name in skip:
+            continue
+        if spec.group:
+            if spec.group in groups:
+                continue
+            group = GROUP_PULLS[spec.group](target, options)
+            groups[spec.group] = group
+            results.update(group.results)
+            continue
+        if spec.name in WEB_SOURCE_NAMES and not options.web_chats:
+            continue
+        if spec.pull is None:
+            continue
+        try:
+            results[spec.name] = spec.pull(target, options)
+        except OpenClawImportUnavailable as exc:
+            if spec.required and not options.allow_missing_openclaw:
+                raise OpenClawImportUnavailable(
+                    "OpenClaw/Kai is required for AI-day writeback; no partial "
+                    "writeback was performed. Restore the Tailscale/SSH link, or "
+                    "explicitly pass --allow-missing-openclaw if the incomplete "
+                    "archive is intentional. "
+                    f"Cause: {exc}"
+                ) from exc
+            print(
+                "  warning: OpenClaw unavailable; intentionally skipped Kai / "
+                f"direct-message trace because --allow-missing-openclaw was set ({exc})"
+            )
+            results[spec.name] = SourceResult("unavailable", detail=str(exc))
+    return results, groups
+
+
+def preview_cached_zshs(spec: SourceSpec, target: date) -> SourceResult:
+    """Preview zshs from the last cached trace only; never opens SSH."""
+    path = ai_trace_path_for_date(target, spec.name)
+    if not path.exists():
+        return SourceResult("empty", detail="not cached")
+    try:
+        text = read_text(path)
+        stat = path.stat()
+    except OSError:
+        return SourceResult("empty", detail="not cached")
+    sessions = sum(1 for line in text.split("\n") if TRACE_SESSION_HEADING_RE.match(line))
+    messages = sum(1 for line in text.split("\n") if TRACE_MESSAGE_RE.match(line))
+    detail = (
+        f"cached, {stat.st_size:,} bytes, "
+        f"updated {datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')}"
+    )
+    return SourceResult(
+        "pulled" if messages else "empty",
+        transcript=text,
+        detail=detail,
+        message_count=messages,
+        session_count=sessions,
+    )
+
+
 # Day timeline: every conversation of a day on one time axis. A trace holds one
 # source, session after session, so what ran side by side and when nothing ran
 # only shows once the day's messages are put in time order. WeChat messages
@@ -8482,7 +8868,17 @@ def writeback_ai_day(
     if update_journal and not jp.exists():
         write_text(jp, render_diary_from_template(target))
 
-    codex_transcript = export_codex_day_transcript(target).strip()
+    options = SourceOptions(
+        pull_openclaw=pull_openclaw,
+        allow_missing_openclaw=allow_missing_openclaw,
+        pull_zshs=pull_zshs,
+        zshs_respect_cooldown=zshs_respect_cooldown,
+        web_chats=web_chats,
+    )
+    # Codex is pulled first: delayed hook turns are folded into its transcript
+    # before the rest of the registry is read.
+    codex_result = pull_codex(target, options)
+    codex_transcript = codex_result.transcript
     # Keep delayed turns from other concurrent finalizers. Once every message
     # in a fallback block appears in the real rollout export, the block drops
     # out automatically on the next refresh.
@@ -8517,53 +8913,28 @@ def writeback_ai_day(
         warn_if_oversized_codex_transcript(
             codex_transcript, f"Codex trace for {target.isoformat()}"
         )
-    renderer_transcript, _, _ = export_life_claude_renderer_day_transcript(target)
-    claude_code_transcript, _, _ = export_claude_code_day_transcript(target)
-    antigravity_transcript, _, _ = export_antigravity_day_transcript(target)
-    openclaw_retained: List[Tuple[str, str]] = []
-    openclaw_status = "pulled"
-    try:
-        if pull_openclaw:
-            openclaw_transcript, _, _ = export_openclaw_day_transcript(target, retained=openclaw_retained)
-        else:
-            openclaw_transcript, openclaw_status = "", "skipped"
-    except OpenClawImportUnavailable as exc:
-        if not allow_missing_openclaw:
-            raise OpenClawImportUnavailable(
-                "OpenClaw/Kai is required for AI-day writeback; no partial "
-                "writeback was performed. Restore the Tailscale/SSH link, or "
-                "explicitly pass --allow-missing-openclaw if the incomplete "
-                "archive is intentional. "
-                f"Cause: {exc}"
-            ) from exc
-        openclaw_transcript, openclaw_status = "", "unavailable"
-        print(
-            "  warning: OpenClaw unavailable; intentionally skipped Kai / "
-            f"direct-message trace because --allow-missing-openclaw was set ({exc})"
-        )
-    zshs_status = "skipped"
-    zshs_detail = ""
-    zshs_codex_transcript = ""
-    zshs_claude_transcript = ""
-    zshs_catpaw_transcript = ""
-    if pull_zshs:
-        try:
-            zshs_result = zshs_sync_day(target, respect_cooldown=zshs_respect_cooldown)
-            zshs_status = str(zshs_result["status"])
-        except ZshsImportUnavailable as exc:
-            zshs_status, zshs_detail = "unavailable", str(exc)
-            print(
-                "  warning: zshs unavailable; skipped the internship-host "
-                f"Codex/Claude Code records for {target.isoformat()} ({exc})"
-            )
-        if zshs_status in {"pulled", "empty"}:
-            zshs_codex_transcript = export_zshs_codex_day_transcript(target)
-            zshs_claude_transcript, _, _ = export_zshs_claude_code_day_transcript(target)
-            zshs_catpaw_transcript, _, _ = export_zshs_catpaw_day_transcript(target)
+    codex_result.transcript = codex_transcript
+    codex_result.status = "pulled" if codex_transcript else "empty"
+
+    collected, group_results = collect_source_results(
+        target, options, skip=("codex",)
+    )
+    results: Dict[str, SourceResult] = {"codex": codex_result, **collected}
+    openclaw_result = results.get("openclaw", SourceResult("skipped"))
+    zshs_group = group_results.get("zshs", SourceGroupResult("skipped"))
+    zshs_status = zshs_group.status
+    zshs_detail = zshs_group.detail
+    zshs_codex_transcript = results["zshs-codex"].transcript
+    zshs_claude_transcript = results["zshs-claude-code"].transcript
+    zshs_catpaw_transcript = results["zshs-catpaw"].transcript
+    openclaw_transcript = openclaw_result.transcript
+    renderer_transcript = results["life-claude-renderer"].transcript
+    claude_code_transcript = results["claude-code"].transcript
+    antigravity_transcript = results["antigravity"].transcript
     web_transcripts: Dict[str, str] = {}
     if web_chats:
-        for provider in WEB_CHAT_SOURCES:
-            web_transcripts[provider], _, _ = export_web_chat_day_transcript(provider, target)
+        for provider, (source, _, _, _) in WEB_CHAT_SOURCES.items():
+            web_transcripts[provider] = results.get(source, SourceResult("empty")).transcript
 
     wechat_result = wechat_import.import_exports(ROOT)
     for warning in wechat_result['warnings']:
@@ -8592,78 +8963,47 @@ def writeback_ai_day(
             f"found for date: {target.isoformat()}"
         )
 
-    codex_path = ai_trace_path_for_date(target, "codex")
-    renderer_path = ai_trace_path_for_date(target, "life-claude-renderer")
-    claude_code_path = ai_trace_path_for_date(target, "claude-code")
-    antigravity_path = ai_trace_path_for_date(target, "antigravity")
     openclaw_path = ai_trace_path_for_date(target, "openclaw")
-    zshs_codex_path = ai_trace_path_for_date(target, "zshs-codex")
-    zshs_claude_path = ai_trace_path_for_date(target, "zshs-claude-code")
-    zshs_catpaw_path = ai_trace_path_for_date(target, "zshs-catpaw")
-    codex_link = obsidian_wikilink_for_path(codex_path)
-    renderer_link = obsidian_wikilink_for_path(renderer_path)
-    claude_code_link = obsidian_wikilink_for_path(claude_code_path)
-    antigravity_link = obsidian_wikilink_for_path(antigravity_path)
-    openclaw_link = obsidian_wikilink_for_path(openclaw_path)
-    zshs_codex_link = obsidian_wikilink_for_path(zshs_codex_path)
-    zshs_claude_link = obsidian_wikilink_for_path(zshs_claude_path)
-    zshs_catpaw_link = obsidian_wikilink_for_path(zshs_catpaw_path)
-
     if openclaw_transcript and openclaw_path.exists():
         openclaw_transcript = preserve_manual_openclaw_blocks(
             openclaw_transcript,
             read_text(openclaw_path),
         )
+        openclaw_result.transcript = openclaw_transcript
 
-    # (source, path, title, extra frontmatter, transcript, source records)
-    traces: List[Tuple[str, Path, str, List[str], str, Callable[[], List[SourceRecord]]]] = [
-        ("codex", codex_path, "Codex Trace", [], codex_transcript,
-         lambda: codex_day_source_records(target)),
-        ("life-claude-renderer", renderer_path, "Life Claude Renderer Trace", [], renderer_transcript,
-         lambda: life_claude_renderer_day_source_records(target)),
-        ("claude-code", claude_code_path, "Claude Code Trace", [], claude_code_transcript,
-         lambda: claude_code_day_source_records(target)),
-        ("antigravity", antigravity_path, "Antigravity Trace", [], antigravity_transcript,
-         lambda: antigravity_day_source_records(target)),
-        ("openclaw", openclaw_path, "Kai / OpenClaw Direct-Message Trace",
-         ["channels: telegram, openclaw-weixin"], openclaw_transcript,
-         lambda: openclaw_day_source_records(target, openclaw_retained)),
-        ("zshs-codex", zshs_codex_path, "zshs Codex Trace", ["host: zshs"],
-         zshs_codex_transcript, lambda: zshs_codex_day_source_records(target)),
-        ("zshs-claude-code", zshs_claude_path, "zshs Claude Code Trace", ["host: zshs"],
-         zshs_claude_transcript, lambda: zshs_claude_code_day_source_records(target)),
-        ("zshs-catpaw", zshs_catpaw_path, "zshs CatPaw Trace", ["host: zshs"],
-         zshs_catpaw_transcript, lambda: zshs_catpaw_day_source_records(target)),
-    ]
-    web_paths: Dict[str, Path] = {}
-    for provider, (source, _, label, _) in WEB_CHAT_SOURCES.items():
-        if not web_transcripts.get(provider):
+    traces: List[Tuple[SourceSpec, Path, SourceResult]] = []
+    for spec in SOURCES:
+        result = results.get(spec.name)
+        if result is None or not result.transcript:
             continue
-        web_paths[provider] = ai_trace_path_for_date(target, source)
-        traces.append((
-            source, web_paths[provider], f"{label} Trace", [], web_transcripts[provider],
-            lambda provider=provider: web_chat_day_source_records(provider, target),
-        ))
+        path = ai_trace_path_for_date(target, spec.name)
+        result.trace_path = path
+        traces.append((spec, path, result))
+
     kept_lost_messages: Dict[str, int] = {}
-    for source, path, title, extra, transcript, records in traces:
-        if not transcript:
-            continue
+    for spec, path, result in traces:
         header = [
             "---",
             f"date: {target.isoformat()}",
-            f"source: {source}",
-            *extra,
+            f"source: {spec.name}",
+            *spec.frontmatter,
             "generated_by: scripts/copilot.py writeback-ai-day",
             "---",
             "",
-            f"# {target.isoformat()} {title}",
+            f"# {target.isoformat()} {spec.trace_title}",
             "",
         ]
         kept = write_ai_trace(
-            path, header, transcript, source, records, force=force, skip_unchanged=skip_unchanged
+            path,
+            header,
+            result.transcript,
+            spec.name,
+            result.load_records,
+            force=force,
+            skip_unchanged=skip_unchanged,
         )
         if kept:
-            kept_lost_messages[source] = kept
+            kept_lost_messages[spec.name] = kept
     # The timeline is derived from the traces just written; it must never fail the archive.
     try:
         timeline_path = write_day_timeline(target)
@@ -8677,63 +9017,16 @@ def writeback_ai_day(
         for day in wechat_result['days']:
             sync_wechat_journal_index(date.fromisoformat(day))
         journal_text = read_text(jp)
-        if codex_transcript:
+        for spec, path, _result in traces:
             journal_text = ensure_single_from_kai_link(
                 journal_text,
-                codex_link,
-                "Life Copilot / planning / reflection conversations.",
-            )
-        if renderer_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                renderer_link,
-                "Obsidian-rendered Claude Code conversations.",
-            )
-        if claude_code_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                claude_code_link,
-                "Native Claude Code conversations.",
-            )
-        if antigravity_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                antigravity_link,
-                "Antigravity sessions.",
-            )
-        if openclaw_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                openclaw_link,
-                "Kai / OpenClaw direct conversations.",
-            )
-        if zshs_codex_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                zshs_codex_link,
-                "Codex conversations on the internship host (zshs).",
-            )
-        if zshs_claude_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                zshs_claude_link,
-                "Claude Code conversations on the internship host (zshs).",
-            )
-        if zshs_catpaw_transcript:
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                zshs_catpaw_link,
-                "CatPaw (Miaoshou) conversations on the internship host (zshs).",
-            )
-        for provider, web_path in web_paths.items():
-            journal_text = ensure_single_from_kai_link(
-                journal_text,
-                obsidian_wikilink_for_path(web_path),
-                WEB_CHAT_SOURCES[provider][3],
+                obsidian_wikilink_for_path(path),
+                spec.from_kai_description,
             )
         write_text(jp, journal_text)
         print(f"  updated: {jp.relative_to(ROOT)}")
 
+    codex_path = ai_trace_path_for_date(target, "codex")
     trace_text = read_text(codex_path) if codex_transcript else ""
     if hook_payload:
         missing: List[str] = []
@@ -8748,23 +9041,30 @@ def writeback_ai_day(
             raise ValueError(
                 "Final trace verification failed: " + ", ".join(missing)
             )
+
+    def written_trace(name: str) -> str:
+        result = results.get(name)
+        if result is None or not result.transcript or result.trace_path is None:
+            return ""
+        return str(result.trace_path)
+
     return {
         "journal": str(jp) if update_journal else "",
-        "openclaw_status": openclaw_status,
-        "codex_trace": str(codex_path) if codex_transcript else "",
-        "claude_code_trace": str(claude_code_path) if claude_code_transcript else "",
-        "renderer_trace": str(renderer_path) if renderer_transcript else "",
-        "antigravity_trace": str(antigravity_path) if antigravity_transcript else "",
-        "openclaw_trace": str(openclaw_path) if openclaw_transcript else "",
+        "openclaw_status": openclaw_result.status,
+        "codex_trace": written_trace("codex"),
+        "claude_code_trace": written_trace("claude-code"),
+        "renderer_trace": written_trace("life-claude-renderer"),
+        "antigravity_trace": written_trace("antigravity"),
+        "openclaw_trace": written_trace("openclaw"),
         "zshs_status": zshs_status,
         "zshs_detail": zshs_detail,
-        "zshs_codex_trace": str(zshs_codex_path) if zshs_codex_transcript else "",
-        "zshs_claude_code_trace": str(zshs_claude_path) if zshs_claude_transcript else "",
-        "zshs_catpaw_trace": str(zshs_catpaw_path) if zshs_catpaw_transcript else "",
-        "claude_web_trace": str(web_paths["claude"]) if "claude" in web_paths else "",
-        "chatgpt_web_trace": str(web_paths["chatgpt"]) if "chatgpt" in web_paths else "",
-        "deepseek_web_trace": str(web_paths["deepseek"]) if "deepseek" in web_paths else "",
-        "gemini_web_trace": str(web_paths["gemini"]) if "gemini" in web_paths else "",
+        "zshs_codex_trace": written_trace("zshs-codex"),
+        "zshs_claude_code_trace": written_trace("zshs-claude-code"),
+        "zshs_catpaw_trace": written_trace("zshs-catpaw"),
+        "claude_web_trace": written_trace("claude-web"),
+        "chatgpt_web_trace": written_trace("chatgpt-web"),
+        "deepseek_web_trace": written_trace("deepseek-web"),
+        "gemini_web_trace": written_trace("gemini-web"),
         "timeline": str(timeline_path) if timeline_path else "",
         "wechat": wechat_result,
         "fallback_used": fallback_used,
