@@ -151,5 +151,58 @@ class RateLimitRetryTest(unittest.TestCase):
         self.assertIn("DONE [image generation failed: http 429 Too Many Requests]", err.getvalue())
 
 
+class DraftAndUseImageTest(unittest.TestCase):
+    """`paint-day --draft-out` paints without touching the diary; `--use-image` embeds without repainting."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.journal_dir = self.tmp / "journal"
+        jp = self.journal_dir / "2026" / "11" / "2026-11-18.md"
+        jp.parent.mkdir(parents=True)
+        jp.write_text("# 2026-11-18\n\n## What Life Copilot Said\n\nhello\n", encoding="utf-8")
+        self.jp = jp
+        self.brief = self.tmp / "brief.md"
+        self.brief.write_text("## Reading\n一片清灰。\n\n## Prompt\nA quiet grey wash.\n", encoding="utf-8")
+        p = patch.object(copilot, "JOURNAL_DIR", self.journal_dir)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _ns(self, **kwargs):
+        defaults = dict(date=None, input_file=str(self.brief), draft_out=None, use_image=None, force=False, dry_run=False)
+        defaults.update(kwargs)
+        return type("Args", (), defaults)()
+
+    def test_draft_out_does_not_touch_diary_or_paintings(self):
+        fake_src = self.tmp / "codex-gen.png"
+        fake_src.write_bytes(b"png-bytes-1")
+        draft = self.tmp / "out" / "draft-1.png"
+        with patch.object(copilot, "generate_image_with_codex", return_value=fake_src) as gen, redirect_stderr(StringIO()):
+            copilot.cmd_paint_day(self._ns(draft_out=str(draft)))
+        gen.assert_called_once_with("A quiet grey wash.")
+        self.assertEqual(draft.read_bytes(), b"png-bytes-1")
+        self.assertFalse((self.journal_dir / "paintings").exists())
+        self.assertNotIn("Colour of the Day", self.jp.read_text(encoding="utf-8"))
+
+    def test_use_image_embeds_without_calling_codex(self):
+        draft = self.tmp / "draft-1.png"
+        draft.write_bytes(b"png-bytes-2")
+        with patch.object(copilot, "generate_image_with_codex") as gen:
+            copilot.cmd_paint_day(self._ns(date="2026-11-18", use_image=str(draft)))
+        gen.assert_not_called()
+        final_img = self.journal_dir / "paintings" / "2026" / "11" / "2026-11-18-colour.png"
+        self.assertEqual(final_img.read_bytes(), b"png-bytes-2")
+        self.assertIn("![Colour of the Day](../../paintings/2026/11/2026-11-18-colour.png)", self.jp.read_text(encoding="utf-8"))
+        brief_saved = (self.journal_dir / "paintings" / "2026" / "11" / "2026-11-18-colour-prompt.md").read_text(encoding="utf-8")
+        self.assertIn("一片清灰。", brief_saved)
+        self.assertIn("A quiet grey wash.", brief_saved)
+
+    def test_mutually_exclusive_and_date_guard(self):
+        with self.assertRaises(ValueError):
+            copilot.cmd_paint_day(self._ns(draft_out="a.png", use_image="b.png"))
+        with self.assertRaises(ValueError):
+            copilot.cmd_paint_day(self._ns(use_image="b.png"))
+
+
 if __name__ == "__main__":
     unittest.main()

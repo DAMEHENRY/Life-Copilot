@@ -7207,11 +7207,28 @@ def paint_once_with_codex(prompt: str, timeout: int) -> Path:
 
 
 def cmd_paint_day(args: argparse.Namespace) -> None:
+    if args.draft_out and args.use_image:
+        raise ValueError("cannot combine --draft-out and --use-image")
+    reading, prompt = split_colour_brief(read_text(Path(args.input_file)))
+
+    if args.draft_out:
+        draft_path = Path(args.draft_out).expanduser()
+        if args.dry_run:
+            print(f"would paint draft {draft_path}\n--- prompt ---\n{prompt}")
+            return
+        source = generate_image_with_codex(prompt)
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, draft_path)
+        print(f"source: {source}", file=sys.stderr)
+        print(str(draft_path))
+        return
+
+    if not args.date:
+        raise ValueError("--date is required unless --draft-out is specified")
     target = parse_date_str(args.date)
     jp = journal_path_for_date(target)
     if not jp.exists():
         raise FileNotFoundError(f"Journal not found: {jp}")
-    reading, prompt = split_colour_brief(read_text(Path(args.input_file)))
 
     out_dir = JOURNAL_DIR / "paintings" / target.strftime("%Y") / target.strftime("%m")
     image_path = out_dir / f"{target.isoformat()}-colour.png"
@@ -7219,11 +7236,19 @@ def cmd_paint_day(args: argparse.Namespace) -> None:
     if image_path.exists() and not args.force:
         raise FileExistsError(f"{image_path} exists; pass --force to paint again")
 
-    if args.dry_run:
-        print(f"would paint {image_path}\n--- prompt ---\n{prompt}")
-        return
+    if args.use_image:
+        source = Path(args.use_image).expanduser().resolve()
+        if not source.exists():
+            raise FileNotFoundError(f"Image not found: {source}")
+        if args.dry_run:
+            print(f"would embed {source} as {image_path}\n--- prompt ---\n{prompt}")
+            return
+    else:
+        if args.dry_run:
+            print(f"would paint {image_path}\n--- prompt ---\n{prompt}")
+            return
+        source = generate_image_with_codex(prompt)
 
-    source = generate_image_with_codex(prompt)
     out_dir.mkdir(parents=True, exist_ok=True)
     if image_path.exists():
         image_path.rename(image_path.with_name(f"{image_path.stem}-{datetime.now():%Y%m%d%H%M%S}.png"))
@@ -10736,8 +10761,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_writeback_journal)
 
     s = sub.add_parser("paint-day", help="Have Codex paint the day's colour from a brief and embed it in the diary.")
-    s.add_argument("--date", required=True)
+    s.add_argument("--date", help="Target diary date (YYYY-MM-DD); required unless --draft-out is used.")
     s.add_argument("--input-file", required=True, help="Brief: an optional `## Reading`, then `## Prompt` (sent verbatim).")
+    s.add_argument("--draft-out", help="Generate the PNG to this path without touching journal/paintings or the diary.")
+    s.add_argument("--use-image", help="Embed an already-generated PNG into the diary without calling image_gen again.")
     s.add_argument("--force", action="store_true", help="Paint again; the old image is kept with a timestamp suffix.")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_paint_day)
