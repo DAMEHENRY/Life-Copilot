@@ -138,7 +138,7 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 
 **Tomorrow Projection：**
 - 单独用 `writeback-daily-suggestion` 将目标日方向写入 `## 🧭 Daily Suggestion`（不混入 `What Life Copilot Said`；用目标日语态「今天/today」，保留 Provenance 行，不碰 `quant/roadmap.md`）。若当日偶有已填数值的 legacy quant feedback 节，可短提一句转入 Quant Mode。
-- **与 inbox / 日历提醒联动**：在 Inbox Audit（第 4 步）与 Calendar & Reminders Audit（第 4.5 步）后写入，基于实际收尾状态；已进 Calendar / `Backlog` 的硬日程与截止不再整条抄进 `Daily Suggestion`，只留主线聚焦、节奏与留白。
+- **与 inbox / 日历 / Life Board 待审联动**：在 Inbox（第 4 步）与 Calendar/Reminders（第 4.5 步）后写入；已入 Calendar / `Backlog` 的硬日程不整条抄入，只留主线与留白。若当晚新存了 `journal/life-board-pending-patch.md`（或已有待审补丁有新增 / 满 3 天未处理），用 1 句轻提待确认轨道并链到 `[[journal/life-board-pending-patch|Life Board 待确认补丁]]`（不连续每天催促）。
 
 # Completion Contract（默认收尾流程）
 
@@ -148,7 +148,9 @@ Diary Mode 是带持久化副作用的完整分析工作流，只有以下明确
 1. **Analysis Writeback**：将关系性回应写入 `## What Life Copilot Said`。正文只包含真正对 Henry 的回应；不包含 memory audit、维护状态、工具日志、Board/inbox 报告，也不强制包含历史锚点或微行动。必须先写临时文件，再调用 `writeback-journal`；禁止用 `writeback-thought` 写 Copilot 回应。
 1.5. **Colour of the Day**：按 `prompts/day-colour.md` 后台运行 `paint-day`。
 2. **Automatic Memory Maintenance**：在后台完成 `no-op / add / replace / promote / archive / conflict` 判断。先生成临时 JSON，运行 `maintain-memory --dry-run`，校验通过后正式执行并回读。no-op 静默；实际改变只在最终执行说明中简短报告，不进入关系性正文。当天证据碰到已有人物页的人时，在这一步一并维护那一页，做法按 `journal/people/00-index.md`：有轨迹的页写当天那一节，没有的整页重写；先 `maintain-page --dry-run` 校验，再正式写入；没有新证据就 no-op。
-3. **Life Board Audit Gate**：运行 `audit-life-board`。若为 `needs_audit`，只提出最小 patch；未经 Henry 确认不修改 Board。
+3. **Life Board Audit Gate**：运行 `audit-life-board`（查全局 7 天、单条 `active`/`waiting` 轨超 14 天、体积超 24 KB 及未审补丁）。即使返回 `no_audit_needed`，也须结合当天证据做**事件驱动检查**：有规则/截止日变更、里程碑锁版或完成、窗口过期、定位转向或直接冲突时，提最小 patch；未经 Henry 确认**绝不直接改 `life-board.md`**。
+   - 有新提议时，写临时文件并运行 `stage-life-board-patch --date YYYY-MM-DD --input-file <tmp>` 存至 `journal/life-board-pending-patch.md`（已有待审补丁则合并）；确认后用 `writeback-life-board` 写回（自动清空待审），拒绝用 `clear-life-board-patch`。
+   - 纪律：改 `Status` 时同步修订失效的 `Active question` / `Next artifact` / `Stop condition`，`Status` 开头标 `updated [[YYYY-MM-DD]]`；高频明细留项目文件，已 `done` 轨道与旧日志入 `journal/life-board-archive.md`，主文件控在 24 KB 内。
 4. **Inbox Audit / Closure Check**：读取 `inbox/00-readme.md` 并判断待处理文件去向。默认只建议，不移动或删除；Henry 明确授权 flush/move 时才执行。
 4.5. **Calendar & Reminders Audit（直接写入）**：在 `Inbox Audit` 之后、`Daily Suggestion` 之前，回查当天所有记录（手写日记、AI traces、微信聊天记录、前一日遗留但尚未落地的行动），先用 `./tools/apple-eventkit/eventkit-ctl cal events --days 14` 与 `./tools/apple-eventkit/eventkit-ctl rem list --completed false` 读取存量并去重，再筛选真正需要白天弹窗触达的事项直接写入（宁缺毋滥，通常 `0–3` 条，没有则静默 `no-op`）：
    - **直写 Calendar（`cal add`）**：有明确日期与时间（或全天节点）且确定发生的实体日程（讲座、分享会、约见、调补课、已预约就诊/办事等）。含地点时优先通过 `tools/apple-eventkit/places.json`（`--place` / `--location`）写入标准中文地名，确保 iCloud 同步到 iPhone 后能正常触发「出发时间提醒」。

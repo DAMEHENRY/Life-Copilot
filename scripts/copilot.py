@@ -4,7 +4,8 @@ Life Copilot — lean orchestration utilities.
 
 Only structural write commands that are unsafe for the model to do freehand:
 writeback-journal, writeback-thought, writeback-chat-capture,
-writeback-daily-suggestion, writeback-life-board, writeback-ai-day,
+writeback-daily-suggestion, writeback-life-board, stage-life-board-patch,
+clear-life-board-patch, writeback-ai-day,
 day-timeline, finalize-ai-day, refresh-ai-day, sync-web-chats, web-chats-status,
 install-web-chats,
 writeback-memory, maintain-memory, maintain-page, append-insight, compact-memory,
@@ -5659,11 +5660,62 @@ LIFE_BOARD_STATUS_RE = re.compile(
     r"(?im)^-\s+\*\*Status\*\*:\s*`(active|waiting|paused|done)`"
 )
 LIFE_BOARD_ALLOWED_STATUSES = {"active", "waiting", "paused", "done"}
+LIFE_BOARD_TRACK_STALE_DAYS = 14
+LIFE_BOARD_TRACK_UPDATED_RE = re.compile(
+    r"(?i)\bupdated\s+\[\[(\d{4}-\d{2}-\d{2})\]\]"
+)
+LIFE_BOARD_WIKILINK_DATE_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})\]\]")
+LIFE_BOARD_PENDING_PROPOSED_RE = re.compile(
+    r"(?im)^>?\s*Proposed:\s*\[\[(\d{4}-\d{2}-\d{2})\]\]\s*$"
+)
+
+
+def life_board_pending_patch_path() -> Path:
+    return JOURNAL_DIR / "life-board-pending-patch.md"
 
 
 def parse_life_board_last_updated(board_text: str) -> Optional[date]:
     m = LIFE_BOARD_LAST_UPDATED_RE.search(board_text)
     return parse_date_str(m.group(1)) if m else None
+
+
+def parse_life_board_track_status(body: str) -> Optional[str]:
+    m = LIFE_BOARD_STATUS_RE.search(body)
+    return m.group(1).lower() if m else None
+
+
+def parse_life_board_track_last_updated(body: str, target: date) -> Optional[date]:
+    explicit = LIFE_BOARD_TRACK_UPDATED_RE.search(body)
+    if explicit:
+        try:
+            return parse_date_str(explicit.group(1))
+        except ValueError:
+            pass
+
+    status_match = LIFE_BOARD_STATUS_RE.search(body)
+    if not status_match:
+        return None
+    line_end = body.find("\n", status_match.start())
+    status_line = body[status_match.start() : (len(body) if line_end == -1 else line_end)]
+    dates: List[date] = []
+    for raw in LIFE_BOARD_WIKILINK_DATE_RE.findall(status_line):
+        try:
+            d = parse_date_str(raw)
+        except ValueError:
+            continue
+        if d <= target:
+            dates.append(d)
+    return max(dates) if dates else None
+
+
+def parse_pending_patch_date(patch_text: str) -> Optional[date]:
+    m = LIFE_BOARD_PENDING_PROPOSED_RE.search(patch_text)
+    if not m:
+        return None
+    try:
+        return parse_date_str(m.group(1))
+    except ValueError:
+        return None
 
 
 def has_life_board_explicit_trigger(journal_text: str) -> bool:
@@ -5678,9 +5730,41 @@ def audit_life_board(target: date) -> Dict[str, object]:
         raise FileNotFoundError(f"Life Board not found: {LIFE_BOARD_FILE}")
 
     board_text = read_text(LIFE_BOARD_FILE)
+    board_bytes = len(board_text.encode("utf-8"))
+    over_size_budget = board_bytes > READ_BUDGET_BYTES
     last_updated = parse_life_board_last_updated(board_text)
     days_since_update = (target - last_updated).days if last_updated else None
     due = last_updated is None or (days_since_update is not None and days_since_update >= 7)
+
+    track_freshness: List[Dict[str, object]] = []
+    stale_tracks: List[Dict[str, object]] = []
+    for title, body in split_life_board_track_sections(board_text):
+        track_status = parse_life_board_track_status(body)
+        track_updated = parse_life_board_track_last_updated(body, target)
+        track_days = (target - track_updated).days if track_updated else None
+        is_stale = (
+            track_status in {"active", "waiting"}
+            and track_days is not None
+            and track_days >= LIFE_BOARD_TRACK_STALE_DAYS
+        )
+        entry: Dict[str, object] = {
+            "title": title,
+            "status": track_status,
+            "last_updated": track_updated.isoformat() if track_updated else None,
+            "days_since_update": track_days,
+            "stale": is_stale,
+        }
+        track_freshness.append(entry)
+        if is_stale:
+            stale_tracks.append(entry)
+
+    pending_path = life_board_pending_patch_path()
+    pending_text = read_text(pending_path) if pending_path.exists() else ""
+    pending_patch = bool(pending_text.strip())
+    pending_patch_date = parse_pending_patch_date(pending_text) if pending_patch else None
+    pending_patch_age_days = (
+        (target - pending_patch_date).days if pending_patch_date else None
+    )
 
     jp = journal_path_for_date(target)
     journal_exists = jp.exists()
@@ -5693,16 +5777,32 @@ def audit_life_board(target: date) -> Dict[str, object]:
         reasons.append("last_updated_older_than_7_days")
     if explicit_trigger:
         reasons.append("journal_explicit_trigger")
+    if stale_tracks:
+        reasons.append("stale_active_tracks")
+    if over_size_budget:
+        reasons.append("board_over_read_budget")
+    if pending_patch:
+        reasons.append("pending_patch_unreviewed")
 
     return {
         "date": target.isoformat(),
         "board_path": str(LIFE_BOARD_FILE),
+        "board_bytes": board_bytes,
+        "size_budget_bytes": READ_BUDGET_BYTES,
+        "over_size_budget": over_size_budget,
         "journal_path": str(jp),
         "journal_exists": journal_exists,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "days_since_update": days_since_update,
         "due": due,
         "explicit_trigger": explicit_trigger,
+        "track_stale_days_threshold": LIFE_BOARD_TRACK_STALE_DAYS,
+        "stale_tracks": stale_tracks,
+        "track_freshness": track_freshness,
+        "pending_patch": pending_patch,
+        "pending_patch_path": str(pending_path) if pending_patch else None,
+        "pending_patch_date": pending_patch_date.isoformat() if pending_patch_date else None,
+        "pending_patch_age_days": pending_patch_age_days,
         "needs_audit": bool(reasons),
         "reasons": reasons,
     }
@@ -5720,14 +5820,41 @@ def cmd_audit_life_board(args: argparse.Namespace) -> None:
     print(f"- date: {result['date']}")
     print(f"- last_updated: {result['last_updated'] or '(missing)'}")
     print(f"- days_since_update: {result['days_since_update']}")
+    print(
+        f"- board_bytes: {result['board_bytes']:,} / {result['size_budget_bytes']:,}"
+        + (" (OVER BUDGET — archive closed tracks / trim old logs)" if result["over_size_budget"] else "")
+    )
     print(f"- due: {result['due']}")
     print(f"- explicit_trigger: {result['explicit_trigger']}")
+    stale_tracks = result["stale_tracks"]
+    if stale_tracks:
+        print(f"- stale_tracks (>={result['track_stale_days_threshold']}d):")
+        for item in stale_tracks:  # type: ignore[union-attr]
+            print(
+                f"  - {item['title']} ({item['status']}, last updated {item['last_updated']}, {item['days_since_update']}d ago)"
+            )
+    if result["pending_patch"]:
+        age_str = (
+            f", {result['pending_patch_age_days']}d old"
+            if result["pending_patch_age_days"] is not None
+            else ""
+        )
+        proposed_str = result["pending_patch_date"] or "unknown date"
+        print(f"- pending_patch: {result['pending_patch_path']} (proposed {proposed_str}{age_str})")
     if result["reasons"]:
         print("- reasons:")
         for reason in result["reasons"]:  # type: ignore[union-attr]
             print(f"  - {reason}")
     if result["needs_audit"]:
-        print("Next step: include a Proposed Life Board Patch in the final response; do not edit life-board.md without Henry approval.")
+        print(
+            "Next step: stage a minimal patch via stage-life-board-patch (merging with any existing pending patch) "
+            "and surface a brief reminder in tomorrow's Daily Suggestion; do not edit life-board.md without Henry approval."
+        )
+    else:
+        print(
+            "Note: still run an event-driven check against today's diary/traces (rule/deadline change, locked milestone, "
+            "expired stop window, or direct drift); if any occurred, stage a minimal patch via stage-life-board-patch."
+        )
 
 
 # Largest single tool output every agent can count on receiving whole. This is
@@ -6942,6 +7069,48 @@ def set_life_board_last_updated(board_text: str, target: date) -> str:
     return board_text.rstrip() + "\n\n---\n\n" + line + "\n"
 
 
+def stage_life_board_patch(target: date, patch_text: str) -> Path:
+    body = patch_text.strip()
+    if not body:
+        raise ValueError("Pending Life Board patch input cannot be empty")
+    proposed_line = f"> Proposed: [[{target.isoformat()}]]"
+    if LIFE_BOARD_PENDING_PROPOSED_RE.search(body):
+        rendered = LIFE_BOARD_PENDING_PROPOSED_RE.sub(proposed_line, body, count=1).rstrip() + "\n"
+    else:
+        header = (
+            "# Life Board Pending Patch\n\n"
+            f"{proposed_line}\n"
+            "> Status: pending Henry's confirmation (apply via `writeback-life-board` after approval, or dismiss via `clear-life-board-patch`).\n\n"
+        )
+        rendered = header + body + "\n"
+    out_path = life_board_pending_patch_path()
+    write_text(out_path, rendered)
+    return out_path
+
+
+def clear_life_board_patch() -> bool:
+    path = life_board_pending_patch_path()
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def cmd_stage_life_board_patch(args: argparse.Namespace) -> None:
+    target = parse_date_str(args.date)
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    out_path = stage_life_board_patch(target, read_text(input_path))
+    print(str(out_path))
+
+
+def cmd_clear_life_board_patch(args: argparse.Namespace) -> None:
+    path = life_board_pending_patch_path()
+    cleared = clear_life_board_patch()
+    print(f"Cleared pending patch: {path}" if cleared else f"No pending patch to clear: {path}")
+
+
 def cmd_writeback_life_board(args: argparse.Namespace) -> None:
     target = parse_date_str(args.date)
     input_path = Path(args.input_file)
@@ -6953,6 +7122,9 @@ def cmd_writeback_life_board(args: argparse.Namespace) -> None:
     validate_life_board_text(updated)
     write_text(LIFE_BOARD_FILE, updated)
     print(str(LIFE_BOARD_FILE))
+    pending_path = life_board_pending_patch_path()
+    if clear_life_board_patch():
+        print(f"Cleared pending patch: {pending_path}")
 
 
 def render_diary_from_template(target_date: date) -> str:
@@ -10783,6 +10955,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--date", required=True, help="Approval date to stamp into the board Last updated line (YYYY-MM-DD).")
     s.add_argument("--input-file", required=True, help="Path to the approved replacement board markdown.")
     s.set_defaults(func=cmd_writeback_life_board)
+
+    s = sub.add_parser("stage-life-board-patch")
+    s.add_argument("--date", required=True, help="Proposal date to stamp into the pending patch (YYYY-MM-DD).")
+    s.add_argument("--input-file", required=True, help="Path to the proposed minimal Life Board patch markdown.")
+    s.set_defaults(func=cmd_stage_life_board_patch)
+
+    s = sub.add_parser("clear-life-board-patch")
+    s.set_defaults(func=cmd_clear_life_board_patch)
 
     s = sub.add_parser("writeback-codex-thread")
     g = s.add_mutually_exclusive_group()

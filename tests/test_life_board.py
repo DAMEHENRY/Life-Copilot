@@ -18,8 +18,13 @@ os.chdir(str(ROOT))
 from scripts import copilot as copilot_module
 from scripts.copilot import (
     audit_life_board,
+    clear_life_board_patch,
+    cmd_clear_life_board_patch,
+    cmd_stage_life_board_patch,
     cmd_writeback_life_board,
+    life_board_pending_patch_path,
     parse_life_board_last_updated,
+    stage_life_board_patch,
     validate_life_board_text,
 )
 
@@ -155,6 +160,107 @@ class TestLifeBoard(unittest.TestCase):
         updated = self.board_path.read_text(encoding="utf-8")
         self.assertIn("*Last updated: [[2026-07-07]]*", updated)
         self.assertNotIn("*Last updated: [[2026-06-04]]*", updated)
+
+    def test_audit_catches_stale_active_track_even_when_global_last_updated_is_recent(self):
+        board = "\n".join(
+            [
+                "# Life Board",
+                "",
+                "---",
+                "",
+                "## Fresh Track",
+                "",
+                "- **Active question**: Active fresh?",
+                "- **Next artifact**: Keep going.",
+                "- **Stop condition**: Done.",
+                "- **Status**: `active` — updated [[2026-07-06]].",
+                "",
+                "---",
+                "",
+                "## Old Active Track",
+                "",
+                "- **Active question**: Still valid?",
+                "- **Next artifact**: Check.",
+                "- **Stop condition**: Closed.",
+                "- **Status**: `active` — updated [[2026-06-20]].",
+                "",
+                "---",
+                "",
+                "## Old Paused Track",
+                "",
+                "- **Active question**: Parked.",
+                "- **Next artifact**: None.",
+                "- **Stop condition**: Reopen later.",
+                "- **Status**: `paused` — updated [[2026-05-01]].",
+                "",
+                "---",
+                "",
+                "## Seeds",
+                "",
+                "See [[seeds/00-index]].",
+                "",
+                "---",
+                "",
+                "*Last updated: [[2026-07-06]]*",
+                "",
+            ]
+        )
+        self.set_board(board)
+        result = audit_life_board(date(2026, 7, 7))
+        self.assertTrue(result["needs_audit"])
+        self.assertFalse(result["due"])
+        self.assertIn("stale_active_tracks", result["reasons"])
+        stale_titles = [item["title"] for item in result["stale_tracks"]]
+        self.assertEqual(stale_titles, ["Old Active Track"])
+        self.assertEqual(result["stale_tracks"][0]["days_since_update"], 17)
+
+    def test_audit_flags_board_over_read_budget(self):
+        filler = "x" * 25_000
+        board = _board_text(
+            "2026-07-06",
+            status_line=f"- **Status**: `active` — updated [[2026-07-06]]. {filler}",
+        )
+        self.set_board(board)
+        result = audit_life_board(date(2026, 7, 7))
+        self.assertTrue(result["needs_audit"])
+        self.assertTrue(result["over_size_budget"])
+        self.assertIn("board_over_read_budget", result["reasons"])
+
+    def test_stage_audit_and_clear_pending_patch_lifecycle(self):
+        self.set_board(_board_text("2026-07-06", status_line="- **Status**: `active` — updated [[2026-07-06]]."))
+        patch_input = self.root / "patch.md"
+        patch_input.write_text("## Study / Reading\n\n- Update next artifact.\n", encoding="utf-8")
+
+        cmd_stage_life_board_patch(
+            SimpleNamespace(date="2026-07-06", input_file=str(patch_input))
+        )
+        pending_file = life_board_pending_patch_path()
+        self.assertTrue(pending_file.exists())
+
+        result = audit_life_board(date(2026, 7, 7))
+        self.assertTrue(result["needs_audit"])
+        self.assertTrue(result["pending_patch"])
+        self.assertEqual(result["pending_patch_date"], "2026-07-06")
+        self.assertEqual(result["pending_patch_age_days"], 1)
+        self.assertIn("pending_patch_unreviewed", result["reasons"])
+
+        # Applying board writeback clears the pending patch automatically.
+        replacement = self.root / "replacement.md"
+        replacement.write_text(
+            _board_text("2026-07-06", status_line="- **Status**: `active` — updated [[2026-07-07]]."),
+            encoding="utf-8",
+        )
+        cmd_writeback_life_board(
+            SimpleNamespace(date="2026-07-07", input_file=str(replacement))
+        )
+        self.assertFalse(pending_file.exists())
+
+        # Staging and explicitly clearing via clear-life-board-patch also works.
+        stage_life_board_patch(date(2026, 7, 7), "Another proposed patch")
+        self.assertTrue(pending_file.exists())
+        cmd_clear_life_board_patch(SimpleNamespace())
+        self.assertFalse(pending_file.exists())
+        self.assertFalse(clear_life_board_patch())
 
 
 if __name__ == "__main__":

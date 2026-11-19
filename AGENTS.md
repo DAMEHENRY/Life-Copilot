@@ -126,7 +126,7 @@ Diary Completion Contract 中的记忆维护在后台自动执行：先检索和
 
 ## Active Board / Inbox / Seeds
 
-`life-board.md` 是 slow-variable context map，不是 todo list。每个 track 只有 Active question、Next artifact、Stop condition、Status。Diary Completion Contract 只审计并提出 patch；未经 Henry 确认不 apply。
+`life-board.md` 是 slow-variable context map，不是 todo list。每个 track 只有 Active question、Next artifact、Stop condition、Status（`Status` 开头标 `updated [[YYYY-MM-DD]]`）；已关闭轨道与旧日志归档在 `journal/life-board-archive.md`，高频明细留在项目文件，主文件保持在 24 KB（一次整读）以内。Diary Completion Contract 第 3 步结合 `audit-life-board`（逐轨 14 天新鲜度、24 KB 体积与未审补丁检查）与当天事件驱动变化提出最小 patch，落盘至 `journal/life-board-pending-patch.md`（`stage-life-board-patch`）并在次日 `Daily Suggestion` 轻提醒；未经 Henry 确认不 apply，确认后用 `writeback-life-board` 写回并自动清除待审文件，拒绝用 `clear-life-board-patch`。
 
 Henry 说“加到我的 reminder”时，目标是 macOS 提醒事项的 `Backlog` 列表；优先用 `./tools/apple-eventkit/eventkit-ctl` 读写并回查，不把它改写成 Life `inbox/` 项。写日历地点时优先使用 `tools/apple-eventkit/places.json` 中的精确中文地名（`--place` / `--location`），不在 Mac 非国区环境下自动覆写坐标，保持 iCloud 同步到 iPhone 后由国行地图计算「出发时间提醒」。
 
