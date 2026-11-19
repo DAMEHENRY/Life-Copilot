@@ -58,6 +58,11 @@ enum DateHelper {
         return isoFormatter.string(from: date)
     }
 
+    static func isDateOnly(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+    }
+
     static func parse(_ raw: String) throws -> Date {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let d = isoFractionalFormatter.date(from: s) ?? isoFormatter.date(from: s) {
@@ -227,7 +232,7 @@ func parseArgs(_ args: [String]) throws -> ParsedArgs {
                 let val = String(key[key.index(after: eqIdx)...])
                 result.options[name] = val
             } else {
-                let booleanFlags: Set<String> = ["all-day", "undo", "clear-due", "help", "best-effort", "all-calendars"]
+                let booleanFlags: Set<String> = ["all-day", "undo", "clear-due", "help", "best-effort", "all-calendars", "no-alarm"]
                 if booleanFlags.contains(key) {
                     result.flags.insert(key)
                 } else {
@@ -298,8 +303,52 @@ func serializeCalendar(_ cal: EKCalendar) -> [String: Any] {
     ]
 }
 
+func parseAlertOffsets(_ raw: String) throws -> [TimeInterval] {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return [] }
+    let lower = trimmed.lowercased()
+    if lower == "none" || lower == "off" {
+        return []
+    }
+    var out: [TimeInterval] = []
+    for part in trimmed.split(separator: ",") {
+        let token = part.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if token.isEmpty || token == "none" || token == "off" {
+            continue
+        }
+        if token == "9am" || token == "09:00" {
+            out.append(TimeInterval(9 * 3600))
+            continue
+        }
+        let cleaned = token.hasSuffix("m") ? String(token.dropLast()) : token
+        guard let mins = Int(cleaned) else {
+            throw CLIError(message: "Invalid --alert '\(raw)'. Use integer minutes (e.g. -30, -15,0, 540), '9am', or 'none'.")
+        }
+        out.append(TimeInterval(mins * 60))
+    }
+    return out
+}
+
+func defaultCalendarAlertOffsets(allDay: Bool, location: String?) -> [TimeInterval] {
+    if allDay {
+        return [TimeInterval(9 * 3600)]
+    }
+    let hasLoc = !(location ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    if hasLoc {
+        return []
+    }
+    return [TimeInterval(-30 * 60)]
+}
+
 func serializeEvent(_ ev: EKEvent) -> [String: Any] {
-    [
+    let alertMinutes: [Int] = (ev.alarms ?? []).compactMap { alarm in
+        guard alarm.structuredLocation == nil else { return nil }
+        if let abs = alarm.absoluteDate, let start = ev.startDate {
+            return Int(round(abs.timeIntervalSince(start) / 60.0))
+        }
+        return Int(round(alarm.relativeOffset / 60.0))
+    }
+    return [
         "id": ev.eventIdentifier ?? "",
         "title": ev.title ?? "",
         "calendar": ev.calendar?.title ?? "",
@@ -312,6 +361,7 @@ func serializeEvent(_ ev: EKEvent) -> [String: Any] {
         "url": ev.url?.absoluteString ?? NSNull(),
         "hasRecurrenceRules": ev.hasRecurrenceRules,
         "isDetached": ev.isDetached,
+        "alerts": alertMinutes,
     ]
 }
 
@@ -380,6 +430,17 @@ func parseProximity(_ raw: String?) throws -> EKAlarmProximity {
 func serializeReminder(_ rem: EKReminder) -> [String: Any] {
     let cal = Calendar.current
     let due: Date? = rem.dueDateComponents.flatMap { cal.date(from: $0) }
+    let isAllDayDue: Bool = {
+        guard let dc = rem.dueDateComponents else { return false }
+        return dc.hour == nil && dc.minute == nil
+    }()
+    let timedAlarms: [String] = (rem.alarms ?? []).compactMap { alarm in
+        guard alarm.structuredLocation == nil else { return nil }
+        if let abs = alarm.absoluteDate {
+            return DateHelper.isoFormatter.string(from: abs)
+        }
+        return nil
+    }
     return [
         "id": rem.calendarItemIdentifier,
         "title": rem.title ?? "",
@@ -388,6 +449,8 @@ func serializeReminder(_ rem: EKReminder) -> [String: Any] {
         "completed": rem.isCompleted,
         "completionDate": DateHelper.format(rem.completionDate),
         "dueDate": DateHelper.format(due),
+        "allDayDue": isAllDayDue,
+        "alarms": timedAlarms,
         "priority": rem.priority,
         "notes": rem.notes ?? NSNull(),
         "url": rem.url?.absoluteString ?? NSNull(),
@@ -748,14 +811,14 @@ func printHelp() {
 
       eventkit-ctl cal lists
       eventkit-ctl cal events [--from ISO] [--to ISO] [--days N] [--calendar NAME_OR_ID] [--query TEXT]
-      eventkit-ctl cal add --title TEXT --start ISO [--end ISO | --duration MIN] [--calendar NAME_OR_ID] [--all-day] [--place KEY_OR_ALIAS | --location TEXT] [--notes TEXT] [--url URL]
-      eventkit-ctl cal update --id ID [--title TEXT] [--start ISO] [--end ISO] [--calendar NAME_OR_ID] [--place KEY_OR_ALIAS | --location TEXT] [--notes TEXT] [--url URL] [--span this|future]
+      eventkit-ctl cal add --title TEXT --start ISO [--end ISO | --duration MIN] [--calendar NAME_OR_ID] [--all-day] [--place KEY_OR_ALIAS | --location TEXT] [--alert MIN_LIST|9am|none] [--notes TEXT] [--url URL]
+      eventkit-ctl cal update --id ID [--title TEXT] [--start ISO] [--end ISO] [--calendar NAME_OR_ID] [--place KEY_OR_ALIAS | --location TEXT] [--alert MIN_LIST|9am|none] [--notes TEXT] [--url URL] [--span this|future]
       eventkit-ctl cal delete --id ID [--span this|future]
 
       eventkit-ctl rem lists
       eventkit-ctl rem list [--list NAME_OR_ID] [--completed true|false|all] [--due-before ISO] [--query TEXT]
-      eventkit-ctl rem add --title TEXT [--list NAME_OR_ID] [--due ISO] [--priority 0|1|5|9|none|low|medium|high] [--place KEY_OR_ALIAS | --location TEXT] [--lat LAT --lon LON --radius M --proximity enter|leave] [--notes TEXT] [--url URL]
-      eventkit-ctl rem update --id ID [--title TEXT] [--list NAME_OR_ID] [--due ISO | --clear-due] [--priority ...] [--place KEY_OR_ALIAS | --location TEXT] [--notes TEXT] [--url URL] [--completed true|false]
+      eventkit-ctl rem add --title TEXT [--list NAME_OR_ID] [--due ISO] [--no-alarm] [--priority 0|1|5|9|none|low|medium|high] [--place KEY_OR_ALIAS | --location TEXT] [--lat LAT --lon LON --radius M --proximity enter|leave] [--notes TEXT] [--url URL]
+      eventkit-ctl rem update --id ID [--title TEXT] [--list NAME_OR_ID] [--due ISO | --clear-due] [--no-alarm] [--priority ...] [--place KEY_OR_ALIAS | --location TEXT] [--notes TEXT] [--url URL] [--completed true|false]
       eventkit-ctl rem complete --id ID [--undo]
       eventkit-ctl rem delete --id ID
     """
@@ -795,6 +858,56 @@ func handleAuthorize(_ store: EKEventStore, parsed: ParsedArgs) throws {
     if let c = calGranted { out["calendarGranted"] = c }
     if let r = remGranted { out["remindersGranted"] = r }
     printJSON(out)
+}
+
+func applyCalendarAlerts(_ ev: EKEvent, alertOpt: String?, isNewEvent: Bool) throws {
+    let offsets: [TimeInterval]
+    if let raw = alertOpt {
+        offsets = try parseAlertOffsets(raw)
+    } else if isNewEvent {
+        offsets = defaultCalendarAlertOffsets(allDay: ev.isAllDay, location: ev.location)
+    } else {
+        return
+    }
+    for existing in ev.alarms ?? [] where existing.structuredLocation == nil {
+        ev.removeAlarm(existing)
+    }
+    for offset in offsets {
+        ev.addAlarm(EKAlarm(relativeOffset: offset))
+    }
+}
+
+func applyReminderDue(_ rem: EKReminder, dueRaw: String?, clearDue: Bool, noAlarm: Bool) throws {
+    if clearDue {
+        rem.dueDateComponents = nil
+        for existing in rem.alarms ?? [] where existing.structuredLocation == nil {
+            rem.removeAlarm(existing)
+        }
+        return
+    }
+    if let dueRaw = dueRaw {
+        let dueDate = try DateHelper.parse(dueRaw)
+        for existing in rem.alarms ?? [] where existing.structuredLocation == nil {
+            rem.removeAlarm(existing)
+        }
+        if DateHelper.isDateOnly(dueRaw) {
+            rem.dueDateComponents = Calendar.current.dateComponents([.year, .month, .day], from: dueDate)
+        } else {
+            rem.dueDateComponents = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute, .second],
+                from: dueDate
+            )
+            if !noAlarm {
+                rem.addAlarm(EKAlarm(absoluteDate: dueDate))
+            }
+        }
+        return
+    }
+    if noAlarm {
+        for existing in rem.alarms ?? [] where existing.structuredLocation == nil {
+            rem.removeAlarm(existing)
+        }
+    }
 }
 
 func handleCal(_ store: EKEventStore, sub: String, parsed: ParsedArgs) throws {
@@ -854,15 +967,16 @@ func handleCal(_ store: EKEventStore, sub: String, parsed: ParsedArgs) throws {
         guard let startRaw = parsed.options["start"] else {
             throw CLIError(message: "Missing required --start")
         }
-        let startDate = try DateHelper.parse(startRaw)
+        let parsedStart = try DateHelper.parse(startRaw)
         let allDay = parsed.flags.contains("all-day")
+        let startDate = allDay ? Calendar.current.startOfDay(for: parsedStart) : parsedStart
         let endDate: Date
         if let endRaw = parsed.options["end"] {
             endDate = try DateHelper.parse(endRaw)
         } else if let durRaw = parsed.options["duration"], let mins = Int(durRaw) {
             endDate = startDate.addingTimeInterval(TimeInterval(mins * 60))
         } else if allDay {
-            endDate = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: startDate)) ?? startDate.addingTimeInterval(86400)
+            endDate = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: startDate) ?? startDate.addingTimeInterval(86399)
         } else {
             endDate = startDate.addingTimeInterval(3600)
         }
@@ -885,6 +999,7 @@ func handleCal(_ store: EKEventStore, sub: String, parsed: ParsedArgs) throws {
         if let loc = parsed.options["location"] { ev.location = loc }
         if let notes = parsed.options["notes"] { ev.notes = notes }
         if let urlStr = parsed.options["url"] { ev.url = URL(string: urlStr) }
+        try applyCalendarAlerts(ev, alertOpt: parsed.options["alert"], isNewEvent: true)
 
         try store.save(ev, span: .thisEvent, commit: true)
         _ = try? generateSnapshot(store, days: 30, outURL: defaultSnapshotURL(), maxAgeSec: nil, bestEffort: true)
@@ -906,6 +1021,7 @@ func handleCal(_ store: EKEventStore, sub: String, parsed: ParsedArgs) throws {
         if let loc = parsed.options["location"] { ev.location = loc }
         if let notes = parsed.options["notes"] { ev.notes = notes }
         if let urlStr = parsed.options["url"] { ev.url = URL(string: urlStr) }
+        try applyCalendarAlerts(ev, alertOpt: parsed.options["alert"], isNewEvent: false)
         let span = try parseSpan(parsed.options["span"])
         try store.save(ev, span: span, commit: true)
         _ = try? generateSnapshot(store, days: 30, outURL: defaultSnapshotURL(), maxAgeSec: nil, bestEffort: true)
@@ -996,13 +1112,12 @@ func handleRem(_ store: EKEventStore, sub: String, parsed: ParsedArgs) throws {
         let rem = EKReminder(eventStore: store)
         rem.title = title
         rem.calendar = targetList
-        if let dueRaw = parsed.options["due"] {
-            let dueDate = try DateHelper.parse(dueRaw)
-            rem.dueDateComponents = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second],
-                from: dueDate
-            )
-        }
+        try applyReminderDue(
+            rem,
+            dueRaw: parsed.options["due"],
+            clearDue: false,
+            noAlarm: parsed.flags.contains("no-alarm")
+        )
         if let prioRaw = parsed.options["priority"] {
             rem.priority = try parsePriority(prioRaw)
         }
@@ -1028,15 +1143,12 @@ func handleRem(_ store: EKEventStore, sub: String, parsed: ParsedArgs) throws {
         if let listRef = parsed.options["list"] {
             rem.calendar = try resolveCalendar(store, titleOrId: listRef, entityType: .reminder)
         }
-        if parsed.flags.contains("clear-due") {
-            rem.dueDateComponents = nil
-        } else if let dueRaw = parsed.options["due"] {
-            let dueDate = try DateHelper.parse(dueRaw)
-            rem.dueDateComponents = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second],
-                from: dueDate
-            )
-        }
+        try applyReminderDue(
+            rem,
+            dueRaw: parsed.options["due"],
+            clearDue: parsed.flags.contains("clear-due"),
+            noAlarm: parsed.flags.contains("no-alarm")
+        )
         if let prioRaw = parsed.options["priority"] {
             rem.priority = try parsePriority(prioRaw)
         }

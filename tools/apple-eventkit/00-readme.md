@@ -32,6 +32,7 @@ swiftc -O tools/apple-eventkit/main.swift \
 ./tools/apple-eventkit/eventkit-ctl cal events --from 2026-11-16 --days 3 --calendar "Calendar"
 
 # 新建日程（默认时长 60 分钟；支持 --place 别名或 --location 自动匹配常用地名表）
+# 默认提醒策略：非全天且无地点默认提前 30 分钟（-30）；有地点留空交由苹果计算「出发时间提醒」；全天日程默认当天 09:00（+540）；可用 --alert 覆盖（如 --alert -15,0 / --alert 9am / --alert none）
 ./tools/apple-eventkit/eventkit-ctl cal add --title "1:1" --start "2026-11-17T10:00:00+08:00" --duration 30
 ./tools/apple-eventkit/eventkit-ctl cal add --title "上课" --start "2026-11-17T15:20:00+08:00" --place "求索楼"
 
@@ -39,7 +40,7 @@ swiftc -O tools/apple-eventkit/main.swift \
 ./tools/apple-eventkit/eventkit-ctl places
 
 # 更新 / 删除日程
-./tools/apple-eventkit/eventkit-ctl cal update --id "<event-id>" --title "New Title"
+./tools/apple-eventkit/eventkit-ctl cal update --id "<event-id>" --title "New Title" --alert -15
 ./tools/apple-eventkit/eventkit-ctl cal delete --id "<event-id>"
 ```
 
@@ -54,7 +55,7 @@ swiftc -O tools/apple-eventkit/main.swift \
 # 查询未完成提醒
 ./tools/apple-eventkit/eventkit-ctl rem list --list Backlog
 
-# 新建提醒
+# 新建提醒（带具体时刻默认同时写 EKAlarm 到点弹窗，可用 --no-alarm 关闭；纯日期 YYYY-MM-DD 仅设日期不写闹钟，走 iPhone 全天提醒时间）
 ./tools/apple-eventkit/eventkit-ctl rem add --list Backlog --title "整理周报" --due "2026-11-17 18:00" --priority medium
 
 # 更新 / 完成 / 删除提醒

@@ -40,6 +40,39 @@ function formatISO(date) {
   );
 }
 
+function isDateOnly(raw) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(raw).trim());
+}
+
+function parseAlertOffsets(raw) {
+  const trimmed = String(raw).trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
+  if (lower === "none" || lower === "off") return [];
+  const out = [];
+  for (const part of trimmed.split(",")) {
+    const token = part.trim().toLowerCase();
+    if (!token || token === "none" || token === "off") continue;
+    if (token === "9am" || token === "09:00") {
+      out.push(540);
+      continue;
+    }
+    const cleaned = token.endsWith("m") ? token.slice(0, -1) : token;
+    const mins = Number(cleaned);
+    if (!Number.isInteger(mins)) {
+      fail("Invalid --alert '" + raw + "'. Use integer minutes (e.g. -30, -15,0, 540), '9am', or 'none'.");
+    }
+    out.push(mins);
+  }
+  return out;
+}
+
+function defaultCalendarAlertOffsets(allDay, location) {
+  if (allDay) return [540];
+  if (location && String(location).trim() !== "") return [];
+  return [-30];
+}
+
 function parseDate(raw) {
   const s = String(raw).trim();
   // Date-only: YYYY-MM-DD -> local 00:00:00
@@ -117,6 +150,19 @@ function defaultCalendar(calApp) {
 }
 
 function serializeEvent(ev, calName) {
+  const alerts = [];
+  try {
+    for (const a of ev.displayAlarms()) {
+      const v = safeProp(() => a.triggerInterval(), null);
+      if (v !== null) alerts.push(v);
+    }
+  } catch (e) {}
+  try {
+    for (const a of ev.soundAlarms()) {
+      const v = safeProp(() => a.triggerInterval(), null);
+      if (v !== null && !alerts.includes(v)) alerts.push(v);
+    }
+  } catch (e) {}
   return {
     id: safeProp(() => ev.uid(), ""),
     title: safeProp(() => ev.summary(), ""),
@@ -127,12 +173,14 @@ function serializeEvent(ev, calName) {
     location: safeProp(() => ev.location(), null),
     notes: safeProp(() => ev.description(), null),
     url: safeProp(() => ev.url(), null),
+    alerts: alerts,
   };
 }
 
 function findEventById(calApp, id) {
   const cals = calApp.calendars();
   for (const c of cals) {
+    if (!safeProp(() => c.writable(), false)) continue;
     try {
       const matches = c.events.whose({ uid: id })();
       if (matches && matches.length > 0) {
@@ -158,6 +206,7 @@ function resolveReminderList(remApp, nameOrId) {
 }
 
 function serializeReminder(rem, listName, listId) {
+  const rmd = formatISO(safeProp(() => rem.remindMeDate(), null));
   return {
     id: safeProp(() => rem.id(), ""),
     title: safeProp(() => rem.name(), ""),
@@ -166,6 +215,7 @@ function serializeReminder(rem, listName, listId) {
     completed: Boolean(safeProp(() => rem.completed(), false)),
     completionDate: formatISO(safeProp(() => rem.completionDate(), null)),
     dueDate: formatISO(safeProp(() => rem.dueDate(), null)),
+    alarms: rmd ? [rmd] : [],
     priority: safeProp(() => rem.priority(), 0),
     notes: safeProp(() => rem.body(), null),
   };
@@ -249,19 +299,46 @@ function handleCal(sub, options, flags) {
     };
   }
 
+function applyCalendarAlerts(calApp, ev, alertOpt, isNewEvent, allDay, location) {
+  let offsets;
+  if (alertOpt !== undefined) {
+    offsets = parseAlertOffsets(alertOpt);
+  } else if (isNewEvent) {
+    offsets = defaultCalendarAlertOffsets(allDay, location);
+  } else {
+    return;
+  }
+  let existingCount = 0;
+  try {
+    existingCount = ev.displayAlarms().length;
+  } catch (e) {}
+  if (offsets.length < existingCount) {
+    fail("Calendar JXA backend cannot remove existing alarms (grant Calendar Full Access for EventKit backend to clear/reduce alarms).");
+  }
+  for (let i = 0; i < offsets.length; i++) {
+    if (i < existingCount) {
+      ev.displayAlarms[i].triggerInterval = offsets[i];
+    } else {
+      ev.displayAlarms.push(calApp.DisplayAlarm({ triggerInterval: offsets[i] }));
+    }
+  }
+}
+
   if (sub === "add") {
     if (!options.title) fail("Missing required --title");
     if (!options.start) fail("Missing required --start");
-    const startDate = parseDate(options.start);
+    const parsedStart = parseDate(options.start);
     const allDay = flags.includes("all-day");
+    const startDate = allDay
+      ? new Date(parsedStart.getFullYear(), parsedStart.getMonth(), parsedStart.getDate(), 0, 0, 0, 0)
+      : parsedStart;
     let endDate;
     if (options.end) {
       endDate = parseDate(options.end);
     } else if (options.duration) {
       endDate = new Date(startDate.getTime() + Number(options.duration) * 60 * 1000);
     } else if (allDay) {
-      const sod = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate(), 0, 0, 0, 0);
-      endDate = new Date(sod.getTime() + 86400 * 1000);
+      endDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate(), 23, 59, 59, 0);
     } else {
       endDate = new Date(startDate.getTime() + 3600 * 1000);
     }
@@ -278,6 +355,7 @@ function handleCal(sub, options, flags) {
 
     const ev = calApp.Event(props);
     cal.events.push(ev);
+    applyCalendarAlerts(calApp, ev, options.alert, true, allDay, options.location);
     const calName = safeProp(() => cal.name(), "");
     return { ok: true, backend: "jxa", event: serializeEvent(ev, calName) };
   }
@@ -292,6 +370,14 @@ function handleCal(sub, options, flags) {
     if (options.location !== undefined) ev.location = options.location;
     if (options.notes !== undefined) ev.description = options.notes;
     if (options.url !== undefined) ev.url = options.url;
+    applyCalendarAlerts(
+      calApp,
+      ev,
+      options.alert,
+      false,
+      Boolean(safeProp(() => ev.alldayEvent(), false)),
+      safeProp(() => ev.location(), null)
+    );
     const calName = safeProp(() => found.calendar.name(), "");
     return { ok: true, backend: "jxa", event: serializeEvent(ev, calName) };
   }
@@ -357,7 +443,17 @@ function handleRem(sub, options, flags) {
     if (!options.title) fail("Missing required --title");
     const list = options.list ? resolveReminderList(remApp, options.list) : remApp.defaultList();
     const props = { name: options.title };
-    if (options.due !== undefined) props.dueDate = parseDate(options.due);
+    if (options.due !== undefined) {
+      const dueDate = parseDate(options.due);
+      if (isDateOnly(options.due)) {
+        props.alldayDueDate = dueDate;
+      } else {
+        props.dueDate = dueDate;
+        if (!flags.includes("no-alarm")) {
+          props.remindMeDate = dueDate;
+        }
+      }
+    }
     if (options.priority !== undefined) props.priority = parsePriority(options.priority);
     if (options.notes !== undefined) props.body = options.notes;
     const rem = remApp.Reminder(props);
@@ -375,8 +471,19 @@ function handleRem(sub, options, flags) {
     if (options.title !== undefined) rem.name = options.title;
     if (flags.includes("clear-due")) {
       rem.dueDate = null;
+      rem.alldayDueDate = null;
+      rem.remindMeDate = null;
     } else if (options.due !== undefined) {
-      rem.dueDate = parseDate(options.due);
+      const dueDate = parseDate(options.due);
+      if (isDateOnly(options.due)) {
+        rem.remindMeDate = null;
+        rem.alldayDueDate = dueDate;
+      } else {
+        rem.dueDate = dueDate;
+        rem.remindMeDate = flags.includes("no-alarm") ? null : dueDate;
+      }
+    } else if (flags.includes("no-alarm")) {
+      rem.remindMeDate = null;
     }
     if (options.priority !== undefined) rem.priority = parsePriority(options.priority);
     if (options.notes !== undefined) rem.body = options.notes;
